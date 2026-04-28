@@ -50,6 +50,20 @@ pub fn build(b: *std.Build) void {
     configurePano13Deps(b, upstream_probe.root_module);
     b.installArtifact(upstream_probe);
 
+    const match_probe = b.addExecutable(.{
+        .name = "match_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/match_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "align_stack_core", .module = core },
+            },
+        }),
+    });
+    configureImageDeps(match_probe.root_module);
+    b.installArtifact(match_probe);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
@@ -74,6 +88,14 @@ pub fn build(b: *std.Build) void {
     }
     const upstream_step = b.step("probe-upstream", "Run the upstream pano13 parity probe");
     upstream_step.dependOn(&run_upstream_probe.step);
+
+    const run_match_probe = b.addRunArtifact(match_probe);
+    run_match_probe.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_match_probe.addArgs(args);
+    }
+    const match_step = b.step("probe-match", "Run the image matching parity probe");
+    match_step.dependOn(&run_match_probe.step);
 
     const core_tests = b.addTest(.{
         .root_module = core,

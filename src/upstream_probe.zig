@@ -53,6 +53,20 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "equirect-point")) {
+        if (args.len < 6) usage();
+        const image_index = try std.fmt.parseInt(usize, args[3], 10);
+        const x = try std.fmt.parseFloat(f64, args[4]);
+        const y = try std.fmt.parseFloat(f64, args[5]);
+        if (image_index >= @as(usize, @intCast(info.numIm))) return error.ImageIndexOutOfRange;
+        const solve_x = try collectSolveVector(allocator, &info, args[6..]);
+        defer allocator.free(solve_x);
+        _ = c.SetAlignParams(solve_x.ptr);
+        const point = pointToEquirectDegrees(&info, image_index, x, y);
+        std.debug.print("lon={d:.12}\nlat={d:.12}\n", .{ point.x, point.y });
+        return;
+    }
+
     if (std.mem.eql(u8, command, "cp-error")) {
         if (args.len < 4) usage();
         const cp_index = try std.fmt.parseInt(usize, args[3], 10);
@@ -104,6 +118,7 @@ fn usage() noreturn {
         \\  upstream_probe solve-lm-params <pto>
         \\  upstream_probe solve-lm-params-zigminpack <pto>
         \\  upstream_probe image-vars <pto> [x...]
+        \\  upstream_probe equirect-point <pto> <image_index> <x> <y> [x...]
         \\  upstream_probe fvec <pto> <1|2|distance_only|componentwise> [x...]
         \\  upstream_probe jac-column <pto> <1|2|distance_only|componentwise> <param_index> [x...]
         \\  upstream_probe cp-error <pto> <cp_index> [x...]
@@ -287,6 +302,32 @@ fn runOptimizer(info: *c.AlignInfo) !void {
     opt.SetXToVars = c.SetAlignParams;
     opt.fcn = info.fcn;
     c.RunLMOptimizer(&opt);
+}
+
+const Point2 = struct {
+    x: f64,
+    y: f64,
+};
+
+fn pointToEquirectDegrees(info: *c.AlignInfo, image_index: usize, x: f64, y: f64) Point2 {
+    var sph = std.mem.zeroes(c.Image);
+    c.SetImageDefaults(&sph);
+    sph.width = 360;
+    sph.height = 180;
+    sph.format = c._equirectangular;
+    sph.hfov = 360.0;
+
+    var stack: [15]c.fDesc = undefined;
+    var mp = std.mem.zeroes(c.MakeParams);
+    c.SetInvMakeParams(&stack, &mp, &info.im[image_index], &sph, 0);
+
+    const h2 = @as(f64, @floatFromInt(info.im[image_index].height)) / 2.0 - 0.5;
+    const w2 = @as(f64, @floatFromInt(info.im[image_index].width)) / 2.0 - 0.5;
+
+    var out_x: f64 = 0.0;
+    var out_y: f64 = 0.0;
+    _ = c.execute_stack_new(x - w2, y - h2, &out_x, &out_y, &stack);
+    return .{ .x = out_x, .y = out_y };
 }
 
 const UpstreamSolveContext = struct {

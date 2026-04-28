@@ -62,6 +62,8 @@ pub fn lmdif(
     var fnorm = enorm(fvec);
     var par: f64 = 0.0;
     var iter: usize = 1;
+    var delta: f64 = 1.0e-4;
+    var xnorm: f64 = 1.0e-4;
 
     while (true) {
         try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
@@ -69,8 +71,6 @@ pub fn lmdif(
 
         qrfac(fjac, m, n, true, ipvt, wa1, wa2, wa3);
 
-        var delta: f64 = 1.0e-4;
-        var xnorm: f64 = 1.0e-4;
         if (iter == 1) {
             for (0..n) |j| {
                 diag[j] = if (wa2[j] == 0.0) 1.0 else wa2[j];

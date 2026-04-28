@@ -277,25 +277,7 @@ fn loadReducedGrayImage(
 ) RunError!gray.GrayImage {
     var decoded = try image_io.loadImage(allocator, path);
     defer decoded.deinit(allocator);
-
-    var gray_image = try gray.fromLoaded(allocator, &decoded);
-    errdefer gray_image.deinit(allocator);
-    gray.quantizeInPlace(&gray_image, decoded.info.sample_type);
-
-    if (pyr_level == 0) {
-        return gray_image;
-    }
-
-    var current = gray_image;
-    var level: u8 = 0;
-    while (level < pyr_level) : (level += 1) {
-        var next = try gray.reduceByHalf(allocator, &current);
-        gray.quantizeInPlace(&next, decoded.info.sample_type);
-        current.deinit(allocator);
-        current = next;
-    }
-
-    return current;
+    return gray.fromLoadedReducedLikeHugin(allocator, &decoded, pyr_level);
 }
 
 fn writeFirstPairPreview(

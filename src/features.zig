@@ -23,6 +23,13 @@ pub const InterestPoint = struct {
     score: f32,
 };
 
+const RankedInterestPoint = struct {
+    x: u32,
+    y: u32,
+    score: f32,
+    serial: u32,
+};
+
 pub fn buildGridRects(
     allocator: std.mem.Allocator,
     width: u32,
@@ -67,11 +74,12 @@ pub fn detectInterestPointsPartial(
     var response = try vigra.cornerResponse(allocator, &local, scale);
     defer response.deinit(allocator);
 
-    var points: std.ArrayList(InterestPoint) = .empty;
+    var points: std.ArrayList(RankedInterestPoint) = .empty;
     defer points.deinit(allocator);
     try points.ensureTotalCapacity(allocator, max_points + 1);
 
     var min_score: f32 = 0;
+    var serial: u32 = 0;
 
     var y: u32 = 1;
     while (y + 1 < local.height) : (y += 1) {
@@ -85,7 +93,9 @@ pub fn detectInterestPointsPartial(
                 .x = rect.x0 + x,
                 .y = rect.y0 + y,
                 .score = score,
+                .serial = serial,
             });
+            serial += 1;
 
             if (points.items.len > max_points) {
                 const min_index = findWeakestPoint(points.items);
@@ -96,21 +106,31 @@ pub fn detectInterestPointsPartial(
     }
 
     const SortContext = struct {
-        fn lessThan(_: void, lhs: InterestPoint, rhs: InterestPoint) bool {
+        fn lessThan(_: void, lhs: RankedInterestPoint, rhs: RankedInterestPoint) bool {
             if (lhs.score == rhs.score) {
-                if (lhs.y == rhs.y) return lhs.x < rhs.x;
-                return lhs.y < rhs.y;
+                return lhs.serial > rhs.serial;
             }
             return lhs.score > rhs.score;
         }
     };
-    std.sort.insertion(InterestPoint, points.items, {}, SortContext.lessThan);
+    std.sort.insertion(RankedInterestPoint, points.items, {}, SortContext.lessThan);
 
     if (points.items.len > max_points) {
         points.items.len = max_points;
     }
 
-    return points.toOwnedSlice(allocator);
+    const owned_ranked = try points.toOwnedSlice(allocator);
+    defer allocator.free(owned_ranked);
+
+    const owned = try allocator.alloc(InterestPoint, owned_ranked.len);
+    for (owned, owned_ranked) |*dst, src_point| {
+        dst.* = .{
+            .x = src_point.x,
+            .y = src_point.y,
+            .score = src_point.score,
+        };
+    }
+    return owned;
 }
 
 fn extractRectImage(
@@ -136,12 +156,16 @@ fn extractRectImage(
     };
 }
 
-fn findWeakestPoint(points: []const InterestPoint) usize {
+fn findWeakestPoint(points: []const RankedInterestPoint) usize {
     var weakest_index: usize = 0;
     var weakest_score = points[0].score;
+    var weakest_serial = points[0].serial;
     for (points[1..], 1..) |point, index| {
-        if (point.score < weakest_score) {
+        if (point.score < weakest_score or
+            (point.score == weakest_score and point.serial < weakest_serial))
+        {
             weakest_score = point.score;
+            weakest_serial = point.serial;
             weakest_index = index;
         }
     }

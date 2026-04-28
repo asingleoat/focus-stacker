@@ -53,6 +53,22 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "equirect-point")) {
+        if (args.len < 6) usage();
+        const image_index = try std.fmt.parseInt(usize, args[3], 10);
+        const x = try std.fmt.parseFloat(f64, args[4]);
+        const y = try std.fmt.parseFloat(f64, args[5]);
+        if (image_index >= project.images.len) return error.ImageIndexOutOfRange;
+        const solve_x = try collectSolveVector(allocator, args[6..], project.optimize_vector, base_poses);
+        defer allocator.free(solve_x);
+        const poses = try optimize.decodeSolveVector(allocator, project.optimize_vector, base_poses, solve_x);
+        defer allocator.free(poses);
+        const image = project.images[image_index];
+        const point = optimize.imagePointToEquirectDegrees(poses[image_index], x, y, image.width, image.height);
+        std.debug.print("lon={d:.12}\nlat={d:.12}\n", .{ point.x, point.y });
+        return;
+    }
+
     if (std.mem.eql(u8, command, "fvec")) {
         if (args.len < 4) usage();
         const strategy = try parseStrategy(args[3]);
@@ -111,6 +127,7 @@ fn usage() noreturn {
         \\  parity_probe lm-params <pto>
         \\  parity_probe solve-lm-params <pto>
         \\  parity_probe image-vars <pto> [x...]
+        \\  parity_probe equirect-point <pto> <image_index> <x> <y> [x...]
         \\  parity_probe fvec <pto> <distance_only|componentwise|1|2> [x...]
         \\  parity_probe jac-column <pto> <distance_only|componentwise|1|2> <param_index> [x...]
         \\  parity_probe cp-error <pto> <cp_index> [x...]

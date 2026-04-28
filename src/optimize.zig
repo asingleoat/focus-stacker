@@ -371,11 +371,11 @@ const LinearTerms = struct {
     focal: f64,
 };
 
-fn linearTerms(x: f32, y: f32, width: u32, height: u32, base_hfov_degrees: f64) LinearTerms {
+fn linearTerms(x: f64, y: f64, width: u32, height: u32, base_hfov_degrees: f64) LinearTerms {
     const cx = (@as(f64, @floatFromInt(width)) - 1.0) * 0.5;
     const cy = (@as(f64, @floatFromInt(height)) - 1.0) * 0.5;
-    const dx = @as(f64, x) - cx;
-    const dy = @as(f64, y) - cy;
+    const dx = x - cx;
+    const dy = y - cy;
     return .{
         .sx = dx,
         .sy = dy,
@@ -1411,6 +1411,10 @@ fn latLonToVec3(lon: f64, lat_zenith: f64) Vec3 {
     };
 }
 
+pub fn imagePointToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
+    return imageToEquirectDegrees(pose, x, y, width, height);
+}
+
 fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
     const center = distortionCenter(pose, width, height);
     const pano_distance = 180.0 / std.math.pi;
@@ -1793,8 +1797,8 @@ fn panoramaVectorForControlPoint(
     poses: []const ImagePose,
     pair_match: match_mod.PairMatches,
     image_index: usize,
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     override_image_index: ?usize,
     override_pose: ImagePose,
 ) Vec3 {
@@ -1802,8 +1806,8 @@ fn panoramaVectorForControlPoint(
     const center = distortionCenter(pose, pair_match.image_width, pair_match.image_height);
     const ray = sourceWorldRay(
         pose,
-        @as(f64, x) - center.x,
-        @as(f64, y) - center.y,
+        x - center.x,
+        y - center.y,
         pair_match.image_width,
         pair_match.image_height,
     );

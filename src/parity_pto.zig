@@ -181,10 +181,10 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Project {
             'c' => {
                 var left_image: usize = 0;
                 var right_image: usize = 0;
-                var left_x: f32 = 0;
-                var left_y: f32 = 0;
-                var right_x: f32 = 0;
-                var right_y: f32 = 0;
+                var left_x: f64 = 0;
+                var left_y: f64 = 0;
+                var right_x: f64 = 0;
+                var right_y: f64 = 0;
                 var mode: u8 = 0;
 
                 var token_iter = TokenIterator{ .line = line[1..] };
@@ -194,13 +194,13 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Project {
                     } else if (assignmentValue(token, "N")) |value| {
                         right_image = try std.fmt.parseInt(usize, value, 10);
                     } else if (assignmentValue(token, "x")) |value| {
-                        left_x = @floatCast(try std.fmt.parseFloat(f64, value));
+                        left_x = try std.fmt.parseFloat(f64, value);
                     } else if (assignmentValue(token, "y")) |value| {
-                        left_y = @floatCast(try std.fmt.parseFloat(f64, value));
+                        left_y = try std.fmt.parseFloat(f64, value);
                     } else if (assignmentValue(token, "X")) |value| {
-                        right_x = @floatCast(try std.fmt.parseFloat(f64, value));
+                        right_x = try std.fmt.parseFloat(f64, value);
                     } else if (assignmentValue(token, "Y")) |value| {
-                        right_y = @floatCast(try std.fmt.parseFloat(f64, value));
+                        right_y = try std.fmt.parseFloat(f64, value);
                     } else if (assignmentValue(token, "t")) |value| {
                         mode = try std.fmt.parseInt(u8, value, 10);
                     }

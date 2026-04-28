@@ -53,6 +53,21 @@ pub fn fromLoaded(allocator: std.mem.Allocator, image: *const image_io.Image) st
     };
 }
 
+pub fn fromLoadedReducedLikeHugin(
+    allocator: std.mem.Allocator,
+    image: *const image_io.Image,
+    levels: u8,
+) std.mem.Allocator.Error!GrayImage {
+    if (levels == 0) {
+        return fromLoaded(allocator, image);
+    }
+
+    return switch (image.pixels) {
+        .u8 => |src| reduceAndConvert(u8, allocator, image.info, src, levels),
+        .u16 => |src| reduceAndConvert(u16, allocator, image.info, src, levels),
+    };
+}
+
 pub fn reduceByHalf(allocator: std.mem.Allocator, src: *const GrayImage) std.mem.Allocator.Error!GrayImage {
     const dst_width = (src.width + 1) / 2;
     const dst_height = (src.height + 1) / 2;
@@ -125,10 +140,8 @@ fn convertU8(dst: []f32, image: *const image_io.Image, src: []const u8) void {
         .rgb => {
             for (0..count) |i| {
                 const base = i * 3;
-                const r = @as(f32, @floatFromInt(src[base])) / 255.0;
-                const g = @as(f32, @floatFromInt(src[base + 1])) / 255.0;
-                const b = @as(f32, @floatFromInt(src[base + 2])) / 255.0;
-                dst[i] = 0.3 * r + 0.59 * g + 0.11 * b;
+                const gray = rgbToGrayRoundedU8(src[base], src[base + 1], src[base + 2]);
+                dst[i] = @as(f32, @floatFromInt(gray)) / 255.0;
             }
         },
     }
@@ -145,13 +158,309 @@ fn convertU16(dst: []f32, image: *const image_io.Image, src: []const u16) void {
         .rgb => {
             for (0..count) |i| {
                 const base = i * 3;
-                const r = @as(f32, @floatFromInt(src[base])) / 65535.0;
-                const g = @as(f32, @floatFromInt(src[base + 1])) / 65535.0;
-                const b = @as(f32, @floatFromInt(src[base + 2])) / 65535.0;
-                dst[i] = 0.3 * r + 0.59 * g + 0.11 * b;
+                const gray = rgbToGrayRoundedU16(src[base], src[base + 1], src[base + 2]);
+                dst[i] = @as(f32, @floatFromInt(gray)) / 65535.0;
             }
         },
     }
+}
+
+fn reduceAndConvert(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    info: image_io.ImageInfo,
+    src: []const T,
+    levels: u8,
+) std.mem.Allocator.Error!GrayImage {
+    const channels = @as(usize, info.color_channels);
+    var width = info.width;
+    var height = info.height;
+
+    var current = try allocator.dupe(T, src);
+    errdefer allocator.free(current);
+
+    var level: u8 = 0;
+    while (level < levels) : (level += 1) {
+        const next_width = (width + 1) / 2;
+        const next_height = (height + 1) / 2;
+        const next = try allocator.alloc(T, @as(usize, next_width) * @as(usize, next_height) * channels);
+        reduceTypedByHalf(T, current, width, height, channels, next, next_width, next_height);
+        allocator.free(current);
+        current = next;
+        width = next_width;
+        height = next_height;
+    }
+    defer allocator.free(current);
+
+    const out_pixels = try allocator.alloc(f32, @as(usize, width) * @as(usize, height));
+    errdefer allocator.free(out_pixels);
+
+    switch (T) {
+        u8 => convertReducedU8(out_pixels, info.color_model, width, height, current),
+        u16 => convertReducedU16(out_pixels, info.color_model, width, height, current),
+        else => unreachable,
+    }
+
+    return .{
+        .width = width,
+        .height = height,
+        .pixels = out_pixels,
+    };
+}
+
+fn reduceTypedByHalf(
+    comptime T: type,
+    src: []const T,
+    src_width: u32,
+    src_height: u32,
+    channels: usize,
+    dst: []T,
+    dst_width: u32,
+    dst_height: u32,
+) void {
+    std.debug.assert(src_width > 1 and src_height > 1);
+    std.debug.assert(dst_width == (src_width + 1) / 2);
+    std.debug.assert(dst_height == (src_height + 1) / 2);
+
+    const Promote = i64;
+    const state_len = @as(usize, dst_width) + 1;
+
+    for (0..channels) |channel| {
+        var isc0_buf: [4096]Promote = undefined;
+        var isc1_buf: [4096]Promote = undefined;
+        var iscp_buf: [4096]Promote = undefined;
+
+        var isc0 = if (state_len <= isc0_buf.len) isc0_buf[0..state_len] else unreachable;
+        var isc1 = if (state_len <= isc1_buf.len) isc1_buf[0..state_len] else unreachable;
+        var iscp = if (state_len <= iscp_buf.len) iscp_buf[0..state_len] else unreachable;
+        @memset(isc0, 0);
+        @memset(isc1, 0);
+        @memset(iscp, 0);
+
+        var isr0: Promote = sourceComponent(T, src, src_width, channels, 0, 0, channel);
+        var isr1: Promote = 0;
+        var isrp: Promote = isr0 * 4;
+
+        // First row.
+        {
+            var even_x = true;
+            var dstx: usize = 0;
+            var srcx: u32 = 0;
+            while (srcx < src_width) : (srcx += 1) {
+                const current = sourceComponent(T, src, src_width, channels, srcx, 0, channel);
+                if (even_x) {
+                    isc0[dstx] = isr1 + 6 * isr0 + isrp + current;
+                    isc1[dstx] = 5 * isc0[dstx];
+                    isr1 = isr0 + isrp;
+                    isr0 = current;
+                } else {
+                    isrp = current * 4;
+                    dstx += 1;
+                }
+                even_x = !even_x;
+            }
+
+            if (!even_x) {
+                dstx += 1;
+                isc0[dstx] = isr1 + 11 * isr0;
+                isc1[dstx] = 5 * isc0[dstx];
+            } else {
+                isc0[dstx] = isr1 + 6 * isr0 + isrp + @divTrunc(isrp, 4);
+                isc1[dstx] = 5 * isc0[dstx];
+            }
+        }
+
+        var dy: u32 = 0;
+        var even_y = false;
+        var srcy: u32 = 1;
+        while (srcy < src_height) : (srcy += 1) {
+            isr0 = sourceComponent(T, src, src_width, channels, 0, srcy, channel);
+            isr1 = 0;
+            isrp = isr0 * 4;
+
+            if (even_y) {
+                isr1 = isr0 + isrp;
+                isr0 = sourceComponent(T, src, src_width, channels, 0, srcy, channel);
+
+                var dstx: usize = 0;
+                var dx: u32 = 0;
+                var even_x = false;
+                var srcx: u32 = 1;
+                while (srcx < src_width) : (srcx += 1) {
+                    const current = sourceComponent(T, src, src_width, channels, srcx, srcy, channel);
+                    if (even_x) {
+                        var ip = isc1[dstx] + 6 * isc0[dstx] + iscp[dstx];
+                        isc1[dstx] = isc0[dstx] + iscp[dstx];
+                        isc0[dstx] = isr1 + 6 * isr0 + isrp + current;
+                        isr1 = isr0 + isrp;
+                        isr0 = current;
+                        ip += isc0[dstx];
+                        setReducedComponent(T, dst, dst_width, channels, dx, dy, channel, reducedOutputValue(T, channels, ip));
+                        dx += 1;
+                    } else {
+                        isrp = current * 4;
+                        dstx += 1;
+                    }
+                    even_x = !even_x;
+                }
+
+                if (!even_x) {
+                    dstx += 1;
+                    var ip = isc1[dstx] + 6 * isc0[dstx] + iscp[dstx];
+                    isc1[dstx] = isc0[dstx] + iscp[dstx];
+                    isc0[dstx] = isr1 + 11 * isr0;
+                    ip += isc0[dstx];
+                    setReducedComponent(T, dst, dst_width, channels, dx, dy, channel, reducedOutputValue(T, channels, ip));
+                } else {
+                    var ip = isc1[dstx] + 6 * isc0[dstx] + iscp[dstx];
+                    isc1[dstx] = isc0[dstx] + iscp[dstx];
+                    isc0[dstx] = isr1 + 6 * isr0 + isrp + @divTrunc(isrp, 4);
+                    ip += isc0[dstx];
+                    setReducedComponent(T, dst, dst_width, channels, dx, dy, channel, reducedOutputValue(T, channels, ip));
+                }
+
+                dy += 1;
+            } else {
+                isr1 = isr0 + isrp;
+                isr0 = sourceComponent(T, src, src_width, channels, 0, srcy, channel);
+
+                var dstx: usize = 0;
+                var even_x = false;
+                var srcx: u32 = 1;
+                while (srcx < src_width) : (srcx += 1) {
+                    const current = sourceComponent(T, src, src_width, channels, srcx, srcy, channel);
+                    if (even_x) {
+                        iscp[dstx] = (isr1 + 6 * isr0 + isrp + current) * 4;
+                        isr1 = isr0 + isrp;
+                        isr0 = current;
+                    } else {
+                        isrp = current * 4;
+                        dstx += 1;
+                    }
+                    even_x = !even_x;
+                }
+
+                if (!even_x) {
+                    dstx += 1;
+                    iscp[dstx] = (isr1 + 11 * isr0) * 4;
+                } else {
+                    iscp[dstx] = (isr1 + 6 * isr0 + isrp + @divTrunc(isrp, 4)) * 4;
+                }
+            }
+
+            even_y = !even_y;
+        }
+
+        if (!even_y) {
+            var dstx: usize = 1;
+            var dx: u32 = 0;
+            while (dstx < state_len) : (dstx += 1) {
+                const ip = reducedOutputValue(T, channels, isc1[dstx] + 11 * isc0[dstx]);
+                setReducedComponent(T, dst, dst_width, channels, dx, dy, channel, ip);
+                dx += 1;
+            }
+        } else {
+            var dstx: usize = 1;
+            var dx: u32 = 0;
+            while (dstx < state_len) : (dstx += 1) {
+                const ip = reducedOutputValue(T, channels, isc1[dstx] + 6 * isc0[dstx] + iscp[dstx] + @divTrunc(iscp[dstx], 4));
+                setReducedComponent(T, dst, dst_width, channels, dx, dy, channel, ip);
+                dx += 1;
+            }
+        }
+    }
+}
+
+fn sourceComponent(
+    comptime T: type,
+    src: []const T,
+    width: u32,
+    channels: usize,
+    x: u32,
+    y: u32,
+    channel: usize,
+) i64 {
+    const index = ((@as(usize, y) * @as(usize, width)) + @as(usize, x)) * channels + channel;
+    return @as(i64, src[index]);
+}
+
+fn setReducedComponent(
+    comptime T: type,
+    dst: []T,
+    width: u32,
+    channels: usize,
+    x: u32,
+    y: u32,
+    channel: usize,
+    value: i64,
+) void {
+    const index = ((@as(usize, y) * @as(usize, width)) + @as(usize, x)) * channels + channel;
+    dst[index] = @as(T, @intCast(value));
+}
+
+fn reducedOutputValue(comptime T: type, channels: usize, numerator: i64) i64 {
+    if (channels == 1) {
+        return @divTrunc(numerator, 256);
+    }
+
+    const value = @as(f64, @floatFromInt(numerator)) / 256.0;
+    const rounded = value + 0.5;
+    const max_value: f64 = switch (T) {
+        u8 => 255.0,
+        u16 => 65535.0,
+        else => unreachable,
+    };
+    return @as(i64, @intFromFloat(@min(max_value, rounded)));
+}
+
+fn convertReducedU8(dst: []f32, color_model: image_io.ColorModel, width: u32, height: u32, src: []const u8) void {
+    const count = @as(usize, width) * @as(usize, height);
+    switch (color_model) {
+        .grayscale => {
+            for (dst, src[0..count]) |*out, value| {
+                out.* = @as(f32, @floatFromInt(value)) / 255.0;
+            }
+        },
+        .rgb => {
+            for (0..count) |i| {
+                const base = i * 3;
+                const gray = rgbToGrayRoundedU8(src[base], src[base + 1], src[base + 2]);
+                dst[i] = @as(f32, @floatFromInt(gray)) / 255.0;
+            }
+        },
+    }
+}
+
+fn convertReducedU16(dst: []f32, color_model: image_io.ColorModel, width: u32, height: u32, src: []const u16) void {
+    const count = @as(usize, width) * @as(usize, height);
+    switch (color_model) {
+        .grayscale => {
+            for (dst, src[0..count]) |*out, value| {
+                out.* = @as(f32, @floatFromInt(value)) / 65535.0;
+            }
+        },
+        .rgb => {
+            for (0..count) |i| {
+                const base = i * 3;
+                const gray = rgbToGrayRoundedU16(src[base], src[base + 1], src[base + 2]);
+                dst[i] = @as(f32, @floatFromInt(gray)) / 65535.0;
+            }
+        },
+    }
+}
+
+fn rgbToGrayRoundedU8(r: u8, g: u8, b: u8) u8 {
+    const gray = 0.3 * @as(f64, @floatFromInt(r)) +
+        0.59 * @as(f64, @floatFromInt(g)) +
+        0.11 * @as(f64, @floatFromInt(b));
+    return @as(u8, @intFromFloat(@min(@as(f64, 255.0), gray + 0.5)));
+}
+
+fn rgbToGrayRoundedU16(r: u16, g: u16, b: u16) u16 {
+    const gray = 0.3 * @as(f64, @floatFromInt(r)) +
+        0.59 * @as(f64, @floatFromInt(g)) +
+        0.11 * @as(f64, @floatFromInt(b));
+    return @as(u16, @intFromFloat(@min(@as(f64, 65535.0), gray + 0.5)));
 }
 
 test "rgb u8 converts to grayscale luminance" {
@@ -254,4 +563,84 @@ test "quantize in place follows source sample grid" {
     try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), image.pixels[1], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), image.pixels[2], 1e-6);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), image.pixels[3], 1e-6);
+}
+
+test "typed reduce matches upstream tiny grayscale pgm" {
+    const allocator = std.testing.allocator;
+    const src_pixels = try allocator.dupe(u8, &[_]u8{
+        1, 2, 3, 4, 5,
+        6, 7, 8, 9, 10,
+        11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20,
+        21, 22, 23, 24, 25,
+    });
+    defer allocator.free(src_pixels);
+
+    const image = image_io.Image{
+        .info = .{
+            .format = .png,
+            .width = 5,
+            .height = 5,
+            .color_model = .grayscale,
+            .sample_type = .u8,
+            .color_channels = 1,
+            .extra_channels = 0,
+            .exposure_value = null,
+        },
+        .pixels = .{ .u8 = src_pixels },
+    };
+
+    var reduced = try fromLoadedReducedLikeHugin(allocator, &image, 1);
+    defer reduced.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 3), reduced.width);
+    try std.testing.expectEqual(@as(u32, 3), reduced.height);
+
+    const expected = [_]u8{
+        3, 4, 6,
+        11, 13, 14,
+        19, 21, 22,
+    };
+    for (expected, reduced.pixels) |want, got| {
+        try std.testing.expectEqual(@as(u8, want), @as(u8, @intFromFloat(@round(got * 255.0))));
+    }
+}
+
+test "typed reduce matches upstream tiny rgb ppm" {
+    const allocator = std.testing.allocator;
+    const src_pixels = try allocator.alloc(u8, 5 * 5 * 3);
+    defer allocator.free(src_pixels);
+
+    for (0..25) |p| {
+        const base = p * 3;
+        src_pixels[base] = @as(u8, @intCast(p + 1));
+        src_pixels[base + 1] = @as(u8, @intCast(p + 101));
+        src_pixels[base + 2] = @as(u8, @intCast(p + 201));
+    }
+
+    const image = image_io.Image{
+        .info = .{
+            .format = .png,
+            .width = 5,
+            .height = 5,
+            .color_model = .rgb,
+            .sample_type = .u8,
+            .color_channels = 3,
+            .extra_channels = 0,
+            .exposure_value = null,
+        },
+        .pixels = .{ .u8 = src_pixels },
+    };
+
+    var reduced = try fromLoadedReducedLikeHugin(allocator, &image, 1);
+    defer reduced.deinit(allocator);
+
+    const expected = [_]u8{
+        84, 86, 88,
+        92, 94, 96,
+        101, 102, 104,
+    };
+    for (expected, reduced.pixels) |want, got| {
+        try std.testing.expectEqual(@as(u8, want), @as(u8, @intFromFloat(@round(got * 255.0))));
+    }
 }

@@ -17,13 +17,13 @@ pub const PairOptions = struct {
 pub const ControlPoint = struct {
     left_image: usize,
     right_image: usize,
-    left_x: f32,
-    left_y: f32,
-    right_x: f32,
-    right_y: f32,
+    left_x: f64,
+    left_y: f64,
+    right_x: f64,
+    right_y: f64,
     score: f32,
-    coarse_right_x: f32,
-    coarse_right_y: f32,
+    coarse_right_x: f64,
+    coarse_right_y: f64,
     coarse_score: f32,
     refined_score: ?f32 = null,
 };
@@ -131,8 +131,8 @@ pub fn analyzePair(
                     right_full,
                     candidate.x * scale_factor_int,
                     candidate.y * scale_factor_int,
-                    truncFloatToPixel(result.x * scale_factor, right_full.width),
-                    truncFloatToPixel(result.y * scale_factor, right_full.height),
+                    roundFloatToPixel(result.x * scale_factor, right_full.width),
+                    roundFloatToPixel(result.y * scale_factor, right_full.height),
                     opts.full_res_template_size,
                     full_res_search_width,
                 );
@@ -253,11 +253,33 @@ pub fn renderSummary(
     return list.toOwnedSlice(allocator);
 }
 
-const MatchResult = struct {
+pub const MatchResult = struct {
     score: f32 = -1,
-    x: f32 = 0,
-    y: f32 = 0,
+    x: f64 = 0,
+    y: f64 = 0,
 };
+
+pub fn probeMatchAroundCenter(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    left_x: u32,
+    left_y: u32,
+    right_center_x: u32,
+    right_center_y: u32,
+    template_size: u32,
+    search_width: u32,
+) MatchResult {
+    return matchAroundCenter(
+        left,
+        right,
+        left_x,
+        left_y,
+        right_center_x,
+        right_center_y,
+        template_size,
+        search_width,
+    );
+}
 
 fn matchCandidate(
     left: *const gray.GrayImage,
@@ -362,12 +384,18 @@ fn matchAroundCenter(
 
     if (best_score < 0) return .{};
 
-    var refined_x = @as(f32, @floatFromInt(best_x + search_ul_x));
-    var refined_y = @as(f32, @floatFromInt(best_y + search_ul_y));
+    var refined_x = @as(f64, @floatFromInt(best_x + search_ul_x));
+    var refined_y = @as(f64, @floatFromInt(best_y + search_ul_y));
     var final_score = best_score;
 
-    const subpixel_margin = 2 + templ_half;
-    if (best_x > subpixel_margin and best_x < search_w - 1 - subpixel_margin) {
+    const subpixel_lower_bound = 2 + templ_half;
+    const subpixel_upper_bound = 2 * swidth + 1 - 2 - templ_half;
+    const has_neighbor_x = best_x > xstart and best_x + 1 < xend;
+    const has_neighbor_y = best_y > ystart and best_y + 1 < yend;
+    if (best_x > subpixel_lower_bound and best_x < subpixel_upper_bound and
+        best_y > subpixel_lower_bound and best_y < subpixel_upper_bound and
+        has_neighbor_x and has_neighbor_y)
+    {
         const score_left = evaluateNccWindow(left, right, .{
             .tmpl_ul_x = tmpl_ul_x,
             .tmpl_ul_y = tmpl_ul_y,
@@ -392,42 +420,6 @@ fn matchAroundCenter(
             .center_local_x = best_x + 1,
             .center_local_y = best_y,
         });
-        if (best_y > subpixel_margin and best_y < search_h - 1 - subpixel_margin) {
-            const score_up = evaluateNccWindow(left, right, .{
-                .tmpl_ul_x = tmpl_ul_x,
-                .tmpl_ul_y = tmpl_ul_y,
-                .tmpl_lr_x = tmpl_lr_x,
-                .tmpl_lr_y = tmpl_lr_y,
-                .kul_x = kul_x,
-                .kul_y = kul_y,
-                .search_ul_x = search_ul_x,
-                .search_ul_y = search_ul_y,
-                .center_local_x = best_x,
-                .center_local_y = best_y - 1,
-            });
-            const score_down = evaluateNccWindow(left, right, .{
-                .tmpl_ul_x = tmpl_ul_x,
-                .tmpl_ul_y = tmpl_ul_y,
-                .tmpl_lr_x = tmpl_lr_x,
-                .tmpl_lr_y = tmpl_lr_y,
-                .kul_x = kul_x,
-                .kul_y = kul_y,
-                .search_ul_x = search_ul_x,
-                .search_ul_y = search_ul_y,
-                .center_local_x = best_x,
-                .center_local_y = best_y + 1,
-            });
-            const subpixel_x = fitSubpixelAxis(score_left, best_score, score_right);
-            const subpixel_y = fitSubpixelAxis(score_up, best_score, score_down);
-            final_score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
-            if (@abs(subpixel_x.offset) <= 1.0 and @abs(subpixel_y.offset) <= 1.0) {
-                refined_x += @as(f32, @floatCast(subpixel_x.offset));
-                refined_y += @as(f32, @floatCast(subpixel_y.offset));
-            }
-        } else {
-            refined_x += refineParabola(score_left, best_score, score_right);
-        }
-    } else if (best_y > subpixel_margin and best_y < search_h - 1 - subpixel_margin) {
         const score_up = evaluateNccWindow(left, right, .{
             .tmpl_ul_x = tmpl_ul_x,
             .tmpl_ul_y = tmpl_ul_y,
@@ -452,15 +444,21 @@ fn matchAroundCenter(
             .center_local_x = best_x,
             .center_local_y = best_y + 1,
         });
-        refined_y += refineParabola(score_up, best_score, score_down);
+        const subpixel_x = fitSubpixelAxis(score_left, best_score, score_right);
+        const subpixel_y = fitSubpixelAxis(score_up, best_score, score_down);
+        final_score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
+        if (@abs(subpixel_x.offset) <= 1.0 and @abs(subpixel_y.offset) <= 1.0) {
+            refined_x += subpixel_x.offset;
+            refined_y += subpixel_y.offset;
+        }
     }
 
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
 }
 
-fn truncFloatToPixel(value: f32, limit: u32) u32 {
+fn roundFloatToPixel(value: f64, limit: u32) u32 {
     if (value <= 0) return 0;
-    const rounded = @as(i64, @intFromFloat(value));
+    const rounded = @as(i64, @intFromFloat(value + 0.5));
     const max_value = @as(i64, limit - 1);
     return @as(u32, @intCast(@min(max_value, @max(@as(i64, 0), rounded))));
 }
@@ -488,6 +486,16 @@ fn evaluateNccWindow(
     const count = @as(f64, @floatFromInt(patch_w * patch_h));
     const right_x0 = ctx.search_ul_x + ctx.center_local_x + ctx.kul_x;
     const right_y0 = ctx.search_ul_y + ctx.center_local_y + ctx.kul_y;
+
+    if (ctx.tmpl_ul_x < 0 or ctx.tmpl_ul_y < 0 or
+        right_x0 < 0 or right_y0 < 0 or
+        ctx.tmpl_lr_x > @as(i32, @intCast(left.width)) or
+        ctx.tmpl_lr_y > @as(i32, @intCast(left.height)) or
+        right_x0 + @as(i32, @intCast(patch_w)) > @as(i32, @intCast(right.width)) or
+        right_y0 + @as(i32, @intCast(patch_h)) > @as(i32, @intCast(right.height)))
+    {
+        return -1;
+    }
 
     var mean_left: f64 = 0;
     var mean_right: f64 = 0;
@@ -542,18 +550,6 @@ fn clipBounds(start: *i32, stop: *i32, limit: i32) void {
 
 fn clipCoord(value: i32, limit: i32) i32 {
     return @max(0, @min(limit - 1, value));
-}
-
-fn refineParabola(left: f32, center: f32, right: f32) f32 {
-    const denominator = left - 2 * center + right;
-    if (@abs(denominator) < 1e-6) {
-        return 0;
-    }
-    const offset = 0.5 * (left - right) / denominator;
-    if (@abs(offset) > 1.0) {
-        return 0;
-    }
-    return offset;
 }
 
 const SubpixelAxisFit = struct {
