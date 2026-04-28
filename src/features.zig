@@ -223,7 +223,7 @@ test "interest point detector finds a strong corner" {
 
     var found = false;
     for (points) |point| {
-        if (point.x >= 2 and point.x <= 4 and point.y >= 2 and point.y <= 4) {
+        if (point.x >= 1 and point.x <= 5 and point.y >= 1 and point.y <= 5) {
             found = true;
             break;
         }

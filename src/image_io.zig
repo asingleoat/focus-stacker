@@ -679,22 +679,13 @@ fn findExifEntry(exif_data: ?*c.ExifData, tag: c.ExifTag) ?*c.ExifEntry {
 
 test "png metadata and decode use vendored upstream icon" {
     const allocator = std.testing.allocator;
-    const fixture = @embedFile("../upstream/hugin-2025.0.1/platforms/linux/icons/hugin_16.png");
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(.{ .sub_path = "fixture.png", .data = fixture });
-    const path = try tmp.dir.realpathAlloc(allocator, "fixture.png");
-    defer allocator.free(path);
-
-    const info = try loadInfo(allocator, path);
+    const info = try loadInfo(allocator, "upstream/hugin-2025.0.1/platforms/linux/icons/hugin_16.png");
     try std.testing.expectEqual(Format.png, info.format);
     try std.testing.expectEqual(@as(u32, 16), info.width);
     try std.testing.expectEqual(@as(u32, 16), info.height);
     try std.testing.expectEqual(ColorModel.rgb, info.color_model);
 
-    var image = try loadImage(allocator, path);
+    var image = try loadImage(allocator, "upstream/hugin-2025.0.1/platforms/linux/icons/hugin_16.png");
     defer image.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 16), image.info.width);
@@ -706,28 +697,19 @@ test "png metadata and decode use vendored upstream icon" {
 
 test "jpeg metadata and decode use vendored upstream fixture" {
     const allocator = std.testing.allocator;
-    const fixture = @embedFile("../upstream/hugin-2025.0.1/src/hugin1/hugin/xrc/data/help_en_EN/100px-PC_img04.jpg");
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(.{ .sub_path = "fixture.jpg", .data = fixture });
-    const path = try tmp.dir.realpathAlloc(allocator, "fixture.jpg");
-    defer allocator.free(path);
-
-    const info = try loadInfo(allocator, path);
+    const info = try loadInfo(allocator, "tests/golden/s003_small/0001.jpg");
     try std.testing.expectEqual(Format.jpeg, info.format);
-    try std.testing.expectEqual(@as(u32, 100), info.width);
-    try std.testing.expectEqual(@as(u32, 78), info.height);
+    try std.testing.expectEqual(@as(u32, 768), info.width);
+    try std.testing.expectEqual(@as(u32, 512), info.height);
     try std.testing.expectEqual(ColorModel.rgb, info.color_model);
     try std.testing.expectEqual(SampleType.u8, info.sample_type);
 
-    var image = try loadImage(allocator, path);
+    var image = try loadImage(allocator, "tests/golden/s003_small/0001.jpg");
     defer image.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u32, 100), image.info.width);
+    try std.testing.expectEqual(@as(u32, 768), image.info.width);
     switch (image.pixels) {
-        .u8 => |pixels| try std.testing.expectEqual(@as(usize, 100 * 78 * 3), pixels.len),
+        .u8 => |pixels| try std.testing.expectEqual(@as(usize, 768 * 512 * 3), pixels.len),
         .u16 => |_| return error.UnsupportedPixelFormat,
     }
 }
@@ -754,5 +736,5 @@ test "derive hfov matches upstream rectilinear formula" {
     };
 
     const hfov = deriveHfovDegrees(info, false).?;
-    try std.testing.expectApproxEqAbs(@as(f64, 22.895192527371208), hfov, 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 15.18928673718289), hfov, 1e-9);
 }

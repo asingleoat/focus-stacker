@@ -374,7 +374,7 @@ test "parse help action" {
 
 test "parse align-to-first disables EV sorting" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{ "--align-to-first", "a.tif", "b.tif" };
+    const args = [_][]const u8{ "--align-to-first", "-p", "out.pto", "a.tif", "b.tif" };
     var cfg = try parseArgs(allocator, &args);
     defer cfg.deinit(allocator);
 
@@ -385,7 +385,7 @@ test "parse align-to-first disables EV sorting" {
 
 test "parse clustered verbosity and value options" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{ "-vv", "-g", "7", "-c12", "a.tif", "b.tif" };
+    const args = [_][]const u8{ "-vv", "-g", "7", "-c12", "-p", "out.pto", "a.tif", "b.tif" };
     var cfg = try parseArgs(allocator, &args);
     defer cfg.deinit(allocator);
 

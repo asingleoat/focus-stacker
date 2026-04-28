@@ -508,8 +508,8 @@ test "rgb u8 converts to grayscale luminance" {
     var gray = try fromLoaded(allocator, &image);
     defer gray.deinit(allocator);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.3), gray.pixels[0], 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.59), gray.pixels[1], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 77.0 / 255.0), gray.pixels[0], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 150.0 / 255.0), gray.pixels[1], 0.0001);
 }
 
 test "reduce by half matches Burt-Adelson weights" {
@@ -541,16 +541,7 @@ test "reduce by half matches Burt-Adelson weights" {
 
 test "fixture jpeg converts and reduces" {
     const allocator = std.testing.allocator;
-    const fixture = @embedFile("../upstream/hugin-2025.0.1/src/hugin1/hugin/xrc/data/help_en_EN/100px-PC_img04.jpg");
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(.{ .sub_path = "fixture.jpg", .data = fixture });
-    const path = try tmp.dir.realpathAlloc(allocator, "fixture.jpg");
-    defer allocator.free(path);
-
-    var loaded = try image_io.loadImage(allocator, path);
+    var loaded = try image_io.loadImage(allocator, "tests/golden/s003_small/0001.jpg");
     defer loaded.deinit(allocator);
 
     var gray = try fromLoaded(allocator, &loaded);
@@ -559,10 +550,10 @@ test "fixture jpeg converts and reduces" {
     var reduced = try reduceNTimes(allocator, &gray, 1);
     defer reduced.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u32, 100), gray.width);
-    try std.testing.expectEqual(@as(u32, 78), gray.height);
-    try std.testing.expectEqual(@as(u32, 50), reduced.width);
-    try std.testing.expectEqual(@as(u32, 39), reduced.height);
+    try std.testing.expectEqual(@as(u32, 768), gray.width);
+    try std.testing.expectEqual(@as(u32, 512), gray.height);
+    try std.testing.expectEqual(@as(u32, 384), reduced.width);
+    try std.testing.expectEqual(@as(u32, 256), reduced.height);
 }
 
 test "quantize in place follows source sample grid" {
