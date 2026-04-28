@@ -60,6 +60,11 @@ The repo uses the flake for dependency management. Re-enter the shell with `nix 
 
 The Zig shared global cache at `/home/tim/.cache/zig` has been unreliable in this environment. Use the repo-local `ZIG_GLOBAL_CACHE_DIR=.zig-global-cache` setting consistently.
 
+Committed fixtures:
+
+- `tests/golden/s003_small/`: small, fast regression fixtures for the routine test suite
+- `tests/perf/s003_stack10_768/`: a 10-frame downsampled focus stack intended for profiling and future parallelism work, not for the default unit-test path
+
 ## Current Functional State
 
 Implemented and working:

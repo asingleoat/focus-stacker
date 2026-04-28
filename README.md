@@ -20,6 +20,11 @@ ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-zig -- lm-params /tmp/exa
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-upstream -- fvec /tmp/example.pto 1
 ```
 
+Committed fixtures:
+
+- `tests/golden/s003_small/`: fast 2-frame/3-frame regression fixtures used by `zig build test`
+- `tests/perf/s003_stack10_768/`: a 10-frame downsampled stack reserved for profiling, optimizer throughput work, and future parallelism experiments
+
 Focused parity tools:
 
 - `probe-zig`: evaluates the port's optimizer state and residual functions from a PTO file.
