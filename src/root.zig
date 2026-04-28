@@ -9,6 +9,7 @@ pub const profiler = @import("profiler.zig");
 pub const pto = @import("pto.zig");
 pub const remap = @import("remap.zig");
 pub const sequence = @import("sequence.zig");
+pub const sparse_matrix = @import("sparse_matrix.zig");
 
 test {
     _ = @import("golden_tests.zig");

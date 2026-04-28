@@ -3,6 +3,7 @@ const config_mod = @import("config.zig");
 const match_mod = @import("match.zig");
 const minpack_mod = @import("minpack.zig");
 const profiler = @import("profiler.zig");
+const sparse_matrix = @import("sparse_matrix.zig");
 
 const huber_sigma_pixels: f64 = 0.0;
 const radial_solve_space_scale: f64 = 100.0;
@@ -343,6 +344,72 @@ pub fn hasControlPointsForImage(pair_matches: []const match_mod.PairMatches, ima
         }
     }
     return false;
+}
+
+pub fn buildObjectiveJacobianPattern(
+    allocator: std.mem.Allocator,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    strategy: ObjectiveStrategy,
+) !sparse_matrix.CcsPattern {
+    const layout = try buildSolveLayout(allocator, optimize_vector);
+    defer allocator.free(layout);
+
+    const row_count = switch (strategy) {
+        .distance_only => countControlPoints(pair_matches),
+        .componentwise => countControlPoints(pair_matches) * 2,
+    };
+    const col_count = countLayoutVariables(layout);
+
+    const row_ptr = try allocator.alloc(usize, row_count + 1);
+    errdefer allocator.free(row_ptr);
+    row_ptr[0] = 0;
+
+    var row_index: usize = 0;
+    var nnz: usize = 0;
+    for (pair_matches) |pair_match| {
+        for (pair_match.control_points) |cp| {
+            const row_nnz = countLayoutEntryVariables(layout[cp.left_image]) + countLayoutEntryVariables(layout[cp.right_image]);
+            nnz += row_nnz;
+            row_index += 1;
+            row_ptr[row_index] = nnz;
+            if (strategy == .componentwise) {
+                nnz += row_nnz;
+                row_index += 1;
+                row_ptr[row_index] = nnz;
+            }
+        }
+    }
+    std.debug.assert(row_index == row_count);
+
+    const col_idx = try allocator.alloc(usize, nnz);
+    errdefer allocator.free(col_idx);
+
+    row_index = 0;
+    var write_index: usize = 0;
+    for (pair_matches) |pair_match| {
+        for (pair_match.control_points) |cp| {
+            appendRowParameterIndices(layout[cp.left_image], col_idx, &write_index);
+            appendRowParameterIndices(layout[cp.right_image], col_idx, &write_index);
+            row_index += 1;
+            if (strategy == .componentwise) {
+                appendRowParameterIndices(layout[cp.left_image], col_idx, &write_index);
+                appendRowParameterIndices(layout[cp.right_image], col_idx, &write_index);
+                row_index += 1;
+            }
+        }
+    }
+    std.debug.assert(write_index == nnz);
+
+    var crs = sparse_matrix.CrsPattern{
+        .row_count = row_count,
+        .col_count = col_count,
+        .row_ptr = row_ptr,
+        .col_idx = col_idx,
+    };
+    defer crs.deinit(allocator);
+
+    return sparse_matrix.crsToCcs(allocator, &crs);
 }
 
 fn countControlPoints(pair_matches: []const match_mod.PairMatches) usize {
@@ -896,6 +963,84 @@ fn countLayoutVariables(layout: []const SolveLayout) usize {
         if (entry.center_shift_y_index) |_| count += 1;
     }
     return count;
+}
+
+fn countLayoutEntryVariables(entry: SolveLayout) usize {
+    var count: usize = 0;
+    if (entry.yaw_index) |_| count += 1;
+    if (entry.pitch_index) |_| count += 1;
+    if (entry.roll_index) |_| count += 1;
+    if (entry.hfov_index) |_| count += 1;
+    if (entry.trans_x_index) |_| count += 1;
+    if (entry.trans_y_index) |_| count += 1;
+    if (entry.trans_z_index) |_| count += 1;
+    if (entry.translation_plane_yaw_index) |_| count += 1;
+    if (entry.translation_plane_pitch_index) |_| count += 1;
+    if (entry.radial_a_index) |_| count += 1;
+    if (entry.radial_b_index) |_| count += 1;
+    if (entry.radial_c_index) |_| count += 1;
+    if (entry.center_shift_x_index) |_| count += 1;
+    if (entry.center_shift_y_index) |_| count += 1;
+    return count;
+}
+
+fn appendRowParameterIndices(entry: SolveLayout, out: []usize, write_index: *usize) void {
+    if (entry.yaw_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.pitch_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.roll_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.hfov_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.trans_x_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.trans_y_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.trans_z_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.translation_plane_yaw_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.translation_plane_pitch_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.radial_a_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.radial_b_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.radial_c_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.center_shift_x_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
+    if (entry.center_shift_y_index) |idx| {
+        out[write_index.*] = idx;
+        write_index.* += 1;
+    }
 }
 
 fn buildParameterImageIndex(allocator: std.mem.Allocator, layout: []const SolveLayout) ![]usize {
@@ -2931,6 +3076,78 @@ test "basic rectilinear equirect cache matches uncached distSphere math" {
     const cached_vector = exactDistSphereResidualVectorCached(caches[0], caches[1], cp);
     try std.testing.expectApproxEqAbs(uncached_vector.x, cached_vector.x, 1e-9);
     try std.testing.expectApproxEqAbs(uncached_vector.y, cached_vector.y, 1e-9);
+}
+
+test "objective jacobian sparsity matches image-pair locality" {
+    const allocator = std.testing.allocator;
+
+    const optimize_vector = [_]VariableSet{
+        VariableSet.initEmpty(),
+        VariableSet.initMany(&.{ .y, .p, .r, .v }),
+        VariableSet.initMany(&.{ .y, .p, .r, .v }),
+    };
+    var cps = [_]match_mod.ControlPoint{
+        .{
+            .left_image = 0,
+            .right_image = 1,
+            .left_x = 10,
+            .left_y = 20,
+            .right_x = 11,
+            .right_y = 21,
+            .score = 1.0,
+            .coarse_right_x = 11,
+            .coarse_right_y = 21,
+            .coarse_score = 1.0,
+            .refined_score = 1.0,
+        },
+        .{
+            .left_image = 0,
+            .right_image = 2,
+            .left_x = 30,
+            .left_y = 40,
+            .right_x = 31,
+            .right_y = 41,
+            .score = 1.0,
+            .coarse_right_x = 31,
+            .coarse_right_y = 41,
+            .coarse_score = 1.0,
+            .refined_score = 1.0,
+        },
+    };
+    const pair_matches = [_]match_mod.PairMatches{
+        .{
+            .pair = .{ .left_index = 0, .right_index = 1 },
+            .image_width = 100,
+            .image_height = 80,
+            .candidates_considered = 1,
+            .control_point_storage = cps[0..1],
+            .control_points = cps[0..1],
+        },
+        .{
+            .pair = .{ .left_index = 0, .right_index = 2 },
+            .image_width = 100,
+            .image_height = 80,
+            .candidates_considered = 1,
+            .control_point_storage = cps[1..2],
+            .control_points = cps[1..2],
+        },
+    };
+
+    var pattern = try buildObjectiveJacobianPattern(allocator, &optimize_vector, &pair_matches, .componentwise);
+    defer pattern.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), pattern.row_count);
+    try std.testing.expectEqual(@as(usize, 8), pattern.col_count);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 4, 6, 8, 10, 12, 14, 16 }, pattern.col_ptr);
+
+    var groups = try sparse_matrix.partitionIndependentColumns(allocator, &pattern);
+    defer groups.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 4), groups.groupCount());
+    try std.testing.expectEqualSlices(usize, &.{ 0, 4 }, groups.groupColumns(0));
+    try std.testing.expectEqualSlices(usize, &.{ 1, 5 }, groups.groupColumns(1));
+    try std.testing.expectEqualSlices(usize, &.{ 2, 6 }, groups.groupColumns(2));
+    try std.testing.expectEqualSlices(usize, &.{ 3, 7 }, groups.groupColumns(3));
 }
 
 test "pruning removes residual outliers" {
