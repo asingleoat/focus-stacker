@@ -1502,12 +1502,12 @@ fn exactDistSphereResidualVectorCached(left: BasicRectEquirectCache, right: Basi
     const prof = profiler.scope("optimize.exactDistSphereResidualVectorCached");
     defer prof.end();
 
-    const left_point = imageToEquirectDegreesCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
-    const right_point = imageToEquirectDegreesCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
-    const lon_left = left_point.x * degrees_to_radians;
-    const lon_right = right_point.x * degrees_to_radians;
-    const lat_left = left_point.y * degrees_to_radians + std.math.pi * 0.5;
-    const lat_right = right_point.y * degrees_to_radians + std.math.pi * 0.5;
+    const left_ray = imageToWorldRayCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
+    const right_ray = imageToWorldRayCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
+    const lon_left = std.math.atan2(left_ray.x, -left_ray.z);
+    const lon_right = std.math.atan2(right_ray.x, -right_ray.z);
+    const lat_left = std.math.asin(std.math.clamp(left_ray.y, -1.0, 1.0)) + std.math.pi * 0.5;
+    const lat_right = std.math.asin(std.math.clamp(right_ray.y, -1.0, 1.0)) + std.math.pi * 0.5;
     var delta_lon = lon_left - lon_right;
     if (delta_lon < -std.math.pi) delta_lon += 2.0 * std.math.pi;
     if (delta_lon > std.math.pi) delta_lon -= 2.0 * std.math.pi;
@@ -1539,14 +1539,8 @@ fn exactDistSphereDistanceCached(left: BasicRectEquirectCache, right: BasicRectE
     const prof = profiler.scope("optimize.exactDistSphereDistanceCached");
     defer prof.end();
 
-    const left_point = imageToEquirectDegreesCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
-    const right_point = imageToEquirectDegreesCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
-    const left_lon = left_point.x * degrees_to_radians;
-    const right_lon = right_point.x * degrees_to_radians;
-    const left_lat = left_point.y * degrees_to_radians + std.math.pi * 0.5;
-    const right_lat = right_point.y * degrees_to_radians + std.math.pi * 0.5;
-    const left_vec = latLonToVec3(left_lon, left_lat);
-    const right_vec = latLonToVec3(right_lon, right_lat);
+    const left_vec = imageToWorldRayCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
+    const right_vec = imageToWorldRayCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
     const cross = cross3(left_vec, right_vec);
     var dangle = std.math.asin(std.math.clamp(length3(cross), 0.0, 1.0));
     if (dot3(left_vec, right_vec) < 0.0) dangle = std.math.pi - dangle;
@@ -1588,14 +1582,31 @@ fn imageToEquirectDegreesCached(cache: BasicRectEquirectCache, x: f64, y: f64) P
     const prof = profiler.scope("optimize.imageToEquirectDegreesCached");
     defer prof.end();
 
-    var p = Point2{
-        .x = (x - cache.center.x) * cache.image_scale,
-        .y = (y - cache.center.y) * cache.image_scale,
+    const ray = imageToWorldRayCached(cache, x, y);
+    return .{
+        .x = std.math.atan2(ray.x, -ray.z) / degrees_to_radians,
+        .y = std.math.asin(std.math.clamp(ray.y, -1.0, 1.0)) / degrees_to_radians,
     };
-    p = sphereTpRectPoint(p, cache.pano_distance);
-    p = perspSpherePoint(p, cache.pitch_roll, cache.pano_distance);
-    p = erectSphereTpPoint(p, cache.pano_distance);
-    return rotateErectPoint(p, cache.pano_distance * std.math.pi, cache.yaw_turn);
+}
+
+fn imageToWorldRayCached(cache: BasicRectEquirectCache, x: f64, y: f64) Vec3 {
+    const prof = profiler.scope("optimize.imageToWorldRayCached");
+    defer prof.end();
+
+    const dx = x - cache.center.x;
+    const dy = y - cache.center.y;
+    const local = Vec3{
+        .x = dx,
+        .y = dy,
+        .z = -cache.image_focal,
+    };
+    const world = matrixMul(cache.world_from_local, local);
+    const inv_norm = 1.0 / @sqrt(dx * dx + dy * dy + cache.image_focal * cache.image_focal);
+    return .{
+        .x = world.x * inv_norm,
+        .y = world.y * inv_norm,
+        .z = world.z * inv_norm,
+    };
 }
 
 fn sphereTpRectPoint(p: Point2, distance: f64) Point2 {
@@ -1961,7 +1972,13 @@ const BasicRectEquirectCache = struct {
     center: Point2 = .{ .x = 0.0, .y = 0.0 },
     pano_distance: f64 = 0.0,
     image_scale: f64 = 0.0,
+    image_focal: f64 = 0.0,
     pitch_roll: Matrix3 = .{
+        .{ 1.0, 0.0, 0.0 },
+        .{ 0.0, 1.0, 0.0 },
+        .{ 0.0, 0.0, 1.0 },
+    },
+    world_from_local: Matrix3 = .{
         .{ 1.0, 0.0, 0.0 },
         .{ 0.0, 1.0, 0.0 },
         .{ 0.0, 0.0, 1.0 },
@@ -1982,12 +1999,17 @@ fn populateBasicRectEquirectCaches(poses: []const ImagePose, width: u32, height:
         }
         const pano_distance = 180.0 / std.math.pi;
         const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+        const pitch_roll = setMatrix(pose.pitch, 0.0, pose.roll, true);
+        const source_pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true);
+        const world_from_local = matrixMatrixMul(yawMatrix(pose.yaw), transposeMatrix3(source_pitch_roll));
         cache.* = .{
             .valid = true,
             .center = distortionCenter(pose, width, height),
             .pano_distance = pano_distance,
             .image_scale = pano_distance / image_focal,
-            .pitch_roll = setMatrix(pose.pitch, 0.0, pose.roll, true),
+            .image_focal = image_focal,
+            .pitch_roll = pitch_roll,
+            .world_from_local = world_from_local,
             .yaw_turn = pose.yaw / degrees_to_radians,
             .radians_to_pixels = panoRadiansToPixels(width, pose.base_hfov_degrees),
         };
@@ -2075,6 +2097,16 @@ fn rotateYaw(ray: Vec3, yaw: f64) Vec3 {
     };
 }
 
+fn yawMatrix(yaw: f64) Matrix3 {
+    const c = @cos(yaw);
+    const s = @sin(yaw);
+    return .{
+        .{ c, 0.0, -s },
+        .{ 0.0, 1.0, 0.0 },
+        .{ s, 0.0, c },
+    };
+}
+
 fn setMatrix(a: f64, b: f64, c: f64, cl: bool) Matrix3 {
     const mx: Matrix3 = .{
         .{ 1.0, 0.0, 0.0 },
@@ -2108,6 +2140,14 @@ fn matrixInvMul(m: Matrix3, v: Vec3) Vec3 {
         .x = m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z,
         .y = m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z,
         .z = m[0][2] * v.x + m[1][2] * v.y + m[2][2] * v.z,
+    };
+}
+
+fn transposeMatrix3(m: Matrix3) Matrix3 {
+    return .{
+        .{ m[0][0], m[1][0], m[2][0] },
+        .{ m[0][1], m[1][1], m[2][1] },
+        .{ m[0][2], m[1][2], m[2][2] },
     };
 }
 
