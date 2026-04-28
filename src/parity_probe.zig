@@ -28,14 +28,35 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "linear-seed-lm-params")) {
+        const seed_poses = try optimize.buildLinearSeedPoses(
+            allocator,
+            project.images.len,
+            base_poses[0].base_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+        );
+        defer allocator.free(seed_poses);
+        const solve_x = try optimize.encodeSolveVector(allocator, project.optimize_vector, seed_poses);
+        defer allocator.free(solve_x);
+        try printVector(solve_x);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "solve-lm-params")) {
+        const decoded_initial_poses = if (args.len > 3)
+            try decodeInitialPoses(allocator, project.optimize_vector, base_poses, args[3..])
+        else
+            null;
+        defer if (decoded_initial_poses) |poses| allocator.free(poses);
+        const initial_poses = decoded_initial_poses orelse base_poses;
         const result = try optimize.solvePosesFromInitial(
             allocator,
             project.images.len,
             project.pano_hfov_degrees,
             project.optimize_vector,
             project.pair_matches,
-            base_poses,
+            initial_poses,
         );
         defer allocator.free(result.poses);
         defer allocator.free(result.residuals);
@@ -144,6 +165,7 @@ fn usage() noreturn {
     std.debug.print(
         \\usage:
         \\  parity_probe lm-params <pto>
+        \\  parity_probe linear-seed-lm-params <pto>
         \\  parity_probe solve-lm-params <pto>
         \\  parity_probe image-vars <pto> [x...]
         \\  parity_probe equirect-point <pto> <image_index> <x> <y> [x...]
@@ -182,6 +204,17 @@ fn collectSolveVector(
         value.* = try std.fmt.parseFloat(f64, arg);
     }
     return values;
+}
+
+fn decodeInitialPoses(
+    allocator: std.mem.Allocator,
+    optimize_vector: []const optimize.VariableSet,
+    base_poses: []const optimize.ImagePose,
+    trailing_args: []const []const u8,
+) ![]optimize.ImagePose {
+    const solve_x = try collectSolveVector(allocator, trailing_args, optimize_vector, base_poses);
+    defer allocator.free(solve_x);
+    return optimize.decodeSolveVector(allocator, optimize_vector, base_poses, solve_x);
 }
 
 fn parseStrategy(value: []const u8) !optimize.ObjectiveStrategy {

@@ -31,7 +31,9 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, command, "solve-lm-params")) {
-        try runOptimizer(&info);
+        const initial = if (args.len > 3) try collectSolveVector(allocator, &info, args[3..]) else null;
+        defer if (initial) |values| allocator.free(values);
+        try runOptimizer(&info, initial);
         const solve_x = try collectSolveVector(allocator, &info, &.{});
         defer allocator.free(solve_x);
         try printVector(solve_x);
@@ -39,7 +41,9 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, command, "solve-lm-params-zigminpack")) {
-        const solve_x = try runZigMinpackOptimizer(allocator, &info);
+        const initial = if (args.len > 3) try collectSolveVector(allocator, &info, args[3..]) else null;
+        defer if (initial) |values| allocator.free(values);
+        const solve_x = try runZigMinpackOptimizer(allocator, &info, initial);
         defer allocator.free(solve_x);
         try printVector(solve_x);
         return;
@@ -293,8 +297,11 @@ fn evaluateJacobianColumn(
     return column;
 }
 
-fn runOptimizer(info: *c.AlignInfo) !void {
+fn runOptimizer(info: *c.AlignInfo, initial: ?[]const f64) !void {
     info.fcn = c.fcnPano;
+    if (initial) |values| {
+        if (c.SetAlignParams(@constCast(values.ptr)) != 0) return error.SetAlignParamsFailed;
+    }
     var opt = std.mem.zeroes(c.OptInfo);
     opt.numVars = info.numParam;
     opt.numData = info.numPts;
@@ -335,10 +342,14 @@ const UpstreamSolveContext = struct {
     n: usize,
 };
 
-fn runZigMinpackOptimizer(allocator: std.mem.Allocator, info: *c.AlignInfo) ![]f64 {
+fn runZigMinpackOptimizer(allocator: std.mem.Allocator, info: *c.AlignInfo, initial: ?[]const f64) ![]f64 {
     info.fcn = c.fcnPano;
     const n: usize = @intCast(info.numParam);
     if (n == 0) return allocator.alloc(f64, 0);
+
+    if (initial) |values| {
+        if (c.SetAlignParams(@constCast(values.ptr)) != 0) return error.SetAlignParamsFailed;
+    }
 
     const current = try allocator.alloc(f64, n);
     errdefer allocator.free(current);

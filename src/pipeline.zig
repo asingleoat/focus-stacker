@@ -146,7 +146,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     return error.NotImplemented;
 }
 
-fn collectInputImages(
+pub fn collectInputImages(
     allocator: std.mem.Allocator,
     cfg: *const config_mod.Config,
 ) RunError![]sequence.InputImage {
@@ -200,7 +200,7 @@ fn collectInputImages(
     return images.toOwnedSlice(allocator);
 }
 
-fn analyzePairs(
+pub fn analyzePairs(
     allocator: std.mem.Allocator,
     cfg: *const config_mod.Config,
     images: []const sequence.InputImage,

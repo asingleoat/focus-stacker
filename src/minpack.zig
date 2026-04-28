@@ -15,6 +15,10 @@ pub const Result = struct {
     nfev: usize,
 };
 
+pub fn JacobianFn(comptime Context: type) type {
+    return *const fn (*Context, []const f64, []const f64, []f64, usize, usize, f64) anyerror!usize;
+}
+
 const machep: f64 = std.math.floatEps(f64);
 const dwarf: f64 = std.math.floatMin(f64);
 
@@ -23,6 +27,32 @@ pub fn lmdif(
     allocator: std.mem.Allocator,
     ctx: *Context,
     evalFn: *const fn (*Context, []const f64, []f64) anyerror!void,
+    x: []f64,
+    m: usize,
+    params: Params,
+) !Result {
+    return lmdifAdvanced(Context, allocator, ctx, evalFn, null, x, m, params);
+}
+
+pub fn lmdifWithJacobian(
+    comptime Context: type,
+    allocator: std.mem.Allocator,
+    ctx: *Context,
+    evalFn: *const fn (*Context, []const f64, []f64) anyerror!void,
+    jacobianFn: JacobianFn(Context),
+    x: []f64,
+    m: usize,
+    params: Params,
+) !Result {
+    return lmdifAdvanced(Context, allocator, ctx, evalFn, jacobianFn, x, m, params);
+}
+
+fn lmdifAdvanced(
+    comptime Context: type,
+    allocator: std.mem.Allocator,
+    ctx: *Context,
+    evalFn: *const fn (*Context, []const f64, []f64) anyerror!void,
+    jacobianFn: ?JacobianFn(Context),
     x: []f64,
     m: usize,
     params: Params,
@@ -74,8 +104,12 @@ pub fn lmdif(
             const iter_prof = profiler.scope("minpack.lmdif.outer_iteration");
             defer iter_prof.end();
 
-            try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
-            nfev += n;
+            if (jacobianFn) |buildJacobian| {
+                nfev += try buildJacobian(ctx, x, fvec, fjac, m, n, params.epsfcn);
+            } else {
+                try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
+                nfev += n;
+            }
 
             qrfac(fjac, m, n, true, ipvt, wa1, wa2, wa3);
 

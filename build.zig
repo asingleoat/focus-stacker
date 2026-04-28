@@ -69,6 +69,20 @@ pub fn build(b: *std.Build) void {
     match_probe.root_module.addOptions("build_options", build_options);
     configureImageDeps(match_probe.root_module);
 
+    const live_probe = b.addExecutable(.{
+        .name = "live_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/live_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "align_stack_core", .module = core },
+            },
+        }),
+    });
+    live_probe.root_module.addOptions("build_options", build_options);
+    configureImageDeps(live_probe.root_module);
+
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -97,6 +111,13 @@ pub fn build(b: *std.Build) void {
     }
     const match_step = b.step("probe-match", "Run the image matching parity probe");
     match_step.dependOn(&run_match_probe.step);
+
+    const run_live_probe = b.addRunArtifact(live_probe);
+    if (b.args) |args| {
+        run_live_probe.addArgs(args);
+    }
+    const live_step = b.step("probe-live", "Run the live pipeline solve comparison probe");
+    live_step.dependOn(&run_live_probe.step);
 
     const core_tests = b.addTest(.{
         .root_module = core,

@@ -176,6 +176,26 @@ pub fn solvePoses(
     return solvePosesFromInitial(allocator, image_count, base_hfov_degrees, optimize_vector, pair_matches, null);
 }
 
+pub fn buildLinearSeedPoses(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+) SolveError![]ImagePose {
+    const poses = try allocator.alloc(ImagePose, image_count);
+    errdefer allocator.free(poses);
+    @memset(poses, .{});
+    for (poses) |*pose| {
+        pose.base_hfov_degrees = base_hfov_degrees;
+    }
+
+    const layout = try buildSolveLayout(allocator, optimize_vector);
+    defer allocator.free(layout);
+    try seedPosesLinear(allocator, layout, pair_matches, poses);
+    return poses;
+}
+
 pub fn solvePosesFromInitial(
     allocator: std.mem.Allocator,
     image_count: usize,
@@ -355,6 +375,15 @@ pub fn buildObjectiveJacobianPattern(
     const layout = try buildSolveLayout(allocator, optimize_vector);
     defer allocator.free(layout);
 
+    return buildObjectiveJacobianPatternWithLayout(allocator, layout, pair_matches, strategy);
+}
+
+fn buildObjectiveJacobianPatternWithLayout(
+    allocator: std.mem.Allocator,
+    layout: []const SolveLayout,
+    pair_matches: []const match_mod.PairMatches,
+    strategy: ObjectiveStrategy,
+) !sparse_matrix.CcsPattern {
     const row_count = switch (strategy) {
         .distance_only => countControlPoints(pair_matches),
         .componentwise => countControlPoints(pair_matches) * 2,
@@ -851,6 +880,15 @@ fn refinePosesIteratively(
         .componentwise => countControlPoints(pair_matches) * 2,
     };
     const residual_count = @max(actual_residual_count, variable_count);
+    const objective_strategy: ObjectiveStrategy = switch (strategy) {
+        .distance_only => .distance_only,
+        .componentwise => .componentwise,
+    };
+    var grouped_jacobian = if (actual_residual_count == residual_count)
+        try GroupedJacobianWorkspace.init(allocator, layout, pair_matches, objective_strategy, variable_count, residual_count)
+    else
+        null;
+    defer if (grouped_jacobian) |*workspace| workspace.deinit(allocator);
 
     var ctx = SolveContext{
         .layout = layout,
@@ -867,6 +905,7 @@ fn refinePosesIteratively(
         .initial_avg_hfov = initial_avg_hfov,
         .strategy = strategy,
         .actual_residual_count = actual_residual_count,
+        .grouped_jacobian = if (grouped_jacobian) |*workspace| workspace else null,
     };
 
     const params = minpack_mod.Params{
@@ -880,7 +919,20 @@ fn refinePosesIteratively(
         .epsfcn = std.math.floatEps(f64) * 10.0,
         .factor = 100.0,
     };
-    _ = minpack_mod.lmdif(SolveContext, allocator, &ctx, evaluateSolveVector, solve_x, residual_count, params) catch |err| switch (err) {
+    const solve_result = if (ctx.grouped_jacobian != null)
+        minpack_mod.lmdifWithJacobian(
+            SolveContext,
+            allocator,
+            &ctx,
+            evaluateSolveVector,
+            evaluateSolveJacobianGrouped,
+            solve_x,
+            residual_count,
+            params,
+        )
+    else
+        minpack_mod.lmdif(SolveContext, allocator, &ctx, evaluateSolveVector, solve_x, residual_count, params);
+    _ = solve_result catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -923,6 +975,52 @@ const SolveContext = struct {
     initial_avg_hfov: f64,
     strategy: SolveStrategy,
     actual_residual_count: usize,
+    grouped_jacobian: ?*GroupedJacobianWorkspace,
+};
+
+const GroupedJacobianWorkspace = struct {
+    pattern: sparse_matrix.CcsPattern,
+    groups: sparse_matrix.ColumnGroups,
+    shifted_x: []f64,
+    shifted_fvec: []f64,
+    step_sizes: []f64,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        layout: []const SolveLayout,
+        pair_matches: []const match_mod.PairMatches,
+        strategy: ObjectiveStrategy,
+        parameter_count: usize,
+        residual_count: usize,
+    ) !GroupedJacobianWorkspace {
+        var pattern = try buildObjectiveJacobianPatternWithLayout(allocator, layout, pair_matches, strategy);
+        errdefer pattern.deinit(allocator);
+        var groups = try sparse_matrix.partitionIndependentColumns(allocator, &pattern);
+        errdefer groups.deinit(allocator);
+        const shifted_x = try allocator.alloc(f64, parameter_count);
+        errdefer allocator.free(shifted_x);
+        const shifted_fvec = try allocator.alloc(f64, residual_count);
+        errdefer allocator.free(shifted_fvec);
+        const step_sizes = try allocator.alloc(f64, parameter_count);
+        errdefer allocator.free(step_sizes);
+
+        return .{
+            .pattern = pattern,
+            .groups = groups,
+            .shifted_x = shifted_x,
+            .shifted_fvec = shifted_fvec,
+            .step_sizes = step_sizes,
+        };
+    }
+
+    fn deinit(self: *GroupedJacobianWorkspace, allocator: std.mem.Allocator) void {
+        self.pattern.deinit(allocator);
+        self.groups.deinit(allocator);
+        allocator.free(self.shifted_x);
+        allocator.free(self.shifted_fvec);
+        allocator.free(self.step_sizes);
+        self.* = undefined;
+    }
 };
 
 fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror!void {
@@ -963,6 +1061,55 @@ fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror
     for (out_index..fvec.len) |i| {
         fvec[i] = fill_value;
     }
+}
+
+fn evaluateSolveJacobianGrouped(
+    ctx: *SolveContext,
+    x: []const f64,
+    fvec: []const f64,
+    fjac: []f64,
+    m: usize,
+    n: usize,
+    epsfcn: f64,
+) !usize {
+    const prof = profiler.scope("optimize.evaluateSolveJacobianGrouped");
+    defer prof.end();
+
+    const workspace = ctx.grouped_jacobian orelse return error.MissingGroupedJacobian;
+    std.debug.assert(ctx.actual_residual_count == m);
+    std.debug.assert(workspace.pattern.row_count == m);
+    std.debug.assert(workspace.pattern.col_count == n);
+
+    @memset(fjac, 0.0);
+
+    const eps = @sqrt(@max(epsfcn, std.math.floatEps(f64)));
+    var nfev: usize = 0;
+    for (0..workspace.groups.groupCount()) |group_index| {
+        @memcpy(workspace.shifted_x, x);
+        const columns = workspace.groups.groupColumns(group_index);
+        for (columns) |column| {
+            var h = eps * @abs(workspace.shifted_x[column]);
+            if (h < solve_space_relative_epsilon) h = solve_space_relative_epsilon;
+            if (h == 0.0) h = eps;
+            workspace.step_sizes[column] = h;
+            workspace.shifted_x[column] += h;
+        }
+
+        try evaluateSolveVector(ctx, workspace.shifted_x, workspace.shifted_fvec);
+        nfev += 1;
+
+        for (columns) |column| {
+            const inv_h = 1.0 / workspace.step_sizes[column];
+            const start = workspace.pattern.col_ptr[column];
+            const end = workspace.pattern.col_ptr[column + 1];
+            for (start..end) |entry_index| {
+                const row = workspace.pattern.row_idx[entry_index];
+                fjac[row + m * column] = (workspace.shifted_fvec[row] - fvec[row]) * inv_h;
+            }
+        }
+    }
+
+    return nfev;
 }
 
 fn updateSolveContextState(ctx: *SolveContext, x: []const f64) void {
