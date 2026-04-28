@@ -8,9 +8,9 @@ pub const PairOptions = struct {
     grid_size: u32,
     corr_threshold: f32,
     pyr_level: u8,
-    template_radius: u32 = 5,
-    search_radius: u32 = 18,
-    full_res_template_radius: u32 = 10,
+    template_size: u32 = 20,
+    search_width: u32 = 100,
+    full_res_template_size: u32 = 20,
 };
 
 pub const ControlPoint = struct {
@@ -88,7 +88,7 @@ pub fn analyzePair(
     const scale_factor = @as(f32, @floatFromInt(@as(u32, 1) << @intCast(opts.pyr_level)));
 
     for (rects) |rect| {
-        const candidates = try features.detectInterestPointsPartial(allocator, left, rect, requested_candidates);
+        const candidates = try features.detectInterestPointsPartial(allocator, left, rect, 2.0, requested_candidates);
         defer allocator.free(candidates);
 
         var accepted_in_rect: u32 = 0;
@@ -151,7 +151,7 @@ pub fn refinePairMatches(
     }
 
     const scale_factor = @as(u32, 1) << @intCast(opts.pyr_level);
-    const full_res_search_radius = @max(scale_factor, 2);
+    const full_res_search_width = @max(scale_factor, 1);
 
     var write_index: usize = 0;
     for (pair_matches.control_points, 0..) |cp, read_index| {
@@ -167,8 +167,8 @@ pub fn refinePairMatches(
             left_y,
             right_x,
             right_y,
-            opts.full_res_template_radius,
-            full_res_search_radius,
+            opts.full_res_template_size,
+            full_res_search_width,
         );
         if (refined.score < opts.corr_threshold) {
             continue;
@@ -253,12 +253,10 @@ fn matchCandidate(
         candidate.y,
         candidate.x,
         candidate.y,
-        opts.template_radius,
-        opts.search_radius,
+        opts.template_size,
+        opts.search_width,
     );
 }
-
-const ClampDirection = enum { min, max };
 
 fn matchAroundCenter(
     left: *const gray.GrayImage,
@@ -267,105 +265,178 @@ fn matchAroundCenter(
     left_y: u32,
     right_center_x: u32,
     right_center_y: u32,
-    radius: u32,
-    search_radius: u32,
+    template_size: u32,
+    search_width: u32,
 ) MatchResult {
-    if (!isPatchInside(left, left_x, left_y, radius)) {
+    const templ_half = @as(i32, @intCast(template_size / 2));
+    const templ_pos_x = @as(i32, @intCast(left_x));
+    const templ_pos_y = @as(i32, @intCast(left_y));
+
+    var tmpl_ul_x = templ_pos_x - templ_half;
+    var tmpl_ul_y = templ_pos_y - templ_half;
+    var tmpl_lr_x = templ_pos_x + templ_half + 1;
+    var tmpl_lr_y = templ_pos_y + templ_half + 1;
+    clipBounds(&tmpl_ul_x, &tmpl_lr_x, @as(i32, @intCast(left.width)));
+    clipBounds(&tmpl_ul_y, &tmpl_lr_y, @as(i32, @intCast(left.height)));
+
+    if (tmpl_ul_x >= tmpl_lr_x or tmpl_ul_y >= tmpl_lr_y) {
         return .{};
     }
 
-    const min_x = clampCenter(right_center_x, radius, right.width, search_radius, .min);
-    const max_x = clampCenter(right_center_x, radius, right.width, search_radius, .max);
-    const min_y = clampCenter(right_center_y, radius, right.height, search_radius, .min);
-    const max_y = clampCenter(right_center_y, radius, right.height, search_radius, .max);
+    const kul_x = tmpl_ul_x - templ_pos_x;
+    const kul_y = tmpl_ul_y - templ_pos_y;
+    const klr_x = tmpl_lr_x - templ_pos_x - 1;
+    const klr_y = tmpl_lr_y - templ_pos_y - 1;
 
-    if (min_x > max_x or min_y > max_y) {
+    const swidth = @as(i32, @intCast(search_width / 2)) + (2 + templ_half);
+    const search_pos_x = clipCoord(@as(i32, @intCast(right_center_x)), @as(i32, @intCast(right.width)));
+    const search_pos_y = clipCoord(@as(i32, @intCast(right_center_y)), @as(i32, @intCast(right.height)));
+
+    var search_ul_x = search_pos_x - swidth;
+    var search_ul_y = search_pos_y - swidth;
+    var search_lr_x = search_pos_x + swidth + 1;
+    var search_lr_y = search_pos_y + swidth + 1;
+    clipBounds(&search_ul_x, &search_lr_x, @as(i32, @intCast(right.width)));
+    clipBounds(&search_ul_y, &search_lr_y, @as(i32, @intCast(right.height)));
+
+    const search_w = search_lr_x - search_ul_x;
+    const search_h = search_lr_y - search_ul_y;
+    if (search_w <= 0 or search_h <= 0) {
         return .{};
     }
 
-    var best_x: u32 = min_x;
-    var best_y: u32 = min_y;
+    const xstart = -kul_x;
+    const xend = search_w - klr_x;
+    const ystart = -kul_y;
+    const yend = search_h - klr_y;
+    if (xstart >= xend or ystart >= yend) {
+        return .{};
+    }
+
+    var best_x = xstart;
+    var best_y = ystart;
     var best_score: f32 = -1;
 
-    const coarse_step: u32 = if (search_radius > 6) 2 else 1;
-    var cy = min_y;
-    while (cy <= max_y) : (cy += coarse_step) {
-        var cx = min_x;
-        while (cx <= max_x) : (cx += coarse_step) {
-            const score = evaluateNcc(left, right, left_x, left_y, cx, cy, radius);
+    var y = ystart;
+    while (y < yend) : (y += 1) {
+        var x = xstart;
+        while (x < xend) : (x += 1) {
+            const score = evaluateNccWindow(left, right, .{
+                .tmpl_ul_x = tmpl_ul_x,
+                .tmpl_ul_y = tmpl_ul_y,
+                .tmpl_lr_x = tmpl_lr_x,
+                .tmpl_lr_y = tmpl_lr_y,
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = x,
+                .center_local_y = y,
+            });
             if (score > best_score) {
                 best_score = score;
-                best_x = cx;
-                best_y = cy;
-            }
-
-            if (coarse_step > 1 and cx + coarse_step > max_x and cx != max_x) {
-                cx = max_x - coarse_step;
-            }
-        }
-        if (coarse_step > 1 and cy + coarse_step > max_y and cy != max_y) {
-            cy = max_y - coarse_step;
-        }
-    }
-
-    const refine_start_x = best_x -| coarse_step;
-    const refine_end_x = @min(best_x + coarse_step, max_x);
-    const refine_start_y = best_y -| coarse_step;
-    const refine_end_y = @min(best_y + coarse_step, max_y);
-
-    var ry = refine_start_y;
-    while (ry <= refine_end_y) : (ry += 1) {
-        var rx = refine_start_x;
-        while (rx <= refine_end_x) : (rx += 1) {
-            const score = evaluateNcc(left, right, left_x, left_y, rx, ry, radius);
-            if (score > best_score) {
-                best_score = score;
-                best_x = rx;
-                best_y = ry;
+                best_x = x;
+                best_y = y;
             }
         }
     }
 
-    var refined_x = @as(f32, @floatFromInt(best_x));
-    var refined_y = @as(f32, @floatFromInt(best_y));
+    if (best_score < 0) return .{};
 
-    if (best_x > min_x and best_x < max_x) {
-        const score_left = evaluateNcc(left, right, left_x, left_y, best_x - 1, best_y, radius);
-        const score_center = best_score;
-        const score_right = evaluateNcc(left, right, left_x, left_y, best_x + 1, best_y, radius);
-        refined_x += refineParabola(score_left, score_center, score_right);
+    var refined_x = @as(f32, @floatFromInt(best_x + search_ul_x));
+    var refined_y = @as(f32, @floatFromInt(best_y + search_ul_y));
+    var final_score = best_score;
+
+    const subpixel_margin = 2 + templ_half;
+    if (best_x > subpixel_margin and best_x < search_w - 1 - subpixel_margin) {
+        const score_left = evaluateNccWindow(left, right, .{
+            .tmpl_ul_x = tmpl_ul_x,
+            .tmpl_ul_y = tmpl_ul_y,
+            .tmpl_lr_x = tmpl_lr_x,
+            .tmpl_lr_y = tmpl_lr_y,
+            .kul_x = kul_x,
+            .kul_y = kul_y,
+            .search_ul_x = search_ul_x,
+            .search_ul_y = search_ul_y,
+            .center_local_x = best_x - 1,
+            .center_local_y = best_y,
+        });
+        const score_right = evaluateNccWindow(left, right, .{
+            .tmpl_ul_x = tmpl_ul_x,
+            .tmpl_ul_y = tmpl_ul_y,
+            .tmpl_lr_x = tmpl_lr_x,
+            .tmpl_lr_y = tmpl_lr_y,
+            .kul_x = kul_x,
+            .kul_y = kul_y,
+            .search_ul_x = search_ul_x,
+            .search_ul_y = search_ul_y,
+            .center_local_x = best_x + 1,
+            .center_local_y = best_y,
+        });
+        if (best_y > subpixel_margin and best_y < search_h - 1 - subpixel_margin) {
+            const score_up = evaluateNccWindow(left, right, .{
+                .tmpl_ul_x = tmpl_ul_x,
+                .tmpl_ul_y = tmpl_ul_y,
+                .tmpl_lr_x = tmpl_lr_x,
+                .tmpl_lr_y = tmpl_lr_y,
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = best_x,
+                .center_local_y = best_y - 1,
+            });
+            const score_down = evaluateNccWindow(left, right, .{
+                .tmpl_ul_x = tmpl_ul_x,
+                .tmpl_ul_y = tmpl_ul_y,
+                .tmpl_lr_x = tmpl_lr_x,
+                .tmpl_lr_y = tmpl_lr_y,
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = best_x,
+                .center_local_y = best_y + 1,
+            });
+            const subpixel_x = fitSubpixelAxis(score_left, best_score, score_right);
+            const subpixel_y = fitSubpixelAxis(score_up, best_score, score_down);
+            final_score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
+            if (@abs(subpixel_x.offset) <= 1.0 and @abs(subpixel_y.offset) <= 1.0) {
+                refined_x += @as(f32, @floatCast(subpixel_x.offset));
+                refined_y += @as(f32, @floatCast(subpixel_y.offset));
+            }
+        } else {
+            refined_x += refineParabola(score_left, best_score, score_right);
+        }
+    } else if (best_y > subpixel_margin and best_y < search_h - 1 - subpixel_margin) {
+        const score_up = evaluateNccWindow(left, right, .{
+            .tmpl_ul_x = tmpl_ul_x,
+            .tmpl_ul_y = tmpl_ul_y,
+            .tmpl_lr_x = tmpl_lr_x,
+            .tmpl_lr_y = tmpl_lr_y,
+            .kul_x = kul_x,
+            .kul_y = kul_y,
+            .search_ul_x = search_ul_x,
+            .search_ul_y = search_ul_y,
+            .center_local_x = best_x,
+            .center_local_y = best_y - 1,
+        });
+        const score_down = evaluateNccWindow(left, right, .{
+            .tmpl_ul_x = tmpl_ul_x,
+            .tmpl_ul_y = tmpl_ul_y,
+            .tmpl_lr_x = tmpl_lr_x,
+            .tmpl_lr_y = tmpl_lr_y,
+            .kul_x = kul_x,
+            .kul_y = kul_y,
+            .search_ul_x = search_ul_x,
+            .search_ul_y = search_ul_y,
+            .center_local_x = best_x,
+            .center_local_y = best_y + 1,
+        });
+        refined_y += refineParabola(score_up, best_score, score_down);
     }
-    if (best_y > min_y and best_y < max_y) {
-        const score_up = evaluateNcc(left, right, left_x, left_y, best_x, best_y - 1, radius);
-        const score_center = best_score;
-        const score_down = evaluateNcc(left, right, left_x, left_y, best_x, best_y + 1, radius);
-        refined_y += refineParabola(score_up, score_center, score_down);
-    }
 
-    return .{
-        .score = best_score,
-        .x = refined_x,
-        .y = refined_y,
-    };
-}
-
-fn clampCenter(
-    center: u32,
-    radius: u32,
-    limit: u32,
-    search_radius: u32,
-    direction: ClampDirection,
-) u32 {
-    const minimum = radius;
-    const maximum = limit - radius - 1;
-    return switch (direction) {
-        .min => @max(minimum, center -| search_radius),
-        .max => @min(maximum, center + search_radius),
-    };
-}
-
-fn isPatchInside(image: *const gray.GrayImage, x: u32, y: u32, radius: u32) bool {
-    return x >= radius and y >= radius and x + radius < image.width and y + radius < image.height;
+    return .{ .score = final_score, .x = refined_x, .y = refined_y };
 }
 
 fn floatCenterToPixel(value: f32, limit: u32) u32 {
@@ -393,34 +464,44 @@ fn computeBestCoarseScore(points: []const ControlPoint) ?f32 {
     return best;
 }
 
-fn evaluateNcc(
+const WindowContext = struct {
+    tmpl_ul_x: i32,
+    tmpl_ul_y: i32,
+    tmpl_lr_x: i32,
+    tmpl_lr_y: i32,
+    kul_x: i32,
+    kul_y: i32,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    center_local_x: i32,
+    center_local_y: i32,
+};
+
+fn evaluateNccWindow(
     left: *const gray.GrayImage,
     right: *const gray.GrayImage,
-    left_x: u32,
-    left_y: u32,
-    right_x: u32,
-    right_y: u32,
-    radius: u32,
+    ctx: WindowContext,
 ) f32 {
-    if (!isPatchInside(left, left_x, left_y, radius) or !isPatchInside(right, right_x, right_y, radius)) {
-        return -1;
-    }
-
-    const x0_left = left_x - radius;
-    const y0_left = left_y - radius;
-    const x0_right = right_x - radius;
-    const y0_right = right_y - radius;
-    const diameter = radius * 2 + 1;
-    const count = @as(f64, @floatFromInt(diameter * diameter));
+    const patch_w = @as(u32, @intCast(ctx.tmpl_lr_x - ctx.tmpl_ul_x));
+    const patch_h = @as(u32, @intCast(ctx.tmpl_lr_y - ctx.tmpl_ul_y));
+    const count = @as(f64, @floatFromInt(patch_w * patch_h));
+    const right_x0 = ctx.search_ul_x + ctx.center_local_x + ctx.kul_x;
+    const right_y0 = ctx.search_ul_y + ctx.center_local_y + ctx.kul_y;
 
     var mean_left: f64 = 0;
     var mean_right: f64 = 0;
     var dy: u32 = 0;
-    while (dy < diameter) : (dy += 1) {
+    while (dy < patch_h) : (dy += 1) {
         var dx: u32 = 0;
-        while (dx < diameter) : (dx += 1) {
-            mean_left += left.pixel(x0_left + dx, y0_left + dy);
-            mean_right += right.pixel(x0_right + dx, y0_right + dy);
+        while (dx < patch_w) : (dx += 1) {
+            mean_left += left.pixel(
+                @as(u32, @intCast(ctx.tmpl_ul_x)) + dx,
+                @as(u32, @intCast(ctx.tmpl_ul_y)) + dy,
+            );
+            mean_right += right.pixel(
+                @as(u32, @intCast(right_x0)) + dx,
+                @as(u32, @intCast(right_y0)) + dy,
+            );
         }
     }
     mean_left /= count;
@@ -430,11 +511,17 @@ fn evaluateNcc(
     var div_left: f64 = 0;
     var div_right: f64 = 0;
     dy = 0;
-    while (dy < diameter) : (dy += 1) {
+    while (dy < patch_h) : (dy += 1) {
         var dx: u32 = 0;
-        while (dx < diameter) : (dx += 1) {
-            const left_value = @as(f64, left.pixel(x0_left + dx, y0_left + dy)) - mean_left;
-            const right_value = @as(f64, right.pixel(x0_right + dx, y0_right + dy)) - mean_right;
+        while (dx < patch_w) : (dx += 1) {
+            const left_value = @as(f64, left.pixel(
+                @as(u32, @intCast(ctx.tmpl_ul_x)) + dx,
+                @as(u32, @intCast(ctx.tmpl_ul_y)) + dy,
+            )) - mean_left;
+            const right_value = @as(f64, right.pixel(
+                @as(u32, @intCast(right_x0)) + dx,
+                @as(u32, @intCast(right_y0)) + dy,
+            )) - mean_right;
             numerator += left_value * right_value;
             div_left += left_value * left_value;
             div_right += right_value * right_value;
@@ -447,6 +534,15 @@ fn evaluateNcc(
     return @as(f32, @floatCast(numerator / @sqrt(div_left * div_right)));
 }
 
+fn clipBounds(start: *i32, stop: *i32, limit: i32) void {
+    start.* = @max(0, @min(limit, start.*));
+    stop.* = @max(0, @min(limit, stop.*));
+}
+
+fn clipCoord(value: i32, limit: i32) i32 {
+    return @max(0, @min(limit - 1, value));
+}
+
 fn refineParabola(left: f32, center: f32, right: f32) f32 {
     const denominator = left - 2 * center + right;
     if (@abs(denominator) < 1e-6) {
@@ -457,6 +553,24 @@ fn refineParabola(left: f32, center: f32, right: f32) f32 {
         return 0;
     }
     return offset;
+}
+
+const SubpixelAxisFit = struct {
+    offset: f64,
+    max_value: f64,
+};
+
+fn fitSubpixelAxis(left: f32, center: f32, right: f32) SubpixelAxisFit {
+    const a = @as(f64, center);
+    const b = (@as(f64, right) - @as(f64, left)) / 2.0;
+    const c = (@as(f64, left) - 2.0 * @as(f64, center) + @as(f64, right)) / 2.0;
+
+    const offset = if (@abs(c) < 1e-12) 0.0 else -b / (2.0 * c);
+    const max_value = c * offset * offset + b * offset + a;
+    return .{
+        .offset = offset,
+        .max_value = max_value,
+    };
 }
 
 test "pair matching recovers a small translation" {
@@ -510,8 +624,8 @@ test "pair matching recovers a small translation" {
         .grid_size = 1,
         .corr_threshold = 0.8,
         .pyr_level = 0,
-        .template_radius = 3,
-        .search_radius = 6,
+        .template_size = 8,
+        .search_width = 12,
     }, .{
         .left_index = 0,
         .right_index = 1,
@@ -588,9 +702,9 @@ test "full-resolution refinement can prune and tighten coarse matches" {
         .grid_size = 1,
         .corr_threshold = 0.8,
         .pyr_level = 1,
-        .template_radius = 3,
-        .search_radius = 6,
-        .full_res_template_radius = 5,
+        .template_size = 8,
+        .search_width = 12,
+        .full_res_template_size = 10,
     }, .{
         .left_index = 0,
         .right_index = 1,
@@ -604,9 +718,9 @@ test "full-resolution refinement can prune and tighten coarse matches" {
         .grid_size = 1,
         .corr_threshold = 0.8,
         .pyr_level = 1,
-        .template_radius = 3,
-        .search_radius = 6,
-        .full_res_template_radius = 5,
+        .template_size = 8,
+        .search_width = 12,
+        .full_res_template_size = 10,
     }, &matches, &left_full, &right_full);
 
     try std.testing.expect(matches.refined_control_point_count > 0);

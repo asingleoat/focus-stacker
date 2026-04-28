@@ -47,38 +47,33 @@ pub fn reduceByHalf(allocator: std.mem.Allocator, src: *const GrayImage) std.mem
     const dst_pixels = try allocator.alloc(f32, @as(usize, dst_width) * @as(usize, dst_height));
     errdefer allocator.free(dst_pixels);
 
-    const src_width = @as(usize, src.width);
-    const src_height = @as(usize, src.height);
+    const weights = [_]f32{ 1, 4, 6, 4, 1 };
     const out_width = @as(usize, dst_width);
     const out_height = @as(usize, dst_height);
 
     for (0..out_height) |dy| {
-        const sy0 = dy * 2;
-        const sy1 = @min(sy0 + 1, src_height - 1);
+        const src_center_y = @as(i32, @intCast(dy * 2));
         for (0..out_width) |dx| {
-            const sx0 = dx * 2;
-            const sx1 = @min(sx0 + 1, src_width - 1);
+            const src_center_x = @as(i32, @intCast(dx * 2));
 
-            var sum: f32 = 0;
-            var count: f32 = 0;
+            var weighted_sum: f64 = 0;
+            var total_weight: f64 = 0;
 
-            sum += src.pixels[sy0 * src_width + sx0];
-            count += 1;
+            for (0..weights.len) |ky| {
+                const sy = src_center_y + @as(i32, @intCast(ky)) - 2;
+                if (sy < 0 or sy >= @as(i32, @intCast(src.height))) continue;
 
-            if (sx1 != sx0) {
-                sum += src.pixels[sy0 * src_width + sx1];
-                count += 1;
-            }
-            if (sy1 != sy0) {
-                sum += src.pixels[sy1 * src_width + sx0];
-                count += 1;
-                if (sx1 != sx0) {
-                    sum += src.pixels[sy1 * src_width + sx1];
-                    count += 1;
+                for (0..weights.len) |kx| {
+                    const sx = src_center_x + @as(i32, @intCast(kx)) - 2;
+                    if (sx < 0 or sx >= @as(i32, @intCast(src.width))) continue;
+
+                    const weight = @as(f64, weights[ky] * weights[kx]);
+                    weighted_sum += weight * @as(f64, src.pixel(@as(u32, @intCast(sx)), @as(u32, @intCast(sy))));
+                    total_weight += weight;
                 }
             }
 
-            dst_pixels[dy * out_width + dx] = sum / count;
+            dst_pixels[dy * out_width + dx] = @as(f32, @floatCast(weighted_sum / total_weight));
         }
     }
 
@@ -121,7 +116,7 @@ fn convertU8(dst: []f32, image: *const image_io.Image, src: []const u8) void {
                 const r = @as(f32, @floatFromInt(src[base])) / 255.0;
                 const g = @as(f32, @floatFromInt(src[base + 1])) / 255.0;
                 const b = @as(f32, @floatFromInt(src[base + 2])) / 255.0;
-                dst[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+                dst[i] = 0.3 * r + 0.59 * g + 0.11 * b;
             }
         },
     }
@@ -141,7 +136,7 @@ fn convertU16(dst: []f32, image: *const image_io.Image, src: []const u16) void {
                 const r = @as(f32, @floatFromInt(src[base])) / 65535.0;
                 const g = @as(f32, @floatFromInt(src[base + 1])) / 65535.0;
                 const b = @as(f32, @floatFromInt(src[base + 2])) / 65535.0;
-                dst[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+                dst[i] = 0.3 * r + 0.59 * g + 0.11 * b;
             }
         },
     }
@@ -173,11 +168,11 @@ test "rgb u8 converts to grayscale luminance" {
     var gray = try fromLoaded(allocator, &image);
     defer gray.deinit(allocator);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.299), gray.pixels[0], 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.587), gray.pixels[1], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), gray.pixels[0], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.59), gray.pixels[1], 0.0001);
 }
 
-test "reduce by half averages 2x2 blocks" {
+test "reduce by half matches Burt-Adelson weights" {
     const allocator = std.testing.allocator;
     const src_pixels = try allocator.dupe(f32, &[_]f32{
         1, 2, 3, 4,
@@ -198,10 +193,10 @@ test "reduce by half averages 2x2 blocks" {
 
     try std.testing.expectEqual(@as(u32, 2), reduced.width);
     try std.testing.expectEqual(@as(u32, 2), reduced.height);
-    try std.testing.expectApproxEqAbs(@as(f32, 3.5), reduced.pixels[0], 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 5.5), reduced.pixels[1], 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 11.5), reduced.pixels[2], 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 13.5), reduced.pixels[3], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.7272727), reduced.pixels[0], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.048485), reduced.pixels[1], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.012121), reduced.pixels[2], 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.333333), reduced.pixels[3], 0.0001);
 }
 
 test "fixture jpeg converts and reduces" {

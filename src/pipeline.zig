@@ -305,7 +305,7 @@ fn writeFirstPairPreview(
 
     const total_features = if (rects.len > 0) blk: {
         const first_rect = rects[0];
-        const points = try features.detectInterestPointsPartial(allocator, &reduced, first_rect, cfg.points_per_grid * 5);
+        const points = try features.detectInterestPointsPartial(allocator, &reduced, first_rect, 2.0, cfg.points_per_grid * 5);
         defer allocator.free(points);
         break :blk points.len;
     } else 0;

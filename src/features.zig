@@ -1,5 +1,6 @@
 const std = @import("std");
 const gray = @import("gray.zig");
+const vigra = @import("vigra.zig");
 
 pub const Rect = struct {
     x0: u32,
@@ -53,27 +54,18 @@ pub fn detectInterestPointsPartial(
     allocator: std.mem.Allocator,
     image: *const gray.GrayImage,
     rect: Rect,
+    scale: f64,
     max_points: u32,
 ) std.mem.Allocator.Error![]InterestPoint {
-    if (rect.width() < 5 or rect.height() < 5 or max_points == 0) {
+    if (rect.width() < 3 or rect.height() < 3 or max_points == 0) {
         return allocator.alloc(InterestPoint, 0);
     }
 
-    const rect_width = @as(usize, rect.width());
-    const rect_height = @as(usize, rect.height());
-    const responses = try allocator.alloc(f32, rect_width * rect_height);
-    defer allocator.free(responses);
-    @memset(responses, 0);
+    var local = try extractRectImage(allocator, image, rect);
+    defer local.deinit(allocator);
 
-    const response_end_y = rect.y1 - 2;
-    const response_end_x = rect.x1 - 2;
-    var y = rect.y0 + 2;
-    while (y < response_end_y) : (y += 1) {
-        var x = rect.x0 + 2;
-        while (x < response_end_x) : (x += 1) {
-            responses[responseIndex(rect, x, y)] = harrisResponse(image, x, y);
-        }
-    }
+    var response = try vigra.cornerResponse(allocator, &local, scale);
+    defer response.deinit(allocator);
 
     var points: std.ArrayList(InterestPoint) = .empty;
     defer points.deinit(allocator);
@@ -81,17 +73,17 @@ pub fn detectInterestPointsPartial(
 
     var min_score: f32 = 0;
 
-    y = rect.y0 + 2;
-    while (y < response_end_y) : (y += 1) {
-        var x = rect.x0 + 2;
-        while (x < response_end_x) : (x += 1) {
-            const score = responses[responseIndex(rect, x, y)];
-            if (score <= min_score or !isLocalMaximum(responses, rect, x, y, score)) {
+    var y: u32 = 1;
+    while (y + 1 < local.height) : (y += 1) {
+        var x: u32 = 1;
+        while (x + 1 < local.width) : (x += 1) {
+            const score = response.pixel(x, y);
+            if (score <= min_score or !vigra.isStrictLocalMaximum(&response, x, y, 0)) {
                 continue;
             }
             points.appendAssumeCapacity(.{
-                .x = x,
-                .y = y,
+                .x = rect.x0 + x,
+                .y = rect.y0 + y,
                 .score = score,
             });
 
@@ -121,8 +113,27 @@ pub fn detectInterestPointsPartial(
     return points.toOwnedSlice(allocator);
 }
 
-fn responseIndex(rect: Rect, x: u32, y: u32) usize {
-    return @as(usize, y - rect.y0) * @as(usize, rect.width()) + @as(usize, x - rect.x0);
+fn extractRectImage(
+    allocator: std.mem.Allocator,
+    image: *const gray.GrayImage,
+    rect: Rect,
+) std.mem.Allocator.Error!gray.GrayImage {
+    const width = rect.width();
+    const height = rect.height();
+    const pixels = try allocator.alloc(f32, @as(usize, width) * @as(usize, height));
+    errdefer allocator.free(pixels);
+
+    for (0..height) |dy| {
+        for (0..width) |dx| {
+            pixels[dy * width + dx] = image.pixel(rect.x0 + @as(u32, @intCast(dx)), rect.y0 + @as(u32, @intCast(dy)));
+        }
+    }
+
+    return .{
+        .width = width,
+        .height = height,
+        .pixels = pixels,
+    };
 }
 
 fn findWeakestPoint(points: []const InterestPoint) usize {
@@ -135,49 +146,6 @@ fn findWeakestPoint(points: []const InterestPoint) usize {
         }
     }
     return weakest_index;
-}
-
-fn harrisResponse(image: *const gray.GrayImage, x: u32, y: u32) f32 {
-    var sum_xx: f32 = 0;
-    var sum_yy: f32 = 0;
-    var sum_xy: f32 = 0;
-
-    var wy = y - 1;
-    while (wy <= y + 1) : (wy += 1) {
-        var wx = x - 1;
-        while (wx <= x + 1) : (wx += 1) {
-            const ix = image.pixel(wx + 1, wy) - image.pixel(wx - 1, wy);
-            const iy = image.pixel(wx, wy + 1) - image.pixel(wx, wy - 1);
-            sum_xx += ix * ix;
-            sum_yy += iy * iy;
-            sum_xy += ix * iy;
-        }
-    }
-
-    const trace = sum_xx + sum_yy;
-    return (sum_xx * sum_yy - sum_xy * sum_xy) - 0.04 * trace * trace;
-}
-
-fn isLocalMaximum(
-    responses: []const f32,
-    rect: Rect,
-    x: u32,
-    y: u32,
-    score: f32,
-) bool {
-    var ny = y - 1;
-    while (ny <= y + 1) : (ny += 1) {
-        var nx = x - 1;
-        while (nx <= x + 1) : (nx += 1) {
-            if (nx == x and ny == y) {
-                continue;
-            }
-            if (responses[responseIndex(rect, nx, ny)] >= score) {
-                return false;
-            }
-        }
-    }
-    return true;
 }
 
 test "grid rectangles cover the image" {
@@ -214,7 +182,7 @@ test "interest point detector finds a strong corner" {
         .y0 = 0,
         .x1 = 7,
         .y1 = 7,
-    }, 8);
+    }, 2.0, 8);
     defer allocator.free(points);
 
     try std.testing.expect(points.len > 0);
