@@ -1,4 +1,5 @@
 const std = @import("std");
+const profiler = @import("profiler.zig");
 
 pub const Params = struct {
     ftol: f64,
@@ -26,6 +27,9 @@ pub fn lmdif(
     m: usize,
     params: Params,
 ) !Result {
+    const prof = profiler.scope("minpack.lmdif");
+    defer prof.end();
+
     const n = x.len;
     if (n == 0 or m < n) return .{ .info = 0, .nfev = 0 };
 
@@ -66,132 +70,142 @@ pub fn lmdif(
     var xnorm: f64 = 1.0e-4;
 
     while (true) {
-        try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
-        nfev += n;
+        {
+            const iter_prof = profiler.scope("minpack.lmdif.outer_iteration");
+            defer iter_prof.end();
 
-        qrfac(fjac, m, n, true, ipvt, wa1, wa2, wa3);
+            try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
+            nfev += n;
 
-        if (iter == 1) {
-            for (0..n) |j| {
-                diag[j] = if (wa2[j] == 0.0) 1.0 else wa2[j];
-                wa3[j] = diag[j] * x[j];
-            }
-            xnorm = enorm(wa3);
-            delta = params.factor * xnorm;
-            if (delta == 0.0) delta = params.factor;
-        } else {
-            for (0..n) |j| {
-                diag[j] = @max(diag[j], wa2[j]);
-                wa2[j] = diag[j] * x[j];
-            }
-            xnorm = enorm(wa2);
-        }
+            qrfac(fjac, m, n, true, ipvt, wa1, wa2, wa3);
 
-        for (0..m) |i| wa4[i] = fvec[i];
-        for (0..n) |j| {
-            const diag_index = index(m, j, j);
-            const temp3 = fjac[diag_index];
-            if (temp3 != 0.0) {
-                var sum: f64 = 0.0;
-                for (j..m) |i| {
-                    sum += fjac[index(m, i, j)] * wa4[i];
-                }
-                const temp = -sum / temp3;
-                for (j..m) |i| {
-                    wa4[i] += fjac[index(m, i, j)] * temp;
-                }
-            }
-            fjac[diag_index] = wa1[j];
-            qtf[j] = wa4[j];
-        }
-
-        var gnorm: f64 = 0.0;
-        if (fnorm != 0.0) {
-            for (0..n) |j| {
-                const l = ipvt[j];
-                if (wa2[l] != 0.0) {
-                    var sum: f64 = 0.0;
-                    for (0..j + 1) |i| {
-                        sum += fjac[index(m, i, j)] * (qtf[i] / fnorm);
-                    }
-                    gnorm = @max(gnorm, @abs(sum / wa2[l]));
-                }
-            }
-        }
-        if (gnorm <= params.gtol) {
-            return .{ .info = 4, .nfev = nfev };
-        }
-
-        while (true) {
-            try lmpar(allocator, fjac, m, n, ipvt, diag, qtf, delta, &par, wa1, wa2, wa3, wa4);
-
-            for (0..n) |j| {
-                wa1[j] = -wa1[j];
-                wa2[j] = x[j] + wa1[j];
-                wa3[j] = diag[j] * wa1[j];
-            }
-            const pnorm = enorm(wa3);
             if (iter == 1) {
-                delta = @min(delta, pnorm);
-            }
-
-            try evalFn(ctx, wa2, wa4);
-            nfev += 1;
-            const fnorm1 = enorm(wa4);
-
-            var actred: f64 = -1.0;
-            if (0.1 * fnorm1 < fnorm) {
-                const temp = fnorm1 / fnorm;
-                actred = 1.0 - temp * temp;
-            }
-
-            @memset(wa3, 0.0);
-            for (0..n) |j| {
-                const l = ipvt[j];
-                const temp = wa1[l];
-                for (0..j + 1) |i| {
-                    wa3[i] += fjac[index(m, i, j)] * temp;
+                for (0..n) |j| {
+                    diag[j] = if (wa2[j] == 0.0) 1.0 else wa2[j];
+                    wa3[j] = diag[j] * x[j];
                 }
-            }
-
-            const temp1 = enorm(wa3) / fnorm;
-            const temp2 = (@sqrt(par) * pnorm) / fnorm;
-            const prered = temp1 * temp1 + (temp2 * temp2) / 0.5;
-            const dirder = -(temp1 * temp1 + temp2 * temp2);
-            const ratio = if (prered != 0.0) actred / prered else 0.0;
-
-            if (ratio <= 0.25) {
-                var temp: f64 = 0.5;
-                if (actred < 0.0) {
-                    temp = 0.5 * dirder / (dirder + 0.5 * actred);
+                xnorm = enorm(wa3);
+                delta = params.factor * xnorm;
+                if (delta == 0.0) delta = params.factor;
+            } else {
+                for (0..n) |j| {
+                    diag[j] = @max(diag[j], wa2[j]);
+                    wa2[j] = diag[j] * x[j];
                 }
-                if (0.1 * fnorm1 >= fnorm or temp < 0.1) temp = 0.1;
-                delta = temp * @min(delta, pnorm / 0.1);
-                par /= temp;
-            } else if (par == 0.0 or ratio >= 0.75) {
-                delta = pnorm / 0.5;
-                par *= 0.5;
-            }
-
-            if (ratio >= 1.0e-4) {
-                @memcpy(x, wa2);
-                @memcpy(fvec, wa4);
-                fnorm = fnorm1;
-                for (0..n) |j| wa2[j] = diag[j] * x[j];
                 xnorm = enorm(wa2);
-                iter += 1;
             }
 
-            const info1 = @abs(actred) <= params.ftol and prered <= params.ftol and 0.5 * ratio <= 1.0;
-            const info2 = delta <= params.xtol * xnorm;
-            if (info1 and info2) return .{ .info = 3, .nfev = nfev };
-            if (info1) return .{ .info = 1, .nfev = nfev };
-            if (info2) return .{ .info = 2, .nfev = nfev };
-            if (nfev >= params.maxfev) return .{ .info = 5, .nfev = nfev };
-            if (@abs(actred) <= machep and prered <= machep and 0.5 * ratio <= 1.0) return .{ .info = 6, .nfev = nfev };
-            if (delta <= machep * xnorm) return .{ .info = 7, .nfev = nfev };
-            if (gnorm <= machep) return .{ .info = 8, .nfev = nfev };
-            if (ratio >= 1.0e-4) break;
+            for (0..m) |i| wa4[i] = fvec[i];
+            for (0..n) |j| {
+                const diag_index = index(m, j, j);
+                const temp3 = fjac[diag_index];
+                if (temp3 != 0.0) {
+                    var sum: f64 = 0.0;
+                    for (j..m) |i| {
+                        sum += fjac[index(m, i, j)] * wa4[i];
+                    }
+                    const temp = -sum / temp3;
+                    for (j..m) |i| {
+                        wa4[i] += fjac[index(m, i, j)] * temp;
+                    }
+                }
+                fjac[diag_index] = wa1[j];
+                qtf[j] = wa4[j];
+            }
+
+            var gnorm: f64 = 0.0;
+            if (fnorm != 0.0) {
+                for (0..n) |j| {
+                    const l = ipvt[j];
+                    if (wa2[l] != 0.0) {
+                        var sum: f64 = 0.0;
+                        for (0..j + 1) |i| {
+                            sum += fjac[index(m, i, j)] * (qtf[i] / fnorm);
+                        }
+                        gnorm = @max(gnorm, @abs(sum / wa2[l]));
+                    }
+                }
+            }
+            if (gnorm <= params.gtol) {
+                return .{ .info = 4, .nfev = nfev };
+            }
+
+            while (true) {
+                {
+                    const trial_prof = profiler.scope("minpack.lmdif.trial_step");
+                    defer trial_prof.end();
+
+                    try lmpar(allocator, fjac, m, n, ipvt, diag, qtf, delta, &par, wa1, wa2, wa3, wa4);
+
+                    for (0..n) |j| {
+                        wa1[j] = -wa1[j];
+                        wa2[j] = x[j] + wa1[j];
+                        wa3[j] = diag[j] * wa1[j];
+                    }
+                    const pnorm = enorm(wa3);
+                    if (iter == 1) {
+                        delta = @min(delta, pnorm);
+                    }
+
+                    try evalFn(ctx, wa2, wa4);
+                    nfev += 1;
+                    const fnorm1 = enorm(wa4);
+
+                    var actred: f64 = -1.0;
+                    if (0.1 * fnorm1 < fnorm) {
+                        const temp = fnorm1 / fnorm;
+                        actred = 1.0 - temp * temp;
+                    }
+
+                    @memset(wa3, 0.0);
+                    for (0..n) |j| {
+                        const l = ipvt[j];
+                        const temp = wa1[l];
+                        for (0..j + 1) |i| {
+                            wa3[i] += fjac[index(m, i, j)] * temp;
+                        }
+                    }
+
+                    const temp1 = enorm(wa3) / fnorm;
+                    const temp2 = (@sqrt(par) * pnorm) / fnorm;
+                    const prered = temp1 * temp1 + (temp2 * temp2) / 0.5;
+                    const dirder = -(temp1 * temp1 + temp2 * temp2);
+                    const ratio = if (prered != 0.0) actred / prered else 0.0;
+
+                    if (ratio <= 0.25) {
+                        var temp: f64 = 0.5;
+                        if (actred < 0.0) {
+                            temp = 0.5 * dirder / (dirder + 0.5 * actred);
+                        }
+                        if (0.1 * fnorm1 >= fnorm or temp < 0.1) temp = 0.1;
+                        delta = temp * @min(delta, pnorm / 0.1);
+                        par /= temp;
+                    } else if (par == 0.0 or ratio >= 0.75) {
+                        delta = pnorm / 0.5;
+                        par *= 0.5;
+                    }
+
+                    if (ratio >= 1.0e-4) {
+                        @memcpy(x, wa2);
+                        @memcpy(fvec, wa4);
+                        fnorm = fnorm1;
+                        for (0..n) |j| wa2[j] = diag[j] * x[j];
+                        xnorm = enorm(wa2);
+                        iter += 1;
+                    }
+
+                    const info1 = @abs(actred) <= params.ftol and prered <= params.ftol and 0.5 * ratio <= 1.0;
+                    const info2 = delta <= params.xtol * xnorm;
+                    if (info1 and info2) return .{ .info = 3, .nfev = nfev };
+                    if (info1) return .{ .info = 1, .nfev = nfev };
+                    if (info2) return .{ .info = 2, .nfev = nfev };
+                    if (nfev >= params.maxfev) return .{ .info = 5, .nfev = nfev };
+                    if (@abs(actred) <= machep and prered <= machep and 0.5 * ratio <= 1.0) return .{ .info = 6, .nfev = nfev };
+                    if (delta <= machep * xnorm) return .{ .info = 7, .nfev = nfev };
+                    if (gnorm <= machep) return .{ .info = 8, .nfev = nfev };
+                    if (ratio >= 1.0e-4) break;
+                }
+            }
         }
     }
 }
@@ -208,6 +222,9 @@ fn fdjac2(
     epsfcn: f64,
     wa: []f64,
 ) !void {
+    const prof = profiler.scope("minpack.fdjac2");
+    defer prof.end();
+
     const eps = @sqrt(@max(epsfcn, machep));
     for (0..n) |j| {
         const temp = x[j];
@@ -223,6 +240,9 @@ fn fdjac2(
 }
 
 fn qrfac(a: []f64, m: usize, n: usize, pivot: bool, ipvt: []usize, rdiag: []f64, acnorm: []f64, wa: []f64) void {
+    const prof = profiler.scope("minpack.qrfac");
+    defer prof.end();
+
     for (0..n) |j| {
         acnorm[j] = enormColumn(a, m, j, 0);
         rdiag[j] = acnorm[j];
@@ -303,6 +323,9 @@ fn lmpar(
     wa1: []f64,
     wa2: []f64,
 ) !void {
+    const prof = profiler.scope("minpack.lmpar");
+    defer prof.end();
+
     _ = allocator;
     var nsing = n;
     for (0..n) |j| {
@@ -365,40 +388,48 @@ fn lmpar(
 
     var iter: usize = 0;
     while (true) {
-        iter += 1;
-        if (par.* == 0.0) par.* = @max(dwarf, 0.001 * paru);
-        const temp = @sqrt(par.*);
-        for (0..n) |j| wa1[j] = temp * diag[j];
-        qrsolv(r, ldr, n, ipvt, wa1, qtb, x, sdiag, wa2);
-        for (0..n) |j| wa2[j] = diag[j] * x[j];
-        const dxnorm_iter = enorm(wa2);
-        const prev_fp = fp;
-        fp = dxnorm_iter - delta;
-        if (@abs(fp) <= 0.1 * delta or (parl == 0.0 and fp <= prev_fp and prev_fp < 0.0) or iter == 10) {
-            return;
-        }
+        {
+            const iter_prof = profiler.scope("minpack.lmpar.iteration");
+            defer iter_prof.end();
 
-        for (0..n) |j| {
-            const l = ipvt[j];
-            wa1[j] = diag[l] * (wa2[l] / dxnorm_iter);
-        }
-        for (0..n) |j| {
-            wa1[j] /= sdiag[j];
-            const temp2 = wa1[j];
-            const jp1 = j + 1;
-            if (jp1 < n) {
-                for (jp1..n) |i| wa1[i] -= r[index(ldr, i, j)] * temp2;
+            iter += 1;
+            if (par.* == 0.0) par.* = @max(dwarf, 0.001 * paru);
+            const temp = @sqrt(par.*);
+            for (0..n) |j| wa1[j] = temp * diag[j];
+            qrsolv(r, ldr, n, ipvt, wa1, qtb, x, sdiag, wa2);
+            for (0..n) |j| wa2[j] = diag[j] * x[j];
+            const dxnorm_iter = enorm(wa2);
+            const prev_fp = fp;
+            fp = dxnorm_iter - delta;
+            if (@abs(fp) <= 0.1 * delta or (parl == 0.0 and fp <= prev_fp and prev_fp < 0.0) or iter == 10) {
+                return;
             }
+
+            for (0..n) |j| {
+                const l = ipvt[j];
+                wa1[j] = diag[l] * (wa2[l] / dxnorm_iter);
+            }
+            for (0..n) |j| {
+                wa1[j] /= sdiag[j];
+                const temp2 = wa1[j];
+                const jp1 = j + 1;
+                if (jp1 < n) {
+                    for (jp1..n) |i| wa1[i] -= r[index(ldr, i, j)] * temp2;
+                }
+            }
+            const temp3 = enorm(wa1);
+            const parc = ((fp / delta) / temp3) / temp3;
+            if (fp > 0.0) parl = @max(parl, par.*);
+            if (fp < 0.0) paru = @min(paru, par.*);
+            par.* = @max(parl, par.* + parc);
         }
-        const temp3 = enorm(wa1);
-        const parc = ((fp / delta) / temp3) / temp3;
-        if (fp > 0.0) parl = @max(parl, par.*);
-        if (fp < 0.0) paru = @min(paru, par.*);
-        par.* = @max(parl, par.* + parc);
     }
 }
 
 fn qrsolv(r: []f64, ldr: usize, n: usize, ipvt: []const usize, diag: []const f64, qtb: []const f64, x: []f64, sdiag: []f64, wa: []f64) void {
+    const prof = profiler.scope("minpack.qrsolv");
+    defer prof.end();
+
     for (0..n) |j| {
         for (j..n) |i| {
             r[index(ldr, i, j)] = r[index(ldr, j, i)];

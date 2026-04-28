@@ -1211,6 +1211,9 @@ fn numericalResidualDerivative(
     image_index: usize,
     field: PoseField,
 ) Vec2d {
+    const prof = profiler.scope("optimize.numericalResidualDerivative");
+    defer prof.end();
+
     var perturbed_pose = poses[image_index];
     const base_value = solveSpaceValue(perturbed_pose, field);
     const epsilon = solveSpaceEpsilon(base_value);
@@ -1231,6 +1234,9 @@ fn numericalDistanceResidualDerivative(
     image_index: usize,
     field: PoseField,
 ) f64 {
+    const prof = profiler.scope("optimize.numericalDistanceResidualDerivative");
+    defer prof.end();
+
     var perturbed_pose = poses[image_index];
     const base_value = solveSpaceValue(perturbed_pose, field);
     const epsilon = solveSpaceEpsilon(base_value);
@@ -1248,6 +1254,9 @@ fn numericalDerivative(
     height: u32,
     field: PoseField,
 ) Vec2d {
+    const prof = profiler.scope("optimize.numericalDerivative");
+    defer prof.end();
+
     const epsilon: f64 = switch (field) {
         .yaw, .pitch, .roll => 1e-5,
         .hfov_delta => 1e-5,
@@ -1412,6 +1421,9 @@ fn objectiveResidualVectorCached(
     pair_match: match_mod.PairMatches,
     cp: match_mod.ControlPoint,
 ) Vec2d {
+    const prof = profiler.scope("optimize.objectiveResidualVectorCached");
+    defer prof.end();
+
     var residual = controlPointResidualVectorCached(poses, basic_rect_caches, pair_match, cp);
     residual.x = huberResidualComponent(residual.x, huber_sigma_pixels);
     residual.y = huberResidualComponent(residual.y, huber_sigma_pixels);
@@ -1427,6 +1439,9 @@ fn objectiveDistanceResidualCached(
     pair_match: match_mod.PairMatches,
     cp: match_mod.ControlPoint,
 ) f64 {
+    const prof = profiler.scope("optimize.objectiveDistanceResidualCached");
+    defer prof.end();
+
     return objective_scale * controlPointDistanceResidualCached(poses, basic_rect_caches, pair_match, cp);
 }
 
@@ -1484,6 +1499,9 @@ fn exactDistSphereResidualVector(left_pose: ImagePose, right_pose: ImagePose, pa
 }
 
 fn exactDistSphereResidualVectorCached(left: BasicRectEquirectCache, right: BasicRectEquirectCache, cp: match_mod.ControlPoint) Vec2d {
+    const prof = profiler.scope("optimize.exactDistSphereResidualVectorCached");
+    defer prof.end();
+
     const left_point = imageToEquirectDegreesCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
     const right_point = imageToEquirectDegreesCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
     const lon_left = left_point.x * degrees_to_radians;
@@ -1518,6 +1536,9 @@ fn exactDistSphereDistance(left_pose: ImagePose, right_pose: ImagePose, pair_mat
 }
 
 fn exactDistSphereDistanceCached(left: BasicRectEquirectCache, right: BasicRectEquirectCache, cp: match_mod.ControlPoint) f64 {
+    const prof = profiler.scope("optimize.exactDistSphereDistanceCached");
+    defer prof.end();
+
     const left_point = imageToEquirectDegreesCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
     const right_point = imageToEquirectDegreesCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
     const left_lon = left_point.x * degrees_to_radians;
@@ -1564,6 +1585,9 @@ fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u
 }
 
 fn imageToEquirectDegreesCached(cache: BasicRectEquirectCache, x: f64, y: f64) Point2 {
+    const prof = profiler.scope("optimize.imageToEquirectDegreesCached");
+    defer prof.end();
+
     var p = Point2{
         .x = (x - cache.center.x) * cache.image_scale,
         .y = (y - cache.center.y) * cache.image_scale,
@@ -1670,6 +1694,9 @@ fn rotateErectPoint(p: Point2, half_turn: f64, turn: f64) Point2 {
 }
 
 fn currentAverageHfovDegrees(poses: []const ImagePose) f64 {
+    const prof = profiler.scope("optimize.currentAverageHfovDegrees");
+    defer prof.end();
+
     return currentAverageHfovDegreesWithOverride(poses, null, .{});
 }
 
@@ -1683,6 +1710,9 @@ fn currentAverageHfovDegreesWithOverride(poses: []const ImagePose, override_imag
 }
 
 fn objectiveFovScale(initial_avg_hfov: f64, current_avg_hfov: f64) f64 {
+    const prof = profiler.scope("optimize.objectiveFovScale");
+    defer prof.end();
+
     if (current_avg_hfov <= 1e-9) return 1.0;
     const ratio = initial_avg_hfov / current_avg_hfov;
     return if (ratio > 1.0) ratio else 1.0;
@@ -1740,6 +1770,9 @@ fn fillSolveVector(layout: []const SolveLayout, poses: []const ImagePose, solve_
 }
 
 fn applySolveVector(layout: []const SolveLayout, poses: []ImagePose, solve_x: []const f64) void {
+    const prof = profiler.scope("optimize.applySolveVector");
+    defer prof.end();
+
     for (1..poses.len) |image_index| {
         if (layout[image_index].yaw_index) |idx| setSolveSpaceValue(&poses[image_index], .yaw, solve_x[idx]);
         if (layout[image_index].pitch_index) |idx| setSolveSpaceValue(&poses[image_index], .pitch, solve_x[idx]);
@@ -1938,6 +1971,9 @@ const BasicRectEquirectCache = struct {
 };
 
 fn populateBasicRectEquirectCaches(poses: []const ImagePose, width: u32, height: u32, caches: []BasicRectEquirectCache) void {
+    const prof = profiler.scope("optimize.populateBasicRectEquirectCaches");
+    defer prof.end();
+
     std.debug.assert(poses.len == caches.len);
     for (poses, caches) |pose, *cache| {
         if (!hasBasicRectilinearPose(pose)) {
