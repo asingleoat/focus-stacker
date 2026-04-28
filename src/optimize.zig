@@ -591,28 +591,52 @@ pub fn evaluateObjectiveResiduals(
     pair_matches: []const match_mod.PairMatches,
     poses: []const ImagePose,
 ) ![]f64 {
+    return evaluateObjectiveResidualsPadded(allocator, strategy, initial_avg_hfov, pair_matches, poses, null);
+}
+
+pub fn evaluateObjectiveResidualsPadded(
+    allocator: std.mem.Allocator,
+    strategy: ObjectiveStrategy,
+    initial_avg_hfov: f64,
+    pair_matches: []const match_mod.PairMatches,
+    poses: []const ImagePose,
+    min_count: ?usize,
+) ![]f64 {
     const residual_count = switch (strategy) {
         .distance_only => countControlPoints(pair_matches),
         .componentwise => countControlPoints(pair_matches) * 2,
     };
-    const values = try allocator.alloc(f64, residual_count);
+    const output_count = @max(residual_count, min_count orelse 0);
+    const values = try allocator.alloc(f64, output_count);
 
     var out_index: usize = 0;
+    var squared_sum: f64 = 0.0;
     for (pair_matches) |pair_match| {
         for (pair_match.control_points) |cp| {
             switch (strategy) {
                 .distance_only => {
-                    values[out_index] = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+                    const residual = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+                    values[out_index] = residual;
+                    squared_sum += residual * residual;
                     out_index += 1;
                 },
                 .componentwise => {
                     const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
                     values[out_index] = residual.x;
                     values[out_index + 1] = residual.y;
+                    squared_sum += residual.x * residual.x + residual.y * residual.y;
                     out_index += 2;
                 },
             }
         }
+    }
+
+    const fill_value = if (residual_count > 0)
+        @sqrt(squared_sum / @as(f64, @floatFromInt(residual_count)))
+    else
+        0.0;
+    for (out_index..values.len) |i| {
+        values[i] = fill_value;
     }
 
     return values;

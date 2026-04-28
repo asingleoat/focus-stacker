@@ -1,4 +1,5 @@
 const std = @import("std");
+const minpack_mod = @import("minpack.zig");
 
 const c = @cImport({
     @cInclude("filter.h");
@@ -24,6 +25,21 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "lm-params")) {
         const solve_x = try collectSolveVector(allocator, &info, args[3..]);
+        defer allocator.free(solve_x);
+        try printVector(solve_x);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "solve-lm-params")) {
+        try runOptimizer(&info);
+        const solve_x = try collectSolveVector(allocator, &info, &.{});
+        defer allocator.free(solve_x);
+        try printVector(solve_x);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "solve-lm-params-zigminpack")) {
+        const solve_x = try runZigMinpackOptimizer(allocator, &info);
         defer allocator.free(solve_x);
         try printVector(solve_x);
         return;
@@ -66,6 +82,18 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "jac-column")) {
+        if (args.len < 5) usage();
+        const strategy = try parseStrategy(args[3]);
+        const parameter_index = try std.fmt.parseInt(usize, args[4], 10);
+        const solve_x = try collectSolveVector(allocator, &info, args[5..]);
+        defer allocator.free(solve_x);
+        const column = try evaluateJacobianColumn(allocator, &info, strategy, solve_x, parameter_index);
+        defer allocator.free(column);
+        try printVector(column);
+        return;
+    }
+
     usage();
 }
 
@@ -73,8 +101,11 @@ fn usage() noreturn {
     std.debug.print(
         \\usage:
         \\  upstream_probe lm-params <pto>
+        \\  upstream_probe solve-lm-params <pto>
+        \\  upstream_probe solve-lm-params-zigminpack <pto>
         \\  upstream_probe image-vars <pto> [x...]
         \\  upstream_probe fvec <pto> <1|2|distance_only|componentwise> [x...]
+        \\  upstream_probe jac-column <pto> <1|2|distance_only|componentwise> <param_index> [x...]
         \\  upstream_probe cp-error <pto> <cp_index> [x...]
         \\
     , .{});
@@ -118,6 +149,22 @@ fn sanitizeOptimizerScript(allocator: std.mem.Allocator, script: []const u8) ![]
             try out.append(allocator, '\n');
             continue;
         }
+        if (line.len > 0 and line[0] == 'i') {
+            try out.append(allocator, 'i');
+            var tokens = TokenIterator{ .line = line[1..] };
+            while (tokens.next()) |token| {
+                if (keepImageToken(token)) {
+                    try out.append(allocator, ' ');
+                    try out.appendSlice(allocator, token);
+                }
+            }
+            try out.append(allocator, '\n');
+            continue;
+        }
+        if (line.len > 0 and line[0] == 'v') {
+            const trimmed = std.mem.trim(u8, line[1..], " \t\r");
+            if (trimmed.len == 0) continue;
+        }
         try out.appendSlice(allocator, line);
         try out.append(allocator, '\n');
     }
@@ -131,6 +178,39 @@ fn keepPanoToken(token: []const u8) bool {
         std.mem.startsWith(u8, token, "h") or
         std.mem.startsWith(u8, token, "v") or
         std.mem.startsWith(u8, token, "P");
+}
+
+fn keepImageToken(token: []const u8) bool {
+    return prefixedValue(token, "w") != null or
+        prefixedValue(token, "h") != null or
+        prefixedValue(token, "f") != null or
+        prefixedValue(token, "v") != null or
+        prefixedValue(token, "r") != null or
+        prefixedValue(token, "p") != null or
+        prefixedValue(token, "y") != null or
+        prefixedValue(token, "TrX") != null or
+        prefixedValue(token, "TrY") != null or
+        prefixedValue(token, "TrZ") != null or
+        prefixedValue(token, "Tpy") != null or
+        prefixedValue(token, "Tpp") != null or
+        prefixedValue(token, "a") != null or
+        prefixedValue(token, "b") != null or
+        prefixedValue(token, "c") != null or
+        prefixedValue(token, "d") != null or
+        prefixedValue(token, "e") != null or
+        prefixedValue(token, "n") != null;
+}
+
+fn prefixedValue(token: []const u8, prefix: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, token, prefix)) return null;
+    const rest = token[prefix.len..];
+    if (rest.len == 0) return rest;
+    if (rest[0] == '=') return rest[1..];
+    const first = rest[0];
+    if (std.ascii.isDigit(first) or first == '-' or first == '+' or first == '.' or first == '"') {
+        return rest;
+    }
+    return null;
 }
 
 fn collectSolveVector(allocator: std.mem.Allocator, info: *c.AlignInfo, trailing_args: []const []const u8) ![]f64 {
@@ -167,6 +247,98 @@ fn evaluateFvec(allocator: std.mem.Allocator, info: *c.AlignInfo, strategy: c_in
     iflag = 1;
     _ = c.fcnPano(@intCast(count), @intCast(n), solve_x.ptr, fvec.ptr, &iflag);
     return fvec;
+}
+
+fn evaluateJacobianColumn(
+    allocator: std.mem.Allocator,
+    info: *c.AlignInfo,
+    strategy: c_int,
+    solve_x: []f64,
+    parameter_index: usize,
+) ![]f64 {
+    if (parameter_index >= solve_x.len) return error.ParameterOutOfRange;
+
+    const base_fvec = try evaluateFvec(allocator, info, strategy, solve_x);
+    defer allocator.free(base_fvec);
+
+    const shifted_x = try allocator.dupe(f64, solve_x);
+    defer allocator.free(shifted_x);
+    const eps = @sqrt(@max(std.math.floatEps(f64) * 10.0, std.math.floatEps(f64)));
+    var h = eps * @abs(shifted_x[parameter_index]);
+    if (h == 0.0) h = eps;
+    shifted_x[parameter_index] += h;
+
+    const shifted_fvec = try evaluateFvec(allocator, info, strategy, shifted_x);
+    defer allocator.free(shifted_fvec);
+
+    const column = try allocator.alloc(f64, base_fvec.len);
+    for (column, base_fvec, shifted_fvec) |*out, base_value, shifted_value| {
+        out.* = (shifted_value - base_value) / h;
+    }
+    return column;
+}
+
+fn runOptimizer(info: *c.AlignInfo) !void {
+    info.fcn = c.fcnPano;
+    var opt = std.mem.zeroes(c.OptInfo);
+    opt.numVars = info.numParam;
+    opt.numData = info.numPts;
+    opt.SetVarsToX = c.SetLMParams;
+    opt.SetXToVars = c.SetAlignParams;
+    opt.fcn = info.fcn;
+    c.RunLMOptimizer(&opt);
+}
+
+const UpstreamSolveContext = struct {
+    m: usize,
+    n: usize,
+};
+
+fn runZigMinpackOptimizer(allocator: std.mem.Allocator, info: *c.AlignInfo) ![]f64 {
+    info.fcn = c.fcnPano;
+    const n: usize = @intCast(info.numParam);
+    if (n == 0) return allocator.alloc(f64, 0);
+
+    const current = try allocator.alloc(f64, n);
+    errdefer allocator.free(current);
+    if (c.SetLMParams(current.ptr) != 0) return error.SetLMParamsFailed;
+
+    for ([_]c_int{ 1, 2 }) |strategy| {
+        c.setFcnPanoNperCP(strategy);
+        const actual_m = @as(usize, @intCast(info.numPts)) * @as(usize, @intCast(strategy));
+        const m = @max(actual_m, n);
+        var ctx = UpstreamSolveContext{ .m = m, .n = n };
+
+        const initial_fvec = try allocator.alloc(f64, m);
+        defer allocator.free(initial_fvec);
+        var reset_iflag: c_int = -100;
+        _ = c.fcnPano(@intCast(m), @intCast(n), current.ptr, initial_fvec.ptr, &reset_iflag);
+        if (strategy == 2) {
+            c.setFcnPanoDoNotInitAvgFov();
+        }
+
+        const params = minpack_mod.Params{
+            .ftol = if (strategy == 1) 0.05 else 1.0e-6,
+            .xtol = std.math.floatEps(f64),
+            .gtol = std.math.floatEps(f64),
+            .maxfev = 100 * (n + 1) * 100,
+            .epsfcn = std.math.floatEps(f64) * 10.0,
+            .factor = 100.0,
+        };
+        _ = try minpack_mod.lmdif(UpstreamSolveContext, allocator, &ctx, evaluateUpstreamSolveVector, current, m, params);
+    }
+
+    _ = c.SetAlignParams(current.ptr);
+    const final = try allocator.alloc(f64, n);
+    if (c.SetLMParams(final.ptr) != 0) return error.SetLMParamsFailed;
+    return final;
+}
+
+fn evaluateUpstreamSolveVector(ctx: *UpstreamSolveContext, x: []const f64, fvec: []f64) !void {
+    std.debug.assert(x.len == ctx.n);
+    std.debug.assert(fvec.len == ctx.m);
+    var iflag: c_int = 1;
+    _ = c.fcnPano(@intCast(ctx.m), @intCast(ctx.n), @constCast(x.ptr), fvec.ptr, &iflag);
 }
 
 fn printVector(values: []const f64) !void {

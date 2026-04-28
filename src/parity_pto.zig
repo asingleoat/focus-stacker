@@ -121,42 +121,42 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Project {
                 image.pose.base_hfov_degrees = pano_hfov_degrees;
                 var token_iter = TokenIterator{ .line = line[1..] };
                 while (token_iter.next()) |token| {
-                    if (prefixed(token, "w")) |value| {
+                    if (assignmentValue(token, "w")) |value| {
                         image.width = try std.fmt.parseInt(u32, value, 10);
-                    } else if (prefixed(token, "h")) |value| {
+                    } else if (assignmentValue(token, "h")) |value| {
                         image.height = try std.fmt.parseInt(u32, value, 10);
-                    } else if (prefixed(token, "f")) |value| {
+                    } else if (assignmentValue(token, "f")) |value| {
                         image.projection = try std.fmt.parseInt(u8, value, 10);
-                    } else if (prefixed(token, "TrX")) |value| {
+                    } else if (assignmentValue(token, "TrX")) |value| {
                         image.pose.trans_x = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "TrY")) |value| {
+                    } else if (assignmentValue(token, "TrY")) |value| {
                         image.pose.trans_y = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "TrZ")) |value| {
+                    } else if (assignmentValue(token, "TrZ")) |value| {
                         image.pose.trans_z = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "Tpy")) |value| {
+                    } else if (assignmentValue(token, "Tpy")) |value| {
                         image.pose.translation_plane_yaw = degreesToRadians(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "Tpp")) |value| {
+                    } else if (assignmentValue(token, "Tpp")) |value| {
                         image.pose.translation_plane_pitch = degreesToRadians(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "v")) |value| {
+                    } else if (assignmentValue(token, "v")) |value| {
                         const hfov = try std.fmt.parseFloat(f64, value);
                         image.pose.hfov_delta = hfov - pano_hfov_degrees;
-                    } else if (prefixed(token, "a")) |value| {
+                    } else if (assignmentValue(token, "a")) |value| {
                         image.pose.radial_a = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "b")) |value| {
+                    } else if (assignmentValue(token, "b")) |value| {
                         image.pose.radial_b = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "c")) |value| {
+                    } else if (assignmentValue(token, "c")) |value| {
                         image.pose.radial_c = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "d")) |value| {
+                    } else if (assignmentValue(token, "d")) |value| {
                         image.pose.center_shift_x = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "e")) |value| {
+                    } else if (assignmentValue(token, "e")) |value| {
                         image.pose.center_shift_y = try std.fmt.parseFloat(f64, value);
-                    } else if (prefixed(token, "y")) |value| {
+                    } else if (assignmentValue(token, "y")) |value| {
                         image.pose.yaw = degreesToRadians(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "p")) |value| {
+                    } else if (assignmentValue(token, "p")) |value| {
                         image.pose.pitch = degreesToRadians(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "r")) |value| {
+                    } else if (assignmentValue(token, "r")) |value| {
                         image.pose.roll = degreesToRadians(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "n")) |value| {
+                    } else if (assignmentValue(token, "n")) |value| {
                         image.path = try allocator.dupe(u8, stripQuotes(value));
                     }
                 }
@@ -189,19 +189,19 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Project {
 
                 var token_iter = TokenIterator{ .line = line[1..] };
                 while (token_iter.next()) |token| {
-                    if (prefixed(token, "n")) |value| {
+                    if (assignmentValue(token, "n")) |value| {
                         left_image = try std.fmt.parseInt(usize, value, 10);
-                    } else if (prefixed(token, "N")) |value| {
+                    } else if (assignmentValue(token, "N")) |value| {
                         right_image = try std.fmt.parseInt(usize, value, 10);
-                    } else if (prefixed(token, "x")) |value| {
+                    } else if (assignmentValue(token, "x")) |value| {
                         left_x = @floatCast(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "y")) |value| {
+                    } else if (assignmentValue(token, "y")) |value| {
                         left_y = @floatCast(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "X")) |value| {
+                    } else if (assignmentValue(token, "X")) |value| {
                         right_x = @floatCast(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "Y")) |value| {
+                    } else if (assignmentValue(token, "Y")) |value| {
                         right_y = @floatCast(try std.fmt.parseFloat(f64, value));
-                    } else if (prefixed(token, "t")) |value| {
+                    } else if (assignmentValue(token, "t")) |value| {
                         mode = try std.fmt.parseInt(u8, value, 10);
                     }
                 }
@@ -295,6 +295,17 @@ fn stripQuotes(value: []const u8) []const u8 {
 fn prefixed(token: []const u8, prefix: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, token, prefix)) {
         return token[prefix.len..];
+    }
+    return null;
+}
+
+fn assignmentValue(token: []const u8, label: []const u8) ?[]const u8 {
+    const rest = prefixed(token, label) orelse return null;
+    if (rest.len == 0) return rest;
+    if (rest[0] == '=') return rest[1..];
+    const first = rest[0];
+    if (std.ascii.isDigit(first) or first == '-' or first == '+' or first == '.' or first == '"') {
+        return rest;
     }
     return null;
 }

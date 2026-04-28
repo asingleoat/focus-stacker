@@ -27,6 +27,23 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "solve-lm-params")) {
+        const result = try optimize.solvePosesFromInitial(
+            allocator,
+            project.images.len,
+            project.pano_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+            base_poses,
+        );
+        defer allocator.free(result.poses);
+        defer allocator.free(result.residuals);
+        const solve_x = try optimize.encodeSolveVector(allocator, project.optimize_vector, result.poses);
+        defer allocator.free(solve_x);
+        try printVector(solve_x);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "image-vars")) {
         const solve_x = try collectSolveVector(allocator, args[3..], project.optimize_vector, base_poses);
         defer allocator.free(solve_x);
@@ -44,9 +61,28 @@ pub fn main() !void {
         const poses = try optimize.decodeSolveVector(allocator, project.optimize_vector, base_poses, solve_x);
         defer allocator.free(poses);
         const initial_avg_hfov = optimize.averageHfovDegrees(base_poses);
-        const fvec = try optimize.evaluateObjectiveResiduals(allocator, strategy, initial_avg_hfov, project.pair_matches, poses);
+        const fvec = try optimize.evaluateObjectiveResidualsPadded(
+            allocator,
+            strategy,
+            initial_avg_hfov,
+            project.pair_matches,
+            poses,
+            optimize.countSolveParameters(project.optimize_vector),
+        );
         defer allocator.free(fvec);
         try printVector(fvec);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "jac-column")) {
+        if (args.len < 5) usage();
+        const strategy = try parseStrategy(args[3]);
+        const parameter_index = try std.fmt.parseInt(usize, args[4], 10);
+        const solve_x = try collectSolveVector(allocator, args[5..], project.optimize_vector, base_poses);
+        defer allocator.free(solve_x);
+        const column = try evaluateJacobianColumn(allocator, strategy, project.optimize_vector, base_poses, project.pair_matches, solve_x, parameter_index);
+        defer allocator.free(column);
+        try printVector(column);
         return;
     }
 
@@ -73,8 +109,10 @@ fn usage() noreturn {
     std.debug.print(
         \\usage:
         \\  parity_probe lm-params <pto>
+        \\  parity_probe solve-lm-params <pto>
         \\  parity_probe image-vars <pto> [x...]
         \\  parity_probe fvec <pto> <distance_only|componentwise|1|2> [x...]
+        \\  parity_probe jac-column <pto> <distance_only|componentwise|1|2> <param_index> [x...]
         \\  parity_probe cp-error <pto> <cp_index> [x...]
         \\
     , .{});
@@ -123,6 +161,58 @@ fn printVector(values: []const f64) !void {
     for (values, 0..) |value, index| {
         std.debug.print("{d}: {d:.12}\n", .{ index, value });
     }
+}
+
+fn evaluateJacobianColumn(
+    allocator: std.mem.Allocator,
+    strategy: optimize.ObjectiveStrategy,
+    optimize_vector: []const optimize.VariableSet,
+    base_poses: []const optimize.ImagePose,
+    pair_matches: []const match_mod.PairMatches,
+    solve_x: []const f64,
+    parameter_index: usize,
+) ![]f64 {
+    if (parameter_index >= solve_x.len) return error.ParameterOutOfRange;
+
+    const initial_avg_hfov = optimize.averageHfovDegrees(base_poses);
+    const residual_count = optimize.countSolveParameters(optimize_vector);
+
+    const base_poses_eval = try optimize.decodeSolveVector(allocator, optimize_vector, base_poses, solve_x);
+    defer allocator.free(base_poses_eval);
+    const fvec = try optimize.evaluateObjectiveResidualsPadded(
+        allocator,
+        strategy,
+        initial_avg_hfov,
+        pair_matches,
+        base_poses_eval,
+        residual_count,
+    );
+    defer allocator.free(fvec);
+
+    const shifted_x = try allocator.dupe(f64, solve_x);
+    defer allocator.free(shifted_x);
+    const eps = @sqrt(@max(std.math.floatEps(f64) * 10.0, std.math.floatEps(f64)));
+    var h = eps * @abs(shifted_x[parameter_index]);
+    if (h == 0.0) h = eps;
+    shifted_x[parameter_index] += h;
+
+    const shifted_poses = try optimize.decodeSolveVector(allocator, optimize_vector, base_poses, shifted_x);
+    defer allocator.free(shifted_poses);
+    const shifted_fvec = try optimize.evaluateObjectiveResidualsPadded(
+        allocator,
+        strategy,
+        initial_avg_hfov,
+        pair_matches,
+        shifted_poses,
+        residual_count,
+    );
+    defer allocator.free(shifted_fvec);
+
+    const column = try allocator.alloc(f64, fvec.len);
+    for (column, fvec, shifted_fvec) |*out, base_value, shifted_value| {
+        out.* = (shifted_value - base_value) / h;
+    }
+    return column;
 }
 
 fn printImageVars(poses: []const optimize.ImagePose) !void {
