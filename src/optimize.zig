@@ -56,6 +56,16 @@ pub const ControlPointResidual = struct {
     residual: f64,
 };
 
+pub const ObjectiveStrategy = enum {
+    distance_only,
+    componentwise,
+};
+
+pub const ControlPointError = struct {
+    distance: f64,
+    components: Point2,
+};
+
 pub const SolveResult = struct {
     poses: []ImagePose,
     residuals: []ControlPointResidual,
@@ -542,6 +552,83 @@ const SolveStrategy = enum {
     distance_only,
     componentwise,
 };
+
+pub fn averageHfovDegrees(poses: []const ImagePose) f64 {
+    return currentAverageHfovDegrees(poses);
+}
+
+pub fn encodeSolveVector(
+    allocator: std.mem.Allocator,
+    optimize_vector: []const VariableSet,
+    poses: []const ImagePose,
+) ![]f64 {
+    const layout = try buildSolveLayout(allocator, optimize_vector);
+    defer allocator.free(layout);
+
+    const solve_x = try allocator.alloc(f64, countLayoutVariables(layout));
+    fillSolveVector(layout, poses, solve_x);
+    return solve_x;
+}
+
+pub fn decodeSolveVector(
+    allocator: std.mem.Allocator,
+    optimize_vector: []const VariableSet,
+    base_poses: []const ImagePose,
+    solve_x: []const f64,
+) ![]ImagePose {
+    const layout = try buildSolveLayout(allocator, optimize_vector);
+    defer allocator.free(layout);
+
+    const poses = try allocator.dupe(ImagePose, base_poses);
+    applySolveVector(layout, poses, solve_x);
+    return poses;
+}
+
+pub fn evaluateObjectiveResiduals(
+    allocator: std.mem.Allocator,
+    strategy: ObjectiveStrategy,
+    initial_avg_hfov: f64,
+    pair_matches: []const match_mod.PairMatches,
+    poses: []const ImagePose,
+) ![]f64 {
+    const residual_count = switch (strategy) {
+        .distance_only => countControlPoints(pair_matches),
+        .componentwise => countControlPoints(pair_matches) * 2,
+    };
+    const values = try allocator.alloc(f64, residual_count);
+
+    var out_index: usize = 0;
+    for (pair_matches) |pair_match| {
+        for (pair_match.control_points) |cp| {
+            switch (strategy) {
+                .distance_only => {
+                    values[out_index] = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+                    out_index += 1;
+                },
+                .componentwise => {
+                    const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
+                    values[out_index] = residual.x;
+                    values[out_index + 1] = residual.y;
+                    out_index += 2;
+                },
+            }
+        }
+    }
+
+    return values;
+}
+
+pub fn evaluateControlPointError(
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) ControlPointError {
+    const components = controlPointResidualVector(poses, pair_match, cp);
+    return .{
+        .distance = controlPointDistanceResidual(poses, pair_match, cp),
+        .components = .{ .x = components.x, .y = components.y },
+    };
+}
 
 fn refinePosesIteratively(
     allocator: std.mem.Allocator,

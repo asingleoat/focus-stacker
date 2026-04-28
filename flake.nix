@@ -20,6 +20,7 @@
         buildInputs = [
           pkgs.libgphoto2
           pkgs.libgpiod
+          pkgs.libpano13
           pkgs.libexif
           pkgs.libjpeg_turbo
           pkgs.libpng
