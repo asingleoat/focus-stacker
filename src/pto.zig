@@ -31,7 +31,7 @@ pub fn renderPto(
     const writer = list.writer(allocator);
 
     const projection: u8 = if (cfg.fisheye) 3 else 0;
-    const hfov = cfg.hfov orelse 50.0;
+    const hfov = cfg.hfov orelse if (images.len > 0) (images[0].hfov_degrees orelse 50.0) else 50.0;
     const output_ev = if (images.len > 0) (images[0].exposure_value orelse 0.0) else 0.0;
     const width: u32 = if (images.len > 0) images[0].width else 0;
     const height: u32 = if (images.len > 0) images[0].height else 0;

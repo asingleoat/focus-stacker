@@ -933,8 +933,8 @@ fn focalLengthPixels(width: u32, hfov_degrees: f64) f64 {
 
 fn panoramaCenter(width: u32, height: u32) Point2 {
     return .{
-        .x = @as(f64, @floatFromInt(width)) * 0.5,
-        .y = @as(f64, @floatFromInt(height)) * 0.5,
+        .x = (@as(f64, @floatFromInt(width)) - 1.0) * 0.5,
+        .y = (@as(f64, @floatFromInt(height)) - 1.0) * 0.5,
     };
 }
 

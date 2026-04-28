@@ -66,6 +66,7 @@ Implemented and working:
 
 - CLI parsing for the current ported option surface
 - input metadata loading
+- EXIF-derived initial HFOV inference from focal-length metadata when available
 - JPEG/PNG/TIFF decode via `libjpeg-turbo`, `libpng`, `libtiff`, and `libexif`
 - EV-based input ordering with the upstream `0.05` spread cutoff behavior
 - pair planning for consecutive matching and `--align-to-first`
@@ -120,6 +121,7 @@ Recent real-sequence checks used `S003/S003_0001.jpg` and `S003/S003_0002.jpg`.
 Observed baseline behavior:
 
 - with default `y/p/r`, the solve converges to small rotations rather than fake pixel shifts
+- with EXIF focal/crop metadata present, the port now initializes the baseline HFOV from metadata instead of falling back to `50`
 - with `-m -d -i`, the solve emits nonzero HFOV/radial/center-shift terms and writes them into PTO
 - with `-x -y -z`, the solve emits small camera-translation values and writes them into PTO
 - aligned TIFF outputs complete successfully for the current default, camera, and exercised translation paths
@@ -136,8 +138,8 @@ ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build run -- -v -x -y -z -a verifyali
 
 Representative outcomes at handoff time:
 
-- default `y/p/r`: post-prune RMS about `1.0449 px`
-- `-m -d -i`: post-prune RMS about `1.7824 px`
+- default `y/p/r`: post-prune RMS about `0.9819 px`
+- `-m -d -i`: on the `S003` pair now fails after pruning away all reference-image control points, which is closer to the upstream tool's behavior on this sample
 - `-x -y -z`: post-prune RMS about `1.6066 px`
 
 These numbers are useful for regression tracking, not as final quality targets.

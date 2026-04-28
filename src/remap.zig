@@ -50,6 +50,9 @@ pub fn remapRigidImage(
         .color_channels = src.info.color_channels,
         .extra_channels = 0,
         .exposure_value = src.info.exposure_value,
+        .exif_focal_length_mm = src.info.exif_focal_length_mm,
+        .exif_focal_length_35mm = src.info.exif_focal_length_35mm,
+        .exif_crop_factor = src.info.exif_crop_factor,
     };
 
     return switch (src.pixels) {

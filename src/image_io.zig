@@ -36,6 +36,9 @@ pub const ImageInfo = struct {
     color_channels: u8,
     extra_channels: u8,
     exposure_value: ?f64,
+    exif_focal_length_mm: ?f64 = null,
+    exif_focal_length_35mm: ?f64 = null,
+    exif_crop_factor: ?f64 = null,
 };
 
 pub const PixelStorage = union(enum) {
@@ -158,6 +161,20 @@ pub fn isRawPath(path: []const u8) bool {
     return false;
 }
 
+pub fn deriveHfovDegrees(info: ImageInfo, fisheye: bool) ?f64 {
+    const focal_length = info.exif_focal_length_mm orelse return null;
+    const crop_factor = info.exif_crop_factor orelse return null;
+    if (focal_length <= 0 or crop_factor <= 0.1) return null;
+
+    return calcHfov(
+        if (fisheye) .full_frame_fisheye else .rectilinear,
+        focal_length,
+        crop_factor,
+        info.width,
+        info.height,
+    );
+}
+
 fn detectFormat(path: []const u8) ?Format {
     const ext = std.fs.path.extension(path);
     if (std.ascii.eqlIgnoreCase(ext, ".jpg")) return .jpeg;
@@ -271,6 +288,8 @@ fn infoFromJpegHeader(path_z: [:0]const u8, decompress: *c.jpeg_decompress_struc
         .rgb => 3,
     };
 
+    const exif = readExifSummary(path_z);
+
     return .{
         .format = .jpeg,
         .width = @intCast(decompress.image_width),
@@ -279,7 +298,10 @@ fn infoFromJpegHeader(path_z: [:0]const u8, decompress: *c.jpeg_decompress_struc
         .sample_type = .u8,
         .color_channels = color_channels,
         .extra_channels = 0,
-        .exposure_value = readExposureValue(path_z),
+        .exposure_value = exif.exposure_value,
+        .exif_focal_length_mm = exif.focal_length_mm,
+        .exif_focal_length_35mm = exif.focal_length_35mm,
+        .exif_crop_factor = exif.crop_factor,
     };
 }
 
@@ -344,6 +366,7 @@ fn infoFromPngImage(path_z: [:0]const u8, image: c.png_image) ImageInfo {
     const is_color = (image.format & c.PNG_FORMAT_FLAG_COLOR) != 0;
     const has_alpha = (image.format & c.PNG_FORMAT_FLAG_ALPHA) != 0;
     const is_linear = (image.format & c.PNG_FORMAT_FLAG_LINEAR) != 0;
+    const exif = readExifSummary(path_z);
 
     return .{
         .format = .png,
@@ -353,7 +376,10 @@ fn infoFromPngImage(path_z: [:0]const u8, image: c.png_image) ImageInfo {
         .sample_type = if (is_linear) .u16 else .u8,
         .color_channels = if (is_color) 3 else 1,
         .extra_channels = if (has_alpha) 1 else 0,
-        .exposure_value = readExposureValue(path_z),
+        .exposure_value = exif.exposure_value,
+        .exif_focal_length_mm = exif.focal_length_mm,
+        .exif_focal_length_35mm = exif.focal_length_35mm,
+        .exif_crop_factor = exif.crop_factor,
     };
 }
 
@@ -419,6 +445,7 @@ fn readTiffInfo(path_z: [:0]const u8, tiff: ?*c.TIFF) LoadError!ImageInfo {
         16 => .u16,
         else => return error.UnsupportedPixelFormat,
     };
+    const exif = readExifSummary(path_z);
 
     return switch (photometric) {
         c.PHOTOMETRIC_MINISBLACK, c.PHOTOMETRIC_MINISWHITE => .{
@@ -429,7 +456,10 @@ fn readTiffInfo(path_z: [:0]const u8, tiff: ?*c.TIFF) LoadError!ImageInfo {
             .sample_type = sample_type,
             .color_channels = 1,
             .extra_channels = @intCast(if (samples_per_pixel > 1) samples_per_pixel - 1 else 0),
-            .exposure_value = readExposureValue(path_z),
+            .exposure_value = exif.exposure_value,
+            .exif_focal_length_mm = exif.focal_length_mm,
+            .exif_focal_length_35mm = exif.focal_length_35mm,
+            .exif_crop_factor = exif.crop_factor,
         },
         c.PHOTOMETRIC_RGB => .{
             .format = .tiff,
@@ -439,7 +469,10 @@ fn readTiffInfo(path_z: [:0]const u8, tiff: ?*c.TIFF) LoadError!ImageInfo {
             .sample_type = sample_type,
             .color_channels = 3,
             .extra_channels = @intCast(if (samples_per_pixel > 3) samples_per_pixel - 3 else 0),
-            .exposure_value = readExposureValue(path_z),
+            .exposure_value = exif.exposure_value,
+            .exif_focal_length_mm = exif.focal_length_mm,
+            .exif_focal_length_35mm = exif.focal_length_35mm,
+            .exif_crop_factor = exif.crop_factor,
         },
         else => error.UnsupportedPixelFormat,
     };
@@ -505,18 +538,66 @@ fn pixelCount(info: ImageInfo) usize {
     return @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels);
 }
 
-fn readExposureValue(path_z: [:0]const u8) ?f64 {
-    const exif_data = c.exif_data_new_from_file(path_z.ptr) orelse return null;
+const ExifSummary = struct {
+    exposure_value: ?f64 = null,
+    focal_length_mm: ?f64 = null,
+    focal_length_35mm: ?f64 = null,
+    crop_factor: ?f64 = null,
+};
+
+fn readExifSummary(path_z: [:0]const u8) ExifSummary {
+    const exif_data = c.exif_data_new_from_file(path_z.ptr) orelse return .{};
     defer c.exif_data_unref(exif_data);
 
-    const aperture = readExifRational(exif_data, c.EXIF_TAG_FNUMBER) orelse return null;
-    const exposure_time = readExifRational(exif_data, c.EXIF_TAG_EXPOSURE_TIME) orelse return null;
-    if (aperture <= 0 or exposure_time <= 0) return null;
+    const focal_length_mm = readExifRational(exif_data, c.EXIF_TAG_FOCAL_LENGTH);
+    const focal_length_35mm = readExifShort(exif_data, c.EXIF_TAG_FOCAL_LENGTH_IN_35MM_FILM);
 
-    const iso = readExifIso(exif_data) orelse 100.0;
-    if (iso <= 0) return null;
+    var crop_factor: ?f64 = null;
+    if (focal_length_mm) |focal_length| {
+        if (focal_length > 0) {
+            if (focal_length_35mm) |focal_length_35_raw| {
+                if (focal_length_35_raw > 0) {
+                    crop_factor = @as(f64, @floatFromInt(focal_length_35_raw)) / focal_length;
+                }
+            }
+        }
+    }
 
-    return std.math.log2((aperture * aperture) / exposure_time * (100.0 / iso));
+    var exposure_value: ?f64 = null;
+    if (readExifRational(exif_data, c.EXIF_TAG_FNUMBER)) |aperture| {
+        if (readExifRational(exif_data, c.EXIF_TAG_EXPOSURE_TIME)) |exposure_time| {
+            if (aperture > 0 and exposure_time > 0) {
+                const iso = readExifIso(exif_data) orelse 100.0;
+                if (iso > 0) {
+                    exposure_value = std.math.log2((aperture * aperture) / exposure_time * (100.0 / iso));
+                }
+            }
+        }
+    }
+
+    return .{
+        .exposure_value = exposure_value,
+        .focal_length_mm = focal_length_mm,
+        .focal_length_35mm = if (focal_length_35mm) |value| @floatFromInt(value) else null,
+        .crop_factor = crop_factor,
+    };
+}
+
+const Projection = enum {
+    rectilinear,
+    full_frame_fisheye,
+};
+
+fn calcHfov(projection: Projection, focal_length_mm: f64, crop_factor: f64, width: u32, height: u32) f64 {
+    const full_frame_diagonal = @sqrt(36.0 * 36.0 + 24.0 * 24.0);
+    const sensor_diagonal = full_frame_diagonal / crop_factor;
+    const aspect_ratio = @as(f64, @floatFromInt(width)) / @as(f64, @floatFromInt(height));
+    const sensor_width = sensor_diagonal / @sqrt(1.0 + 1.0 / (aspect_ratio * aspect_ratio));
+
+    return switch (projection) {
+        .rectilinear => 2.0 * std.math.radiansToDegrees(std.math.atan((sensor_width * 0.5) / focal_length_mm)),
+        .full_frame_fisheye => sensor_width / focal_length_mm * std.math.deg_per_rad,
+    };
 }
 
 fn readExifIso(exif_data: ?*c.ExifData) ?f64 {
@@ -627,4 +708,23 @@ test "raw extension detection rejects common camera formats" {
     try std.testing.expect(isRawPath("frame_0001.CR3"));
     try std.testing.expect(isRawPath("capture.nef"));
     try std.testing.expect(!isRawPath("stacked.tif"));
+}
+
+test "derive hfov matches upstream rectilinear formula" {
+    const info = ImageInfo{
+        .format = .jpeg,
+        .width = 6000,
+        .height = 4000,
+        .color_model = .rgb,
+        .sample_type = .u8,
+        .color_channels = 3,
+        .extra_channels = 0,
+        .exposure_value = null,
+        .exif_focal_length_mm = 90.0,
+        .exif_focal_length_35mm = 135.0,
+        .exif_crop_factor = 1.5,
+    };
+
+    const hfov = deriveHfovDegrees(info, false).?;
+    try std.testing.expectApproxEqAbs(@as(f64, 22.895192527371208), hfov, 1e-9);
 }

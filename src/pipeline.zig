@@ -30,8 +30,9 @@ pub const Stage = enum {
 pub const RunError = anyerror;
 
 pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError!void {
-    const images = try collectInputImages(allocator, cfg.input_files.items);
+    const images = try collectInputImages(allocator, cfg);
     defer allocator.free(images);
+    const base_hfov = cfg.hfov orelse images[0].hfov_degrees orelse 50.0;
 
     var plan = try sequence.buildPlan(allocator, cfg, images);
     defer plan.deinit(allocator);
@@ -58,7 +59,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     defer allocator.free(match_summary);
     try std.fs.File.stderr().writeAll(match_summary);
 
-    var initial_solve = try optimize.solvePoses(allocator, images.len, cfg.hfov orelse 50.0, optimize_vector, pair_matches);
+    var initial_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
     defer initial_solve.deinit(allocator);
     const initial_optimize_summary = try optimize.renderSolveSummary(allocator, "before pruning", &initial_solve);
     defer allocator.free(initial_optimize_summary);
@@ -84,7 +85,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
         }
 
         if (after_prune_count > 0 and after_prune_count != before_prune_count) {
-            var pruned_solve = try optimize.solvePoses(allocator, images.len, cfg.hfov orelse 50.0, optimize_vector, pair_matches);
+            var pruned_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
             defer pruned_solve.deinit(allocator);
             const pruned_optimize_summary = try optimize.renderSolveSummary(allocator, "after pruning", &pruned_solve);
             defer allocator.free(pruned_optimize_summary);
@@ -97,7 +98,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     }
 
     if (cfg.pto_file) |pto_path| {
-        var pto_solve = try optimize.solvePoses(allocator, images.len, cfg.hfov orelse 50.0, optimize_vector, pair_matches);
+        var pto_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
         defer pto_solve.deinit(allocator);
         try pto.writePtoFile(allocator, pto_path, cfg, images, optimize_vector, pair_matches, pto_solve.poses);
         if (cfg.verbose > 0) {
@@ -108,7 +109,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     }
 
     if (cfg.aligned_prefix) |aligned_prefix| {
-        var remap_solve = try optimize.solvePoses(allocator, images.len, cfg.hfov orelse 50.0, optimize_vector, pair_matches);
+        var remap_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
         defer remap_solve.deinit(allocator);
         const roi = if (cfg.crop)
             try remap.computeCommonOverlapRoi(allocator, plan.remap_active.items, images, remap_solve.poses)
@@ -139,8 +140,9 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
 
 fn collectInputImages(
     allocator: std.mem.Allocator,
-    paths: []const []const u8,
+    cfg: *const config_mod.Config,
 ) RunError![]sequence.InputImage {
+    const paths = cfg.input_files.items;
     var images: std.ArrayList(sequence.InputImage) = .empty;
     defer images.deinit(allocator);
 
@@ -177,6 +179,7 @@ fn collectInputImages(
             .color_model = info.color_model,
             .sample_type = info.sample_type,
             .exposure_value = info.exposure_value,
+            .hfov_degrees = cfg.hfov orelse image_io.deriveHfovDegrees(info, cfg.fisheye),
         });
     }
 

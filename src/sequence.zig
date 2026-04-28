@@ -11,6 +11,7 @@ pub const InputImage = struct {
     color_model: image_io.ColorModel,
     sample_type: image_io.SampleType,
     exposure_value: ?f64 = null,
+    hfov_degrees: ?f64 = null,
 };
 
 pub const SortDecision = enum {
