@@ -608,6 +608,14 @@ pub fn evaluateObjectiveResidualsPadded(
     };
     const output_count = @max(residual_count, min_count orelse 0);
     const values = try allocator.alloc(f64, output_count);
+    const objective_scale = objectiveFovScale(initial_avg_hfov, currentAverageHfovDegrees(poses));
+    const basic_rect_caches = try allocator.alloc(BasicRectEquirectCache, poses.len);
+    defer allocator.free(basic_rect_caches);
+    if (pair_matches.len > 0) {
+        populateBasicRectEquirectCaches(poses, pair_matches[0].image_width, pair_matches[0].image_height, basic_rect_caches);
+    } else {
+        for (basic_rect_caches) |*cache| cache.* = .{ .valid = false };
+    }
 
     var out_index: usize = 0;
     var squared_sum: f64 = 0.0;
@@ -615,13 +623,13 @@ pub fn evaluateObjectiveResidualsPadded(
         for (pair_match.control_points) |cp| {
             switch (strategy) {
                 .distance_only => {
-                    const residual = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+                    const residual = objectiveDistanceResidualCached(poses, basic_rect_caches, objective_scale, pair_match, cp);
                     values[out_index] = residual;
                     squared_sum += residual * residual;
                     out_index += 1;
                 },
                 .componentwise => {
-                    const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
+                    const residual = objectiveResidualVectorCached(poses, basic_rect_caches, objective_scale, pair_match, cp);
                     values[out_index] = residual.x;
                     values[out_index + 1] = residual.y;
                     squared_sum += residual.x * residual.x + residual.y * residual.y;
@@ -672,6 +680,8 @@ fn refinePosesIteratively(
     defer allocator.free(seed_poses);
     const work_poses = try allocator.dupe(ImagePose, poses);
     defer allocator.free(work_poses);
+    const basic_rect_caches = try allocator.alloc(BasicRectEquirectCache, poses.len);
+    defer allocator.free(basic_rect_caches);
     fillSolveVector(layout, poses, solve_x);
     applyUpstreamZeroStartNudges(layout, solve_x);
 
@@ -686,6 +696,9 @@ fn refinePosesIteratively(
         .pair_matches = pair_matches,
         .seed_poses = seed_poses,
         .work_poses = work_poses,
+        .basic_rect_caches = basic_rect_caches,
+        .image_width = pair_matches[0].image_width,
+        .image_height = pair_matches[0].image_height,
         .initial_avg_hfov = initial_avg_hfov,
         .strategy = strategy,
         .actual_residual_count = actual_residual_count,
@@ -735,6 +748,9 @@ const SolveContext = struct {
     pair_matches: []const match_mod.PairMatches,
     seed_poses: []const ImagePose,
     work_poses: []ImagePose,
+    basic_rect_caches: []BasicRectEquirectCache,
+    image_width: u32,
+    image_height: u32,
     initial_avg_hfov: f64,
     strategy: SolveStrategy,
     actual_residual_count: usize,
@@ -744,6 +760,9 @@ fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror
     std.debug.assert(fvec.len >= ctx.actual_residual_count);
     @memcpy(ctx.work_poses, ctx.seed_poses);
     applySolveVector(ctx.layout, ctx.work_poses, x);
+    populateBasicRectEquirectCaches(ctx.work_poses, ctx.image_width, ctx.image_height, ctx.basic_rect_caches);
+    const current_avg_hfov = currentAverageHfovDegrees(ctx.work_poses);
+    const objective_scale = objectiveFovScale(ctx.initial_avg_hfov, current_avg_hfov);
 
     var out_index: usize = 0;
     var squared_sum: f64 = 0.0;
@@ -751,13 +770,13 @@ fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror
         for (pair_match.control_points) |cp| {
             switch (ctx.strategy) {
                 .distance_only => {
-                    const residual = objectiveDistanceResidual(ctx.initial_avg_hfov, ctx.work_poses, pair_match, cp);
+                    const residual = objectiveDistanceResidualCached(ctx.work_poses, ctx.basic_rect_caches, objective_scale, pair_match, cp);
                     fvec[out_index] = residual;
                     squared_sum += residual * residual;
                     out_index += 1;
                 },
                 .componentwise => {
-                    const residual = objectiveResidualVector(ctx.initial_avg_hfov, ctx.work_poses, pair_match, cp);
+                    const residual = objectiveResidualVectorCached(ctx.work_poses, ctx.basic_rect_caches, objective_scale, pair_match, cp);
                     fvec[out_index] = residual.x;
                     fvec[out_index + 1] = residual.y;
                     squared_sum += residual.x * residual.x + residual.y * residual.y;
@@ -1320,7 +1339,8 @@ fn objectiveResidualVector(
     pair_match: match_mod.PairMatches,
     cp: match_mod.ControlPoint,
 ) Vec2d {
-    return objectiveResidualVectorWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, null, .{});
+    const objective_scale = objectiveFovScale(initial_avg_hfov, currentAverageHfovDegrees(poses));
+    return objectiveResidualVectorCached(poses, &.{}, objective_scale, pair_match, cp);
 }
 
 fn objectiveDistanceResidual(
@@ -1329,7 +1349,8 @@ fn objectiveDistanceResidual(
     pair_match: match_mod.PairMatches,
     cp: match_mod.ControlPoint,
 ) f64 {
-    return objectiveDistanceResidualWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, null, .{});
+    const objective_scale = objectiveFovScale(initial_avg_hfov, currentAverageHfovDegrees(poses));
+    return objectiveDistanceResidualCached(poses, &.{}, objective_scale, pair_match, cp);
 }
 
 fn objectiveResidualVectorWithPoseOverride(
@@ -1362,6 +1383,55 @@ fn objectiveDistanceResidualWithPoseOverride(
     return scale * residual;
 }
 
+fn objectiveResidualVectorCached(
+    poses: []const ImagePose,
+    basic_rect_caches: []const BasicRectEquirectCache,
+    objective_scale: f64,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) Vec2d {
+    var residual = controlPointResidualVectorCached(poses, basic_rect_caches, pair_match, cp);
+    residual.x = huberResidualComponent(residual.x, huber_sigma_pixels);
+    residual.y = huberResidualComponent(residual.y, huber_sigma_pixels);
+    residual.x *= objective_scale;
+    residual.y *= objective_scale;
+    return residual;
+}
+
+fn objectiveDistanceResidualCached(
+    poses: []const ImagePose,
+    basic_rect_caches: []const BasicRectEquirectCache,
+    objective_scale: f64,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) f64 {
+    return objective_scale * controlPointDistanceResidualCached(poses, basic_rect_caches, pair_match, cp);
+}
+
+fn controlPointResidualVectorCached(
+    poses: []const ImagePose,
+    basic_rect_caches: []const BasicRectEquirectCache,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) Vec2d {
+    if (basic_rect_caches.len == poses.len and basic_rect_caches[cp.left_image].valid and basic_rect_caches[cp.right_image].valid) {
+        return exactDistSphereResidualVectorCached(basic_rect_caches[cp.left_image], basic_rect_caches[cp.right_image], cp);
+    }
+    return controlPointResidualVector(poses, pair_match, cp);
+}
+
+fn controlPointDistanceResidualCached(
+    poses: []const ImagePose,
+    basic_rect_caches: []const BasicRectEquirectCache,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) f64 {
+    if (basic_rect_caches.len == poses.len and basic_rect_caches[cp.left_image].valid and basic_rect_caches[cp.right_image].valid) {
+        return exactDistSphereDistanceCached(basic_rect_caches[cp.left_image], basic_rect_caches[cp.right_image], cp);
+    }
+    return controlPointDistanceResidual(poses, pair_match, cp);
+}
+
 fn hasBasicRectilinearPose(pose: ImagePose) bool {
     return !hasTranslation(pose) and
         @abs(pose.radial_a) <= 1e-12 and
@@ -1388,6 +1458,22 @@ fn exactDistSphereResidualVector(left_pose: ImagePose, right_pose: ImagePose, pa
     };
 }
 
+fn exactDistSphereResidualVectorCached(left: BasicRectEquirectCache, right: BasicRectEquirectCache, cp: match_mod.ControlPoint) Vec2d {
+    const left_point = imageToEquirectDegreesCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
+    const right_point = imageToEquirectDegreesCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
+    const lon_left = left_point.x * degrees_to_radians;
+    const lon_right = right_point.x * degrees_to_radians;
+    const lat_left = left_point.y * degrees_to_radians + std.math.pi * 0.5;
+    const lat_right = right_point.y * degrees_to_radians + std.math.pi * 0.5;
+    var delta_lon = lon_left - lon_right;
+    if (delta_lon < -std.math.pi) delta_lon += 2.0 * std.math.pi;
+    if (delta_lon > std.math.pi) delta_lon -= 2.0 * std.math.pi;
+    return .{
+        .x = (delta_lon * @sin(0.5 * (lat_left + lat_right))) * left.radians_to_pixels,
+        .y = (lat_left - lat_right) * left.radians_to_pixels,
+    };
+}
+
 fn exactDistSphereDistance(left_pose: ImagePose, right_pose: ImagePose, pair_match: match_mod.PairMatches, cp: match_mod.ControlPoint) f64 {
     const left = imageToEquirectDegrees(left_pose, @as(f64, cp.left_x), @as(f64, cp.left_y), pair_match.image_width, pair_match.image_height);
     const right = imageToEquirectDegrees(right_pose, @as(f64, cp.right_x), @as(f64, cp.right_y), pair_match.image_width, pair_match.image_height);
@@ -1401,6 +1487,21 @@ fn exactDistSphereDistance(left_pose: ImagePose, right_pose: ImagePose, pair_mat
     var dangle = std.math.asin(std.math.clamp(length3(cross), 0.0, 1.0));
     if (dot3(left_vec, right_vec) < 0.0) dangle = std.math.pi - dangle;
     return dangle * panoRadiansToPixels(pair_match.image_width, left_pose.base_hfov_degrees);
+}
+
+fn exactDistSphereDistanceCached(left: BasicRectEquirectCache, right: BasicRectEquirectCache, cp: match_mod.ControlPoint) f64 {
+    const left_point = imageToEquirectDegreesCached(left, @as(f64, cp.left_x), @as(f64, cp.left_y));
+    const right_point = imageToEquirectDegreesCached(right, @as(f64, cp.right_x), @as(f64, cp.right_y));
+    const left_lon = left_point.x * degrees_to_radians;
+    const right_lon = right_point.x * degrees_to_radians;
+    const left_lat = left_point.y * degrees_to_radians + std.math.pi * 0.5;
+    const right_lat = right_point.y * degrees_to_radians + std.math.pi * 0.5;
+    const left_vec = latLonToVec3(left_lon, left_lat);
+    const right_vec = latLonToVec3(right_lon, right_lat);
+    const cross = cross3(left_vec, right_vec);
+    var dangle = std.math.asin(std.math.clamp(length3(cross), 0.0, 1.0));
+    if (dot3(left_vec, right_vec) < 0.0) dangle = std.math.pi - dangle;
+    return dangle * left.radians_to_pixels;
 }
 
 fn latLonToVec3(lon: f64, lat_zenith: f64) Vec3 {
@@ -1429,6 +1530,17 @@ fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u
     p = perspSpherePoint(p, setMatrix(pose.pitch, 0.0, pose.roll, true), pano_distance);
     p = erectSphereTpPoint(p, pano_distance);
     return rotateErectPoint(p, pano_distance * std.math.pi, pose.yaw / degrees_to_radians);
+}
+
+fn imageToEquirectDegreesCached(cache: BasicRectEquirectCache, x: f64, y: f64) Point2 {
+    var p = Point2{
+        .x = (x - cache.center.x) * cache.image_scale,
+        .y = (y - cache.center.y) * cache.image_scale,
+    };
+    p = sphereTpRectPoint(p, cache.pano_distance);
+    p = perspSpherePoint(p, cache.pitch_roll, cache.pano_distance);
+    p = erectSphereTpPoint(p, cache.pano_distance);
+    return rotateErectPoint(p, cache.pano_distance * std.math.pi, cache.yaw_turn);
 }
 
 fn sphereTpRectPoint(p: Point2, distance: f64) Point2 {
@@ -1779,6 +1891,41 @@ fn normalize3(v: Vec3) Vec3 {
 }
 
 const Matrix3 = [3][3]f64;
+
+const BasicRectEquirectCache = struct {
+    valid: bool = false,
+    center: Point2 = .{ .x = 0.0, .y = 0.0 },
+    pano_distance: f64 = 0.0,
+    image_scale: f64 = 0.0,
+    pitch_roll: Matrix3 = .{
+        .{ 1.0, 0.0, 0.0 },
+        .{ 0.0, 1.0, 0.0 },
+        .{ 0.0, 0.0, 1.0 },
+    },
+    yaw_turn: f64 = 0.0,
+    radians_to_pixels: f64 = 0.0,
+};
+
+fn populateBasicRectEquirectCaches(poses: []const ImagePose, width: u32, height: u32, caches: []BasicRectEquirectCache) void {
+    std.debug.assert(poses.len == caches.len);
+    for (poses, caches) |pose, *cache| {
+        if (!hasBasicRectilinearPose(pose)) {
+            cache.* = .{ .valid = false };
+            continue;
+        }
+        const pano_distance = 180.0 / std.math.pi;
+        const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+        cache.* = .{
+            .valid = true,
+            .center = distortionCenter(pose, width, height),
+            .pano_distance = pano_distance,
+            .image_scale = pano_distance / image_focal,
+            .pitch_roll = setMatrix(pose.pitch, 0.0, pose.roll, true),
+            .yaw_turn = pose.yaw / degrees_to_radians,
+            .radians_to_pixels = panoRadiansToPixels(width, pose.base_hfov_degrees),
+        };
+    }
+}
 
 fn sourceWorldRay(pose: ImagePose, dx: f64, dy: f64, width: u32, height: u32) Vec3 {
     const shifted = Point2{
@@ -2486,6 +2633,60 @@ test "transform round trip preserves points with extended pose terms" {
     const recovered = inverseTransformPoint(pose, mapped.x, mapped.y, 400, 300);
     try std.testing.expectApproxEqAbs(@as(f64, 120.0), recovered.x, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f64, 80.0), recovered.y, 1e-5);
+}
+
+test "basic rectilinear equirect cache matches uncached distSphere math" {
+    const width: u32 = 7952;
+    const height: u32 = 5304;
+    const poses = [_]ImagePose{
+        .{
+            .yaw = 0.0,
+            .pitch = 0.0,
+            .roll = 0.0,
+            .hfov_delta = 0.0,
+            .base_hfov_degrees = 22.616454,
+        },
+        .{
+            .yaw = -0.0787870154624771 * degrees_to_radians,
+            .pitch = 0.0770185391742314 * degrees_to_radians,
+            .roll = -0.375207122194465 * degrees_to_radians,
+            .hfov_delta = 22.9667758269161 - 22.616454,
+            .base_hfov_degrees = 22.616454,
+        },
+    };
+    var caches: [poses.len]BasicRectEquirectCache = undefined;
+    populateBasicRectEquirectCaches(&poses, width, height, &caches);
+
+    const pair_match = match_mod.PairMatches{
+        .pair = .{ .left_index = 0, .right_index = 1 },
+        .image_width = width,
+        .image_height = height,
+        .candidates_considered = 0,
+        .control_point_storage = &.{},
+        .control_points = &.{},
+    };
+    const cp = match_mod.ControlPoint{
+        .left_image = 0,
+        .right_image = 1,
+        .left_x = 1644.0,
+        .left_y = 1510.0,
+        .right_x = 1643.494,
+        .right_y = 1513.182,
+        .score = 1.0,
+        .coarse_right_x = 1643.494,
+        .coarse_right_y = 1513.182,
+        .coarse_score = 1.0,
+        .refined_score = 1.0,
+    };
+
+    const uncached_distance = exactDistSphereDistance(poses[0], poses[1], pair_match, cp);
+    const cached_distance = exactDistSphereDistanceCached(caches[0], caches[1], cp);
+    try std.testing.expectApproxEqAbs(uncached_distance, cached_distance, 1e-9);
+
+    const uncached_vector = exactDistSphereResidualVector(poses[0], poses[1], pair_match, cp);
+    const cached_vector = exactDistSphereResidualVectorCached(caches[0], caches[1], cp);
+    try std.testing.expectApproxEqAbs(uncached_vector.x, cached_vector.x, 1e-9);
+    try std.testing.expectApproxEqAbs(uncached_vector.y, cached_vector.y, 1e-9);
 }
 
 test "pruning removes residual outliers" {
