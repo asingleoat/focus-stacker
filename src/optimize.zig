@@ -562,6 +562,7 @@ fn refinePosesIteratively(
     const work_poses = try allocator.dupe(ImagePose, poses);
     defer allocator.free(work_poses);
     fillSolveVector(layout, poses, solve_x);
+    applyUpstreamZeroStartNudges(layout, solve_x);
 
     const actual_residual_count = switch (strategy) {
         .distance_only => countControlPoints(pair_matches),
@@ -595,6 +596,27 @@ fn refinePosesIteratively(
         else => unreachable,
     };
     applySolveVector(layout, poses, solve_x);
+}
+
+fn applyUpstreamZeroStartNudges(layout: []const SolveLayout, solve_x: []f64) void {
+    for (layout) |entry| {
+        // Hugin writes 1e-5 instead of exact zero for these optimized variables
+        // when generating PTOptimizer scripts.
+        nudgeSolveIndexFromZero(entry.trans_x_index, solve_x);
+        nudgeSolveIndexFromZero(entry.trans_y_index, solve_x);
+        nudgeSolveIndexFromZero(entry.trans_z_index, solve_x);
+        nudgeSolveIndexFromZero(entry.radial_a_index, solve_x);
+        nudgeSolveIndexFromZero(entry.radial_b_index, solve_x);
+        nudgeSolveIndexFromZero(entry.radial_c_index, solve_x);
+    }
+}
+
+fn nudgeSolveIndexFromZero(maybe_index: ?usize, solve_x: []f64) void {
+    if (maybe_index) |idx| {
+        if (solve_x[idx] == 0.0) {
+            solve_x[idx] = 1.0e-5;
+        }
+    }
 }
 
 const SolveContext = struct {
@@ -1300,6 +1322,29 @@ fn sphereTpRectPoint(p: Point2, distance: f64) Point2 {
     return .{ .x = theta * p.x, .y = theta * p.y };
 }
 
+fn sphereTpErectPoint(p: Point2, distance: f64) Point2 {
+    var phi = p.x / distance;
+    var theta = -(p.y / distance) + std.math.pi * 0.5;
+    if (theta < 0.0) {
+        theta = -theta;
+        phi += std.math.pi;
+    }
+    if (theta > std.math.pi) {
+        theta = std.math.pi - (theta - std.math.pi);
+        phi += std.math.pi;
+    }
+
+    const s = @sin(theta);
+    const v0 = s * @sin(phi);
+    const v1 = @cos(theta);
+    const r = @sqrt(v1 * v1 + v0 * v0);
+    const scale = if (r == 0.0) 0.0 else distance * std.math.atan2(r, s * @cos(phi)) / r;
+    return .{
+        .x = scale * v0,
+        .y = scale * v1,
+    };
+}
+
 fn perspSpherePoint(p: Point2, m: Matrix3, distance: f64) Point2 {
     const r = @sqrt(p.x * p.x + p.y * p.y);
     const theta = r / distance;
@@ -1324,6 +1369,38 @@ fn erectSphereTpPoint(p: Point2, distance: f64) Point2 {
     return .{
         .x = distance * std.math.atan2(v1, v0),
         .y = distance * std.math.atan((s * p.y) / @sqrt(v0 * v0 + v1 * v1)),
+    };
+}
+
+fn rectSphereTpPoint(p: Point2, distance: f64) Point2 {
+    const r = @sqrt(p.x * p.x + p.y * p.y);
+    const theta = r / distance;
+    const rho = if (theta >= std.math.pi * 0.5)
+        1.6e16
+    else if (theta == 0.0)
+        1.0
+    else
+        @tan(theta) / theta;
+    return .{
+        .x = rho * p.x,
+        .y = rho * p.y,
+    };
+}
+
+fn rectErectPoint(p: Point2, distance: f64) ?Point2 {
+    const phi = p.x / distance;
+    if (phi < -std.math.pi * 0.5 or phi > std.math.pi * 0.5) return null;
+    const theta = -(p.y / distance) + std.math.pi * 0.5;
+    return .{
+        .x = distance * @tan(phi),
+        .y = distance / (@tan(theta) * @cos(phi)),
+    };
+}
+
+fn erectRectPoint(p: Point2, distance: f64) Point2 {
+    return .{
+        .x = distance * std.math.atan2(p.x, distance),
+        .y = distance * std.math.atan2(p.y, @sqrt(distance * distance + p.x * p.x)),
     };
 }
 
@@ -1464,6 +1541,9 @@ fn normalizeAngleRadians(angle: f64) f64 {
 pub fn transformPoint(pose: ImagePose, x: anytype, y: anytype, width: u32, height: u32) Point2 {
     const xf = @as(f64, x);
     const yf = @as(f64, y);
+    if (hasBasicRectilinearPose(pose)) {
+        return basicRectilinearTransformPoint(pose, xf, yf, width, height);
+    }
     const src_center = distortionCenter(pose, width, height);
     const dest_center = panoramaCenter(width, height);
     const dest_focal = panoramaFocalLengthPixels(width, pose);
@@ -1480,6 +1560,9 @@ pub fn transformPoint(pose: ImagePose, x: anytype, y: anytype, width: u32, heigh
 }
 
 pub fn inverseTransformPoint(pose: ImagePose, out_x: f64, out_y: f64, width: u32, height: u32) Point2 {
+    if (hasBasicRectilinearPose(pose)) {
+        return basicRectilinearInverseTransformPoint(pose, out_x, out_y, width, height);
+    }
     const src_center = distortionCenter(pose, width, height);
     const dest_center = panoramaCenter(width, height);
     const dest_focal = panoramaFocalLengthPixels(width, pose);
@@ -1495,6 +1578,52 @@ pub fn inverseTransformPoint(pose: ImagePose, out_x: f64, out_y: f64, width: u32
     return .{
         .x = src_center.x + undistorted.x,
         .y = src_center.y + undistorted.y,
+    };
+}
+
+fn basicRectilinearTransformPoint(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
+    const src_center = distortionCenter(pose, width, height);
+    const dest_center = panoramaCenter(width, height);
+    const pano_distance = panoramaFocalLengthPixels(width, pose);
+    const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const resize_scale = pano_distance / image_focal;
+
+    var p = Point2{
+        .x = (x - src_center.x) * resize_scale,
+        .y = (y - src_center.y) * resize_scale,
+    };
+    p = sphereTpRectPoint(p, pano_distance);
+    p = perspSpherePoint(p, setMatrix(pose.pitch, 0.0, pose.roll, true), pano_distance);
+    p = erectSphereTpPoint(p, pano_distance);
+    p = rotateErectPoint(p, pano_distance * std.math.pi, pose.yaw * pano_distance);
+    p = rectErectPoint(p, pano_distance) orelse return .{ .x = -1.0, .y = -1.0 };
+    return .{
+        .x = dest_center.x + p.x,
+        .y = dest_center.y + p.y,
+    };
+}
+
+fn basicRectilinearInverseTransformPoint(pose: ImagePose, out_x: f64, out_y: f64, width: u32, height: u32) Point2 {
+    const src_center = distortionCenter(pose, width, height);
+    const dest_center = panoramaCenter(width, height);
+    const pano_distance = panoramaFocalLengthPixels(width, pose);
+    const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const resize_scale = image_focal / pano_distance;
+
+    var p = Point2{
+        .x = out_x - dest_center.x,
+        .y = out_y - dest_center.y,
+    };
+    p = erectRectPoint(p, pano_distance);
+    p = rotateErectPoint(p, pano_distance * std.math.pi, -pose.yaw * pano_distance);
+    p = sphereTpErectPoint(p, pano_distance);
+    p = perspSpherePoint(p, setMatrix(pose.pitch, 0.0, pose.roll, true), pano_distance);
+    p = rectSphereTpPoint(p, pano_distance);
+    p.x *= resize_scale;
+    p.y *= resize_scale;
+    return .{
+        .x = src_center.x + p.x,
+        .y = src_center.y + p.y,
     };
 }
 
