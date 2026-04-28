@@ -110,7 +110,8 @@ void usage()
         << "  vigra_oracle dump-interest <image.pgm> <grid_size> <rect_index> <scale> <max_points>\n"
         << "  vigra_oracle match-point <left.pgm> <right.pgm> <left_x> <left_y> <right_x> <right_y> <template_size> <search_width>\n"
         << "  vigra_oracle match-rect <left_pyr.pgm> <right_pyr.pgm> <left_full.pgm> <right_full.pgm> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n"
-        << "  vigra_oracle trace-rect <left_pyr.pgm> <right_pyr.pgm> <left_full.pgm> <right_full.pgm> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n";
+        << "  vigra_oracle trace-rect <left_pyr.pgm> <right_pyr.pgm> <left_full.pgm> <right_full.pgm> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n"
+        << "  vigra_oracle trace-rect-image <left_image> <right_image> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n";
 }
 
 template <class ImageType>
@@ -166,6 +167,125 @@ void writeGrayPgm(const ImageType &image, const std::string &path)
     typedef typename ImageType::value_type PixelType;
     typedef typename vigra::NumericTraits<PixelType>::isScalar is_scalar;
     writeGrayPgm(image, path, is_scalar());
+}
+
+namespace detail
+{
+template <class ImageType>
+vigra_ext::CorrelationResult FineTunePoint(const ImageType& leftImg, const vigra::Diff2D templPos, const int templSize,
+    const ImageType& rightImg, const vigra::Diff2D searchPos, const int searchWidth, vigra::VigraTrueType)
+{
+    return vigra_ext::PointFineTune(leftImg, leftImg.accessor(),
+        templPos, templSize,
+        rightImg, rightImg.accessor(),
+        searchPos, searchWidth);
+}
+
+template <class ImageType>
+vigra_ext::CorrelationResult FineTunePoint(const ImageType& leftImg, const vigra::Diff2D templPos, const int templSize,
+    const ImageType& rightImg, const vigra::Diff2D searchPos, const int searchWidth, vigra::VigraFalseType)
+{
+    return vigra_ext::PointFineTune(leftImg,
+        vigra::RGBToGrayAccessor<typename ImageType::value_type>(),
+        templPos, templSize,
+        rightImg, vigra::RGBToGrayAccessor<typename ImageType::value_type>(),
+        searchPos, searchWidth);
+}
+
+template <class ImageType>
+void FindInterestPointsPartial(const ImageType& image, const vigra::Rect2D& rect, double scale,
+    unsigned nPoints, std::multimap<double, vigra::Diff2D> &points, vigra::VigraTrueType)
+{
+    vigra_ext::findInterestPointsPartial(vigra::srcImageRange(image), rect, scale, nPoints, points);
+}
+
+template <class ImageType>
+void FindInterestPointsPartial(const ImageType& image, const vigra::Rect2D& rect, double scale,
+    unsigned nPoints, std::multimap<double, vigra::Diff2D> &points, vigra::VigraFalseType)
+{
+    typedef typename ImageType::value_type ImageValueType;
+    vigra_ext::findInterestPointsPartial(vigra::srcImageRange(image, vigra::RGBToGrayAccessor<ImageValueType>()), rect, scale, nPoints, points);
+}
+}
+
+template <class ImageType>
+void traceRectImagePath(const std::string &leftPath, const std::string &rightPath, int pyrLevel, unsigned gridSize, unsigned rectIndex, unsigned pointsPerGrid, double corrThreshold)
+{
+    typedef typename ImageType::value_type ImageValueType;
+    typedef typename vigra::NumericTraits<ImageValueType>::isScalar is_scalar;
+
+    ImageType leftOrig;
+    ImageType leftReduced;
+    ImageType rightOrig;
+    ImageType rightReduced;
+    loadAndReduceImage(leftPath, pyrLevel, leftOrig, leftReduced);
+    loadAndReduceImage(rightPath, pyrLevel, rightOrig, rightReduced);
+
+    std::vector<vigra::Rect2D> rects = buildRects(leftReduced.width(), leftReduced.height(), gridSize);
+    if(rectIndex >= rects.size())
+        throw std::runtime_error("rect index out of range");
+
+    MapPoints points;
+    detail::FindInterestPointsPartial(leftReduced, rects[rectIndex], 2.0, 5 * pointsPerGrid, points, is_scalar());
+
+    const double scaleFactor = 1 << pyrLevel;
+    const long templWidth = 20;
+    const long sWidth = 100;
+    unsigned accepted = 0;
+    std::cout
+        << "rect " << rectIndex << ": "
+        << rects[rectIndex].left() << ' '
+        << rects[rectIndex].top() << ' '
+        << rects[rectIndex].right() << ' '
+        << rects[rectIndex].bottom() << '\n';
+    std::cout << std::fixed << std::setprecision(9);
+
+    unsigned candIndex = 0;
+    for (MapPoints::const_reverse_iterator it = points.rbegin(); it != points.rend(); ++it, ++candIndex)
+    {
+        vigra_ext::CorrelationResult res = detail::FineTunePoint(leftReduced, it->second, templWidth,
+            rightReduced, it->second, sWidth, is_scalar());
+
+        const bool coarseOk = res.maxi >= corrThreshold;
+        const double coarseScore = res.maxi;
+        const double coarseX = res.maxpos.x * scaleFactor;
+        const double coarseY = res.maxpos.y * scaleFactor;
+        double finalX = coarseX;
+        double finalY = coarseY;
+        double finalScore = res.maxi;
+        bool refinedOk = coarseOk;
+
+        if (coarseOk && pyrLevel > 0)
+        {
+            res = detail::FineTunePoint(
+                leftOrig,
+                vigra::Diff2D(it->second.x * scaleFactor, it->second.y * scaleFactor),
+                templWidth,
+                rightOrig,
+                vigra::Diff2D(res.maxpos.x * scaleFactor, res.maxpos.y * scaleFactor),
+                scaleFactor,
+                is_scalar());
+            finalX = res.maxpos.x;
+            finalY = res.maxpos.y;
+            finalScore = res.maxi;
+            refinedOk = res.maxi >= corrThreshold;
+        }
+
+        const bool acceptedNow = coarseOk && refinedOk && accepted < pointsPerGrid;
+        std::cout
+            << "cand=" << candIndex
+            << " left=" << (it->second.x * scaleFactor) << "," << (it->second.y * scaleFactor)
+            << " coarse=" << coarseX << "," << coarseY
+            << " coarse_score=" << coarseScore
+            << " final=" << finalX << "," << finalY
+            << " final_score=" << finalScore
+            << " coarse_ok=" << (coarseOk ? 1 : 0)
+            << " refined_ok=" << (refinedOk ? 1 : 0)
+            << " accepted=" << (acceptedNow ? 1 : 0)
+            << '\n';
+        if (acceptedNow)
+            ++accepted;
+    }
 }
 
 void writeRgbPpm(const vigra::BRGBImage &image, const std::string &path)
@@ -536,6 +656,50 @@ int main(int argc, char **argv)
                     ++accepted;
             }
             return 0;
+        }
+
+        if(command == "trace-rect-image")
+        {
+            if(argc != 9)
+            {
+                usage();
+                return 1;
+            }
+
+            const std::string leftPath = argv[2];
+            const std::string rightPath = argv[3];
+            const unsigned gridSize = static_cast<unsigned>(std::stoul(argv[4]));
+            const unsigned rectIndex = static_cast<unsigned>(std::stoul(argv[5]));
+            const unsigned pointsPerGrid = static_cast<unsigned>(std::stoul(argv[6]));
+            const int pyrLevel = std::stoi(argv[7]);
+            const double corrThreshold = std::stod(argv[8]);
+
+            vigra::ImageImportInfo info(leftPath.c_str());
+            const std::string pixelType = info.getPixelType();
+            if(info.numBands() == 1 && pixelType == "UINT8")
+            {
+                traceRectImagePath<vigra::BImage>(leftPath, rightPath, pyrLevel, gridSize, rectIndex, pointsPerGrid, corrThreshold);
+                return 0;
+            }
+            if(info.numBands() == 3 && pixelType == "UINT8")
+            {
+                traceRectImagePath<vigra::BRGBImage>(leftPath, rightPath, pyrLevel, gridSize, rectIndex, pointsPerGrid, corrThreshold);
+                return 0;
+            }
+            if(info.numBands() == 1 && pixelType == "UINT16")
+            {
+                traceRectImagePath<vigra::UInt16Image>(leftPath, rightPath, pyrLevel, gridSize, rectIndex, pointsPerGrid, corrThreshold);
+                return 0;
+            }
+            if(info.numBands() == 3 && pixelType == "UINT16")
+            {
+                traceRectImagePath<vigra::UInt16RGBImage>(leftPath, rightPath, pyrLevel, gridSize, rectIndex, pointsPerGrid, corrThreshold);
+                return 0;
+            }
+            throw std::runtime_error(
+                std::string("unsupported image type for trace-rect-image: bands=") +
+                std::to_string(info.numBands()) +
+                " pixelType=" + pixelType);
         }
 
         usage();

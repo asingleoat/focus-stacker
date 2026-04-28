@@ -165,7 +165,7 @@ pub fn main() !void {
                 20,
                 100,
             );
-            if (coarse.score < corr_threshold) continue;
+            if (!match_mod.passesCorrelationThreshold(coarse.score, corr_threshold)) continue;
 
             var final_score = coarse.score;
             var final_x = coarse.x * scale_factor;
@@ -176,12 +176,12 @@ pub fn main() !void {
                     &right_full,
                     candidate.x * scale_factor_int,
                     candidate.y * scale_factor_int,
-                    roundFloatToPixel(coarse.x * scale_factor, right_full.width),
-                    roundFloatToPixel(coarse.y * scale_factor, right_full.height),
+                    truncFloatToPixel(coarse.x * scale_factor, right_full.width),
+                    truncFloatToPixel(coarse.y * scale_factor, right_full.height),
                     20,
                     scale_factor_int,
                 );
-                if (refined.score < corr_threshold) continue;
+                if (!match_mod.passesCorrelationThreshold(refined.score, corr_threshold)) continue;
                 final_score = refined.score;
                 final_x = refined.x;
                 final_y = refined.y;
@@ -257,7 +257,7 @@ pub fn main() !void {
                 20,
                 100,
             );
-            const coarse_ok = coarse.score >= corr_threshold;
+            const coarse_ok = match_mod.passesCorrelationThreshold(coarse.score, corr_threshold);
 
             var final_score = coarse.score;
             var final_x = coarse.x * scale_factor;
@@ -269,15 +269,15 @@ pub fn main() !void {
                     &right_full,
                     candidate.x * scale_factor_int,
                     candidate.y * scale_factor_int,
-                    roundFloatToPixel(coarse.x * scale_factor, right_full.width),
-                    roundFloatToPixel(coarse.y * scale_factor, right_full.height),
+                    truncFloatToPixel(coarse.x * scale_factor, right_full.width),
+                    truncFloatToPixel(coarse.y * scale_factor, right_full.height),
                     20,
                     scale_factor_int,
                 );
                 final_score = refined.score;
                 final_x = refined.x;
                 final_y = refined.y;
-                refined_ok = refined.score >= corr_threshold;
+                refined_ok = match_mod.passesCorrelationThreshold(refined.score, corr_threshold);
             }
 
             const accepted_now = coarse_ok and refined_ok and accepted < points_per_grid;
@@ -519,9 +519,9 @@ fn writeImportedImage(
     }
 }
 
-fn roundFloatToPixel(value: f64, limit: u32) u32 {
+fn truncFloatToPixel(value: f64, limit: u32) u32 {
     if (value <= 0) return 0;
-    const rounded = @as(i64, @intFromFloat(value + 0.5));
+    const rounded = @as(i64, @intFromFloat(value));
     const max_value = @as(i64, limit - 1);
     return @as(u32, @intCast(@min(max_value, @max(@as(i64, 0), rounded))));
 }
@@ -556,7 +556,7 @@ fn countAcceptedInRect(
             20,
             100,
         );
-        if (coarse.score < corr_threshold) continue;
+        if (!match_mod.passesCorrelationThreshold(coarse.score, corr_threshold)) continue;
 
         if (pyr_level > 0) {
             const refined = match_mod.probeMatchAroundCenter(
@@ -564,12 +564,12 @@ fn countAcceptedInRect(
                 right_full,
                 candidate.x * scale_factor_int,
                 candidate.y * scale_factor_int,
-                roundFloatToPixel(coarse.x * scale_factor, right_full.width),
-                roundFloatToPixel(coarse.y * scale_factor, right_full.height),
+                truncFloatToPixel(coarse.x * scale_factor, right_full.width),
+                truncFloatToPixel(coarse.y * scale_factor, right_full.height),
                 20,
                 scale_factor_int,
             );
-            if (refined.score < corr_threshold) continue;
+            if (!match_mod.passesCorrelationThreshold(refined.score, corr_threshold)) continue;
         }
 
         accepted += 1;

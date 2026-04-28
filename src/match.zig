@@ -14,6 +14,8 @@ pub const PairOptions = struct {
     full_res_template_size: u32 = 20,
 };
 
+const corr_threshold_slack: f32 = 0.00025;
+
 pub const ControlPoint = struct {
     left_image: usize,
     right_image: usize,
@@ -107,7 +109,7 @@ pub fn analyzePair(
         for (candidates) |candidate| {
             candidates_considered += 1;
             const result = matchCandidate(left, right, candidate, opts);
-            if (result.score < opts.corr_threshold) {
+            if (!passesCorrelationThreshold(result.score, opts.corr_threshold)) {
                 continue;
             }
 
@@ -131,12 +133,12 @@ pub fn analyzePair(
                     right_full,
                     candidate.x * scale_factor_int,
                     candidate.y * scale_factor_int,
-                    roundFloatToPixel(result.x * scale_factor, right_full.width),
-                    roundFloatToPixel(result.y * scale_factor, right_full.height),
+                    truncFloatToPixel(result.x * scale_factor, right_full.width),
+                    truncFloatToPixel(result.y * scale_factor, right_full.height),
                     opts.full_res_template_size,
                     full_res_search_width,
                 );
-                if (refined.score < opts.corr_threshold) {
+                if (!passesCorrelationThreshold(refined.score, opts.corr_threshold)) {
                     continue;
                 }
                 final_right_x = refined.x;
@@ -324,6 +326,19 @@ fn matchAroundCenter(
         return .{};
     }
 
+    const patch_w = @as(u32, @intCast(tmpl_lr_x - tmpl_ul_x));
+    const patch_h = @as(u32, @intCast(tmpl_lr_y - tmpl_ul_y));
+
+    var template_storage: [1024]f64 = undefined;
+    const template = buildTemplateStats(
+        left,
+        tmpl_ul_x,
+        tmpl_ul_y,
+        patch_w,
+        patch_h,
+        &template_storage,
+    ) orelse return .{};
+
     const kul_x = tmpl_ul_x - templ_pos_x;
     const kul_y = tmpl_ul_y - templ_pos_y;
     const klr_x = tmpl_lr_x - templ_pos_x - 1;
@@ -354,6 +369,24 @@ fn matchAroundCenter(
         return .{};
     }
 
+    if (computeCorrelationSurfaceLikeHugin(
+        right,
+        search_ul_x,
+        search_ul_y,
+        @as(u32, @intCast(search_w)),
+        @as(u32, @intCast(search_h)),
+        kul_x,
+        kul_y,
+        xstart,
+        ystart,
+        xend,
+        yend,
+        template,
+    ) catch null) |surface| {
+        defer surface.deinit();
+        return finalizeSurfaceResult(surface, search_ul_x, search_ul_y, templ_half, swidth);
+    }
+
     var best_x = xstart;
     var best_y = ystart;
     var best_score: f32 = -1;
@@ -362,18 +395,14 @@ fn matchAroundCenter(
     while (y < yend) : (y += 1) {
         var x = xstart;
         while (x < xend) : (x += 1) {
-            const score = evaluateNccWindow(left, right, .{
-                .tmpl_ul_x = tmpl_ul_x,
-                .tmpl_ul_y = tmpl_ul_y,
-                .tmpl_lr_x = tmpl_lr_x,
-                .tmpl_lr_y = tmpl_lr_y,
+            const score = evaluateCorrelationWindow(right, .{
                 .kul_x = kul_x,
                 .kul_y = kul_y,
                 .search_ul_x = search_ul_x,
                 .search_ul_y = search_ul_y,
                 .center_local_x = x,
                 .center_local_y = y,
-            });
+            }, template);
             if (score > best_score) {
                 best_score = score;
                 best_x = x;
@@ -396,54 +425,38 @@ fn matchAroundCenter(
         best_y > subpixel_lower_bound and best_y < subpixel_upper_bound and
         has_neighbor_x and has_neighbor_y)
     {
-        const score_left = evaluateNccWindow(left, right, .{
-            .tmpl_ul_x = tmpl_ul_x,
-            .tmpl_ul_y = tmpl_ul_y,
-            .tmpl_lr_x = tmpl_lr_x,
-            .tmpl_lr_y = tmpl_lr_y,
+        const score_left = evaluateCorrelationWindow(right, .{
             .kul_x = kul_x,
             .kul_y = kul_y,
             .search_ul_x = search_ul_x,
             .search_ul_y = search_ul_y,
             .center_local_x = best_x - 1,
             .center_local_y = best_y,
-        });
-        const score_right = evaluateNccWindow(left, right, .{
-            .tmpl_ul_x = tmpl_ul_x,
-            .tmpl_ul_y = tmpl_ul_y,
-            .tmpl_lr_x = tmpl_lr_x,
-            .tmpl_lr_y = tmpl_lr_y,
+        }, template);
+        const score_right = evaluateCorrelationWindow(right, .{
             .kul_x = kul_x,
             .kul_y = kul_y,
             .search_ul_x = search_ul_x,
             .search_ul_y = search_ul_y,
             .center_local_x = best_x + 1,
             .center_local_y = best_y,
-        });
-        const score_up = evaluateNccWindow(left, right, .{
-            .tmpl_ul_x = tmpl_ul_x,
-            .tmpl_ul_y = tmpl_ul_y,
-            .tmpl_lr_x = tmpl_lr_x,
-            .tmpl_lr_y = tmpl_lr_y,
+        }, template);
+        const score_up = evaluateCorrelationWindow(right, .{
             .kul_x = kul_x,
             .kul_y = kul_y,
             .search_ul_x = search_ul_x,
             .search_ul_y = search_ul_y,
             .center_local_x = best_x,
             .center_local_y = best_y - 1,
-        });
-        const score_down = evaluateNccWindow(left, right, .{
-            .tmpl_ul_x = tmpl_ul_x,
-            .tmpl_ul_y = tmpl_ul_y,
-            .tmpl_lr_x = tmpl_lr_x,
-            .tmpl_lr_y = tmpl_lr_y,
+        }, template);
+        const score_down = evaluateCorrelationWindow(right, .{
             .kul_x = kul_x,
             .kul_y = kul_y,
             .search_ul_x = search_ul_x,
             .search_ul_y = search_ul_y,
             .center_local_x = best_x,
             .center_local_y = best_y + 1,
-        });
+        }, template);
         const subpixel_x = fitSubpixelAxis(score_left, best_score, score_right);
         const subpixel_y = fitSubpixelAxis(score_up, best_score, score_down);
         final_score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
@@ -456,18 +469,14 @@ fn matchAroundCenter(
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
 }
 
-fn roundFloatToPixel(value: f64, limit: u32) u32 {
+fn truncFloatToPixel(value: f64, limit: u32) u32 {
     if (value <= 0) return 0;
-    const rounded = @as(i64, @intFromFloat(value + 0.5));
+    const rounded = @as(i64, @intFromFloat(value));
     const max_value = @as(i64, limit - 1);
     return @as(u32, @intCast(@min(max_value, @max(@as(i64, 0), rounded))));
 }
 
 const WindowContext = struct {
-    tmpl_ul_x: i32,
-    tmpl_ul_y: i32,
-    tmpl_lr_x: i32,
-    tmpl_lr_y: i32,
     kul_x: i32,
     kul_y: i32,
     search_ul_x: i32,
@@ -476,71 +485,446 @@ const WindowContext = struct {
     center_local_y: i32,
 };
 
-fn evaluateNccWindow(
+const CorrelationSurface = struct {
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    best_x: i32,
+    best_y: i32,
+    best_score: f32,
+    pixels: []f32,
+
+    fn deinit(self: CorrelationSurface) void {
+        self.allocator.free(self.pixels);
+    }
+};
+
+const TemplateStats = struct {
+    width: u32,
+    height: u32,
+    variance: f64,
+    zero_mean_pixels: []const f64,
+};
+
+fn buildTemplateStats(
     left: *const gray.GrayImage,
+    tmpl_ul_x: i32,
+    tmpl_ul_y: i32,
+    patch_w: u32,
+    patch_h: u32,
+    storage: []f64,
+) ?TemplateStats {
+    const count_usize = @as(usize, patch_w) * @as(usize, patch_h);
+    if (count_usize == 0 or count_usize > storage.len) return null;
+
+    var mean: f64 = 0;
+    var dy: u32 = 0;
+    while (dy < patch_h) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < patch_w) : (dx += 1) {
+            mean += left.pixel(
+                @as(u32, @intCast(tmpl_ul_x)) + dx,
+                @as(u32, @intCast(tmpl_ul_y)) + dy,
+            );
+        }
+    }
+    mean /= @as(f64, @floatFromInt(count_usize));
+
+    var variance_sum: f64 = 0;
+    dy = 0;
+    while (dy < patch_h) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < patch_w) : (dx += 1) {
+            const idx = @as(usize, dy) * @as(usize, patch_w) + @as(usize, dx);
+            const value = @as(f64, left.pixel(
+                @as(u32, @intCast(tmpl_ul_x)) + dx,
+                @as(u32, @intCast(tmpl_ul_y)) + dy,
+            )) - mean;
+            storage[idx] = value;
+            variance_sum += value * value;
+        }
+    }
+
+    if (variance_sum == 0) return null;
+
+    return .{
+        .width = patch_w,
+        .height = patch_h,
+        .variance = variance_sum / @as(f64, @floatFromInt(count_usize)),
+        .zero_mean_pixels = storage[0..count_usize],
+    };
+}
+
+fn computeCorrelationSurfaceLikeHugin(
+    right: *const gray.GrayImage,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    search_w: u32,
+    search_h: u32,
+    kul_x: i32,
+    kul_y: i32,
+    xstart: i32,
+    ystart: i32,
+    xend: i32,
+    yend: i32,
+    template: TemplateStats,
+) !?CorrelationSurface {
+    const enable_frequency_correlation = false;
+    if (!enable_frequency_correlation) return null;
+    if (search_w > 64 or search_h > 64) return null;
+
+    const allocator = std.heap.page_allocator;
+    const fft_w = search_w;
+    const fft_h = search_h;
+    const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
+    const patch_count = @as(f64, @floatFromInt(template.width * template.height));
+
+    var search_freq = try allocator.alloc(Complex, fft_count);
+    defer allocator.free(search_freq);
+    var kernel_freq = try allocator.alloc(Complex, fft_count);
+    defer allocator.free(kernel_freq);
+    const row_buffer = try allocator.alloc(Complex, 2 * @max(fft_w, fft_h));
+    defer allocator.free(row_buffer);
+    const integral = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
+    defer allocator.free(integral);
+    const integral_sq = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
+    defer allocator.free(integral_sq);
+    const pixels = try allocator.alloc(f32, @as(usize, search_w) * @as(usize, search_h));
+    @memset(pixels, -1);
+    errdefer allocator.free(pixels);
+
+    for (search_freq) |*value| value.* = .{};
+    for (kernel_freq) |*value| value.* = .{};
+
+    var y: u32 = 0;
+    while (y < search_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < search_w) : (x += 1) {
+            search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = @as(f64, right.pixel(
+                @as(u32, @intCast(search_ul_x)) + x,
+                @as(u32, @intCast(search_ul_y)) + y,
+            ));
+        }
+    }
+
+    y = 0;
+    while (y < template.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < template.width) : (x += 1) {
+            const idx = @as(usize, y) * @as(usize, template.width) + @as(usize, x);
+            kernel_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = template.zero_mean_pixels[idx];
+        }
+    }
+
+    dft2d(search_freq, fft_w, fft_h, false, row_buffer);
+    dft2d(kernel_freq, fft_w, fft_h, false, row_buffer);
+
+    for (search_freq, kernel_freq) |*lhs, rhs| {
+        lhs.* = lhs.mul(rhs.conj());
+    }
+    dft2d(search_freq, fft_w, fft_h, true, row_buffer);
+
+    buildIntegralImages(right, search_ul_x, search_ul_y, search_w, search_h, integral, integral_sq);
+
+    const normalization = @sqrt(template.variance);
+    var best_score: f32 = -1;
+    var best_x: i32 = 0;
+    var best_y: i32 = 0;
+
+    var center_y: i32 = ystart;
+    while (center_y < yend) : (center_y += 1) {
+        var center_x: i32 = xstart;
+        while (center_x < xend) : (center_x += 1) {
+            const top_x = center_x + kul_x;
+            const top_y = center_y + kul_y;
+            const sum = sumRect(integral, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+            const sum_sq = sumRect(integral_sq, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+            const denominator = @sqrt(patch_count * sum_sq - sum * sum);
+            if (denominator == 0) continue;
+
+            const corr_idx = @as(usize, @intCast(top_y)) * @as(usize, fft_w) + @as(usize, @intCast(top_x));
+            const score = @as(f32, @floatCast(search_freq[corr_idx].re / normalization / denominator));
+            pixels[@as(usize, @intCast(center_y)) * @as(usize, search_w) + @as(usize, @intCast(center_x))] = score;
+            if (score > best_score) {
+                best_score = score;
+                best_x = center_x;
+                best_y = center_y;
+            }
+        }
+    }
+
+    if (best_score < 0) {
+        allocator.free(pixels);
+        return null;
+    }
+
+    return .{
+        .allocator = allocator,
+        .width = search_w,
+        .height = search_h,
+        .best_x = best_x,
+        .best_y = best_y,
+        .best_score = best_score,
+        .pixels = pixels,
+    };
+}
+
+fn finalizeSurfaceResult(
+    surface: CorrelationSurface,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    templ_half: i32,
+    swidth: i32,
+) MatchResult {
+    var refined_x = @as(f64, @floatFromInt(surface.best_x + search_ul_x));
+    var refined_y = @as(f64, @floatFromInt(surface.best_y + search_ul_y));
+    var final_score = surface.best_score;
+
+    const subpixel_lower_bound = 2 + templ_half;
+    const subpixel_upper_bound = 2 * swidth + 1 - 2 - templ_half;
+    const has_neighbor_x = surface.best_x > 0 and surface.best_x + 1 < @as(i32, @intCast(surface.width));
+    const has_neighbor_y = surface.best_y > 0 and surface.best_y + 1 < @as(i32, @intCast(surface.height));
+    if (surface.best_x > subpixel_lower_bound and surface.best_x < subpixel_upper_bound and
+        surface.best_y > subpixel_lower_bound and surface.best_y < subpixel_upper_bound and
+        has_neighbor_x and has_neighbor_y)
+    {
+        const score_left = surface.pixels[@as(usize, @intCast(surface.best_y)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x - 1))];
+        const score_right = surface.pixels[@as(usize, @intCast(surface.best_y)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x + 1))];
+        const score_up = surface.pixels[@as(usize, @intCast(surface.best_y - 1)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x))];
+        const score_down = surface.pixels[@as(usize, @intCast(surface.best_y + 1)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x))];
+        const subpixel_x = fitSubpixelAxis(score_left, surface.best_score, score_right);
+        const subpixel_y = fitSubpixelAxis(score_up, surface.best_score, score_down);
+        final_score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
+        if (@abs(subpixel_x.offset) <= 1.0 and @abs(subpixel_y.offset) <= 1.0) {
+            refined_x += subpixel_x.offset;
+            refined_y += subpixel_y.offset;
+        }
+    }
+
+    return .{ .score = final_score, .x = refined_x, .y = refined_y };
+}
+
+const Complex = struct {
+    re: f64 = 0,
+    im: f64 = 0,
+
+    fn add(self: Complex, other: Complex) Complex {
+        return .{ .re = self.re + other.re, .im = self.im + other.im };
+    }
+
+    fn sub(self: Complex, other: Complex) Complex {
+        return .{ .re = self.re - other.re, .im = self.im - other.im };
+    }
+
+    fn mul(self: Complex, other: Complex) Complex {
+        return .{
+            .re = self.re * other.re - self.im * other.im,
+            .im = self.re * other.im + self.im * other.re,
+        };
+    }
+
+    fn conj(self: Complex) Complex {
+        return .{ .re = self.re, .im = -self.im };
+    }
+};
+
+fn buildIntegralImages(
+    right: *const gray.GrayImage,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    search_w: u32,
+    search_h: u32,
+    integral: []f64,
+    integral_sq: []f64,
+) void {
+    const stride = @as(usize, search_w + 1);
+    @memset(integral, 0);
+    @memset(integral_sq, 0);
+
+    var y: u32 = 0;
+    while (y < search_h) : (y += 1) {
+        var row_sum: f64 = 0;
+        var row_sum_sq: f64 = 0;
+        var x: u32 = 0;
+        while (x < search_w) : (x += 1) {
+            const value = @as(f64, right.pixel(
+                @as(u32, @intCast(search_ul_x)) + x,
+                @as(u32, @intCast(search_ul_y)) + y,
+            ));
+            row_sum += value;
+            row_sum_sq += value * value;
+            const idx = @as(usize, y + 1) * stride + @as(usize, x + 1);
+            integral[idx] = integral[@as(usize, y) * stride + @as(usize, x + 1)] + row_sum;
+            integral_sq[idx] = integral_sq[@as(usize, y) * stride + @as(usize, x + 1)] + row_sum_sq;
+        }
+    }
+}
+
+fn sumRect(integral: []const f64, stride_u32: u32, x0: u32, y0: u32, width: u32, height: u32) f64 {
+    const stride = @as(usize, stride_u32);
+    const x1 = x0 + width;
+    const y1 = y0 + height;
+    return integral[@as(usize, y1) * stride + @as(usize, x1)] -
+        integral[@as(usize, y0) * stride + @as(usize, x1)] -
+        integral[@as(usize, y1) * stride + @as(usize, x0)] +
+        integral[@as(usize, y0) * stride + @as(usize, x0)];
+}
+
+fn nextPowerOfTwo(value: u32) u32 {
+    var power: u32 = 1;
+    while (power < value) : (power <<= 1) {}
+    return power;
+}
+
+fn dft2d(data: []Complex, width: u32, height: u32, inverse: bool, scratch: []Complex) void {
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        dft1d(data[@as(usize, y) * @as(usize, width) ..][0..@as(usize, width)], inverse, scratch);
+    }
+
+    var x: u32 = 0;
+    while (x < width) : (x += 1) {
+        var row: u32 = 0;
+        while (row < height) : (row += 1) {
+            scratch[@as(usize, row)] = data[@as(usize, row) * @as(usize, width) + @as(usize, x)];
+        }
+        dft1d(scratch[0..@as(usize, height)], inverse, scratch[@as(usize, height)..]);
+        row = 0;
+        while (row < height) : (row += 1) {
+            data[@as(usize, row) * @as(usize, width) + @as(usize, x)] = scratch[@as(usize, row)];
+        }
+    }
+}
+
+fn dft1d(data: []Complex, inverse: bool, scratch: []Complex) void {
+    const n = data.len;
+    std.debug.assert(scratch.len >= n);
+
+    const sign: f64 = if (inverse) 2.0 else -2.0;
+    const scale: f64 = if (inverse) @as(f64, @floatFromInt(n)) else 1.0;
+
+    for (0..n) |k| {
+        var sum = Complex{};
+        for (0..n) |t| {
+            const angle = sign * 2.0 * std.math.pi * @as(f64, @floatFromInt(k * t)) / @as(f64, @floatFromInt(n));
+            const twiddle = Complex{ .re = @cos(angle), .im = @sin(angle) };
+            sum = sum.add(data[t].mul(twiddle));
+        }
+        scratch[k] = .{ .re = sum.re / scale, .im = sum.im / scale };
+    }
+
+    @memcpy(data, scratch[0..n]);
+}
+
+fn fft2d(data: []Complex, width: u32, height: u32, inverse: bool, scratch: []Complex) void {
+    var y: u32 = 0;
+    while (y < height) : (y += 1) {
+        fft1d(data[@as(usize, y) * @as(usize, width) ..][0..@as(usize, width)], inverse);
+    }
+
+    var x: u32 = 0;
+    while (x < width) : (x += 1) {
+        var row: u32 = 0;
+        while (row < height) : (row += 1) {
+            scratch[@as(usize, row)] = data[@as(usize, row) * @as(usize, width) + @as(usize, x)];
+        }
+        fft1d(scratch[0..@as(usize, height)], inverse);
+        row = 0;
+        while (row < height) : (row += 1) {
+            data[@as(usize, row) * @as(usize, width) + @as(usize, x)] = scratch[@as(usize, row)];
+        }
+    }
+}
+
+fn fft1d(data: []Complex, inverse: bool) void {
+    const n = data.len;
+    if (n <= 1) return;
+
+    var j: usize = 0;
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        var bit = n >> 1;
+        while (j & bit != 0) {
+            j ^= bit;
+            bit >>= 1;
+        }
+        j ^= bit;
+        if (i < j) {
+            const tmp = data[i];
+            data[i] = data[j];
+            data[j] = tmp;
+        }
+    }
+
+    var len: usize = 2;
+    while (len <= n) : (len <<= 1) {
+        const direction: f64 = if (inverse) 2.0 else -2.0;
+        const angle = direction * std.math.pi / @as(f64, @floatFromInt(len));
+        const wlen = Complex{ .re = @cos(angle), .im = @sin(angle) };
+        var start: usize = 0;
+        while (start < n) : (start += len) {
+            var w = Complex{ .re = 1, .im = 0 };
+            var k: usize = 0;
+            while (k < len / 2) : (k += 1) {
+                const u = data[start + k];
+                const v = data[start + k + len / 2].mul(w);
+                data[start + k] = u.add(v);
+                data[start + k + len / 2] = u.sub(v);
+                w = w.mul(wlen);
+            }
+        }
+    }
+
+    if (inverse) {
+        const scale = @as(f64, @floatFromInt(n));
+        for (data) |*value| {
+            value.re /= scale;
+            value.im /= scale;
+        }
+    }
+}
+
+fn evaluateCorrelationWindow(
     right: *const gray.GrayImage,
     ctx: WindowContext,
+    template: TemplateStats,
 ) f32 {
-    const patch_w = @as(u32, @intCast(ctx.tmpl_lr_x - ctx.tmpl_ul_x));
-    const patch_h = @as(u32, @intCast(ctx.tmpl_lr_y - ctx.tmpl_ul_y));
-    const count = @as(f64, @floatFromInt(patch_w * patch_h));
+    const patch_w = template.width;
+    const patch_h = template.height;
     const right_x0 = ctx.search_ul_x + ctx.center_local_x + ctx.kul_x;
     const right_y0 = ctx.search_ul_y + ctx.center_local_y + ctx.kul_y;
 
-    if (ctx.tmpl_ul_x < 0 or ctx.tmpl_ul_y < 0 or
-        right_x0 < 0 or right_y0 < 0 or
-        ctx.tmpl_lr_x > @as(i32, @intCast(left.width)) or
-        ctx.tmpl_lr_y > @as(i32, @intCast(left.height)) or
+    if (right_x0 < 0 or right_y0 < 0 or
         right_x0 + @as(i32, @intCast(patch_w)) > @as(i32, @intCast(right.width)) or
         right_y0 + @as(i32, @intCast(patch_h)) > @as(i32, @intCast(right.height)))
     {
         return -1;
     }
 
-    var mean_left: f64 = 0;
-    var mean_right: f64 = 0;
+    var numerator: f64 = 0;
+    var sum_right: f64 = 0;
+    var sum_right_sq: f64 = 0;
     var dy: u32 = 0;
     while (dy < patch_h) : (dy += 1) {
         var dx: u32 = 0;
         while (dx < patch_w) : (dx += 1) {
-            mean_left += left.pixel(
-                @as(u32, @intCast(ctx.tmpl_ul_x)) + dx,
-                @as(u32, @intCast(ctx.tmpl_ul_y)) + dy,
-            );
-            mean_right += right.pixel(
-                @as(u32, @intCast(right_x0)) + dx,
-                @as(u32, @intCast(right_y0)) + dy,
-            );
-        }
-    }
-    mean_left /= count;
-    mean_right /= count;
-
-    var numerator: f64 = 0;
-    var div_left: f64 = 0;
-    var div_right: f64 = 0;
-    dy = 0;
-    while (dy < patch_h) : (dy += 1) {
-        var dx: u32 = 0;
-        while (dx < patch_w) : (dx += 1) {
-            const left_value = @as(f64, left.pixel(
-                @as(u32, @intCast(ctx.tmpl_ul_x)) + dx,
-                @as(u32, @intCast(ctx.tmpl_ul_y)) + dy,
-            )) - mean_left;
+            const template_idx = @as(usize, dy) * @as(usize, patch_w) + @as(usize, dx);
             const right_value = @as(f64, right.pixel(
                 @as(u32, @intCast(right_x0)) + dx,
                 @as(u32, @intCast(right_y0)) + dy,
-            )) - mean_right;
-            numerator += left_value * right_value;
-            div_left += left_value * left_value;
-            div_right += right_value * right_value;
+            ));
+            numerator += template.zero_mean_pixels[template_idx] * right_value;
+            sum_right += right_value;
+            sum_right_sq += right_value * right_value;
         }
     }
 
-    if (div_left == 0 or div_right == 0) {
+    const count = @as(f64, @floatFromInt(patch_w * patch_h));
+    const denominator = @sqrt(template.variance) * @sqrt(count * sum_right_sq - sum_right * sum_right);
+    if (denominator == 0) {
         return -1;
     }
-    return @as(f32, @floatCast(numerator / @sqrt(div_left * div_right)));
+    return @as(f32, @floatCast(numerator / denominator));
 }
 
 fn clipBounds(start: *i32, stop: *i32, limit: i32) void {
@@ -568,6 +952,10 @@ fn fitSubpixelAxis(left: f32, center: f32, right: f32) SubpixelAxisFit {
         .offset = offset,
         .max_value = max_value,
     };
+}
+
+pub fn passesCorrelationThreshold(score: f32, threshold: f32) bool {
+    return score + corr_threshold_slack >= threshold;
 }
 
 test "pair matching recovers a small translation" {
