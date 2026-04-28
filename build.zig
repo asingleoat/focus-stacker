@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addOptions("build_options", build_options);
     configureImageDeps(exe.root_module);
 
     b.installArtifact(exe);
@@ -40,6 +41,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    parity_probe.root_module.addOptions("build_options", build_options);
     configureImageDeps(parity_probe.root_module);
 
     const upstream_probe = b.addExecutable(.{
@@ -50,6 +52,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    upstream_probe.root_module.addOptions("build_options", build_options);
     configurePano13Deps(b, upstream_probe.root_module);
 
     const match_probe = b.addExecutable(.{
@@ -63,6 +66,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    match_probe.root_module.addOptions("build_options", build_options);
     configureImageDeps(match_probe.root_module);
 
     const run_cmd = b.addRunArtifact(exe);

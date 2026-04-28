@@ -328,21 +328,26 @@ fn lmpar(
 
     _ = allocator;
     var nsing = n;
-    for (0..n) |j| {
-        wa1[j] = qtb[j];
-        if (r[index(ldr, j, j)] == 0.0 and nsing == n) nsing = j;
-        if (nsing < n) wa1[j] = 0.0;
-    }
+    {
+        const phase_prof = profiler.scope("minpack.lmpar.gauss_newton");
+        defer phase_prof.end();
 
-    if (nsing >= 1) {
-        var k: usize = 0;
-        while (k < nsing) : (k += 1) {
-            const j = nsing - k - 1;
-            wa1[j] /= r[index(ldr, j, j)];
-            const temp = wa1[j];
-            if (j > 0) {
-                for (0..j) |i| {
-                    wa1[i] -= r[index(ldr, i, j)] * temp;
+        for (0..n) |j| {
+            wa1[j] = qtb[j];
+            if (r[index(ldr, j, j)] == 0.0 and nsing == n) nsing = j;
+            if (nsing < n) wa1[j] = 0.0;
+        }
+
+        if (nsing >= 1) {
+            var k: usize = 0;
+            while (k < nsing) : (k += 1) {
+                const j = nsing - k - 1;
+                wa1[j] /= r[index(ldr, j, j)];
+                const temp = wa1[j];
+                if (j > 0) {
+                    for (0..j) |i| {
+                        wa1[i] -= r[index(ldr, i, j)] * temp;
+                    }
                 }
             }
         }
@@ -358,29 +363,36 @@ fn lmpar(
     }
 
     var parl: f64 = 0.0;
-    if (nsing >= n) {
-        for (0..n) |j| {
-            const l = ipvt[j];
-            wa1[j] = diag[l] * (wa2[l] / dxnorm);
+    var gnorm: f64 = 0.0;
+    var paru: f64 = 0.0;
+    {
+        const phase_prof = profiler.scope("minpack.lmpar.bounds");
+        defer phase_prof.end();
+
+        if (nsing >= n) {
+            for (0..n) |j| {
+                const l = ipvt[j];
+                wa1[j] = diag[l] * (wa2[l] / dxnorm);
+            }
+            for (0..n) |j| {
+                var sum: f64 = 0.0;
+                for (0..j) |i| sum += r[index(ldr, i, j)] * wa1[i];
+                wa1[j] = (wa1[j] - sum) / r[index(ldr, j, j)];
+            }
+            const temp = enorm(wa1);
+            parl = ((fp / delta) / temp) / temp;
         }
+
         for (0..n) |j| {
             var sum: f64 = 0.0;
-            for (0..j) |i| sum += r[index(ldr, i, j)] * wa1[i];
-            wa1[j] = (wa1[j] - sum) / r[index(ldr, j, j)];
+            for (0..j + 1) |i| sum += r[index(ldr, i, j)] * qtb[i];
+            const l = ipvt[j];
+            wa1[j] = sum / diag[l];
         }
-        const temp = enorm(wa1);
-        parl = ((fp / delta) / temp) / temp;
+        gnorm = enorm(wa1);
+        paru = gnorm / delta;
+        if (paru == 0.0) paru = dwarf / @min(delta, 0.1);
     }
-
-    for (0..n) |j| {
-        var sum: f64 = 0.0;
-        for (0..j + 1) |i| sum += r[index(ldr, i, j)] * qtb[i];
-        const l = ipvt[j];
-        wa1[j] = sum / diag[l];
-    }
-    const gnorm = enorm(wa1);
-    var paru = gnorm / delta;
-    if (paru == 0.0) paru = dwarf / @min(delta, 0.1);
 
     par.* = @max(par.*, parl);
     par.* = @min(par.*, paru);
@@ -396,29 +408,39 @@ fn lmpar(
             if (par.* == 0.0) par.* = @max(dwarf, 0.001 * paru);
             const temp = @sqrt(par.*);
             for (0..n) |j| wa1[j] = temp * diag[j];
-            qrsolv(r, ldr, n, ipvt, wa1, qtb, x, sdiag, wa2);
-            for (0..n) |j| wa2[j] = diag[j] * x[j];
-            const dxnorm_iter = enorm(wa2);
+            const dxnorm_iter = blk: {
+                const phase_prof = profiler.scope("minpack.lmpar.qrsolv_eval");
+                defer phase_prof.end();
+
+                qrsolv(r, ldr, n, ipvt, wa1, qtb, x, sdiag, wa2);
+                for (0..n) |j| wa2[j] = diag[j] * x[j];
+                break :blk enorm(wa2);
+            };
             const prev_fp = fp;
             fp = dxnorm_iter - delta;
             if (@abs(fp) <= 0.1 * delta or (parl == 0.0 and fp <= prev_fp and prev_fp < 0.0) or iter == 10) {
                 return;
             }
 
-            for (0..n) |j| {
-                const l = ipvt[j];
-                wa1[j] = diag[l] * (wa2[l] / dxnorm_iter);
-            }
-            for (0..n) |j| {
-                wa1[j] /= sdiag[j];
-                const temp2 = wa1[j];
-                const jp1 = j + 1;
-                if (jp1 < n) {
-                    for (jp1..n) |i| wa1[i] -= r[index(ldr, i, j)] * temp2;
+            const parc = blk: {
+                const phase_prof = profiler.scope("minpack.lmpar.correction");
+                defer phase_prof.end();
+
+                for (0..n) |j| {
+                    const l = ipvt[j];
+                    wa1[j] = diag[l] * (wa2[l] / dxnorm_iter);
                 }
-            }
-            const temp3 = enorm(wa1);
-            const parc = ((fp / delta) / temp3) / temp3;
+                for (0..n) |j| {
+                    wa1[j] /= sdiag[j];
+                    const temp2 = wa1[j];
+                    const jp1 = j + 1;
+                    if (jp1 < n) {
+                        for (jp1..n) |i| wa1[i] -= r[index(ldr, i, j)] * temp2;
+                    }
+                }
+                const temp3 = enorm(wa1);
+                break :blk ((fp / delta) / temp3) / temp3;
+            };
             if (fp > 0.0) parl = @max(parl, par.*);
             if (fp < 0.0) paru = @min(paru, par.*);
             par.* = @max(parl, par.* + parc);
@@ -430,71 +452,86 @@ fn qrsolv(r: []f64, ldr: usize, n: usize, ipvt: []const usize, diag: []const f64
     const prof = profiler.scope("minpack.qrsolv");
     defer prof.end();
 
-    for (0..n) |j| {
-        for (j..n) |i| {
-            r[index(ldr, i, j)] = r[index(ldr, j, i)];
+    {
+        const phase_prof = profiler.scope("minpack.qrsolv.copy_r");
+        defer phase_prof.end();
+
+        for (0..n) |j| {
+            for (j..n) |i| {
+                r[index(ldr, i, j)] = r[index(ldr, j, i)];
+            }
+            x[j] = r[index(ldr, j, j)];
+            wa[j] = qtb[j];
         }
-        x[j] = r[index(ldr, j, j)];
-        wa[j] = qtb[j];
     }
 
-    for (0..n) |j| {
-        const l = ipvt[j];
-        if (diag[l] == 0.0) continue;
-        @memset(sdiag[j..], 0.0);
-        sdiag[j] = diag[l];
-        var qtbpj: f64 = 0.0;
-        for (j..n) |k| {
-            if (sdiag[k] == 0.0) continue;
-            const kk = index(ldr, k, k);
-            var sin_: f64 = 0.0;
-            var cos_: f64 = 0.0;
-            if (@abs(r[kk]) < @abs(sdiag[k])) {
-                const cotan = r[kk] / sdiag[k];
-                sin_ = 0.5 / @sqrt(0.25 + 0.25 * cotan * cotan);
-                cos_ = sin_ * cotan;
-            } else {
-                const tan_ = sdiag[k] / r[kk];
-                cos_ = 0.5 / @sqrt(0.25 + 0.25 * tan_ * tan_);
-                sin_ = cos_ * tan_;
-            }
+    {
+        const phase_prof = profiler.scope("minpack.qrsolv.eliminate_diag");
+        defer phase_prof.end();
 
-            r[kk] = cos_ * r[kk] + sin_ * sdiag[k];
-            const temp = cos_ * wa[k] + sin_ * qtbpj;
-            qtbpj = -sin_ * wa[k] + cos_ * qtbpj;
-            wa[k] = temp;
+        for (0..n) |j| {
+            const l = ipvt[j];
+            if (diag[l] == 0.0) continue;
+            @memset(sdiag[j..], 0.0);
+            sdiag[j] = diag[l];
+            var qtbpj: f64 = 0.0;
+            for (j..n) |k| {
+                if (sdiag[k] == 0.0) continue;
+                const kk = index(ldr, k, k);
+                var sin_: f64 = 0.0;
+                var cos_: f64 = 0.0;
+                if (@abs(r[kk]) < @abs(sdiag[k])) {
+                    const cotan = r[kk] / sdiag[k];
+                    sin_ = 0.5 / @sqrt(0.25 + 0.25 * cotan * cotan);
+                    cos_ = sin_ * cotan;
+                } else {
+                    const tan_ = sdiag[k] / r[kk];
+                    cos_ = 0.5 / @sqrt(0.25 + 0.25 * tan_ * tan_);
+                    sin_ = cos_ * tan_;
+                }
 
-            const kp1 = k + 1;
-            if (kp1 < n) {
-                for (kp1..n) |i| {
-                    const temp2 = cos_ * r[index(ldr, i, k)] + sin_ * sdiag[i];
-                    sdiag[i] = -sin_ * r[index(ldr, i, k)] + cos_ * sdiag[i];
-                    r[index(ldr, i, k)] = temp2;
+                r[kk] = cos_ * r[kk] + sin_ * sdiag[k];
+                const temp = cos_ * wa[k] + sin_ * qtbpj;
+                qtbpj = -sin_ * wa[k] + cos_ * qtbpj;
+                wa[k] = temp;
+
+                const kp1 = k + 1;
+                if (kp1 < n) {
+                    for (kp1..n) |i| {
+                        const temp2 = cos_ * r[index(ldr, i, k)] + sin_ * sdiag[i];
+                        sdiag[i] = -sin_ * r[index(ldr, i, k)] + cos_ * sdiag[i];
+                        r[index(ldr, i, k)] = temp2;
+                    }
                 }
             }
+            sdiag[j] = r[index(ldr, j, j)];
+            r[index(ldr, j, j)] = x[j];
         }
-        sdiag[j] = r[index(ldr, j, j)];
-        r[index(ldr, j, j)] = x[j];
     }
 
-    var nsing = n;
-    for (0..n) |j| {
-        if (sdiag[j] == 0.0 and nsing == n) nsing = j;
-        if (nsing < n) wa[j] = 0.0;
-    }
-    if (nsing >= 1) {
-        var k: usize = 0;
-        while (k < nsing) : (k += 1) {
-            const j = nsing - k - 1;
-            var sum: f64 = 0.0;
-            const jp1 = j + 1;
-            if (jp1 < nsing) {
-                for (jp1..nsing) |i| sum += r[index(ldr, i, j)] * wa[i];
-            }
-            wa[j] = (wa[j] - sum) / sdiag[j];
+    {
+        const phase_prof = profiler.scope("minpack.qrsolv.backsolve");
+        defer phase_prof.end();
+
+        var nsing = n;
+        for (0..n) |j| {
+            if (sdiag[j] == 0.0 and nsing == n) nsing = j;
+            if (nsing < n) wa[j] = 0.0;
         }
+        if (nsing >= 1) {
+            var k: usize = 0;
+            while (k < nsing) : (k += 1) {
+                const j = nsing - k - 1;
+                var sum: f64 = 0.0;
+                const jp1 = j + 1;
+                if (jp1 < nsing) {
+                    for (jp1..nsing) |i| sum += r[index(ldr, i, j)] * wa[i];
+                }
+                wa[j] = (wa[j] - sum) / sdiag[j];
+            }
+        }
+        for (0..n) |j| x[ipvt[j]] = wa[j];
     }
-    for (0..n) |j| x[ipvt[j]] = wa[j];
 }
 
 fn enorm(values: []const f64) f64 {

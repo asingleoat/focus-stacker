@@ -695,8 +695,16 @@ fn refinePosesIteratively(
     defer allocator.free(work_poses);
     const basic_rect_caches = try allocator.alloc(BasicRectEquirectCache, poses.len);
     defer allocator.free(basic_rect_caches);
+    const last_solve_x = try allocator.alloc(f64, variable_count);
+    defer allocator.free(last_solve_x);
+    const changed_images = try allocator.alloc(bool, poses.len);
+    defer allocator.free(changed_images);
+    const parameter_images = try buildParameterImageIndex(allocator, layout);
+    defer allocator.free(parameter_images);
     fillSolveVector(layout, poses, solve_x);
     applyUpstreamZeroStartNudges(layout, solve_x);
+    @memcpy(last_solve_x, solve_x);
+    @memset(changed_images, false);
 
     const actual_residual_count = switch (strategy) {
         .distance_only => countControlPoints(pair_matches),
@@ -710,6 +718,10 @@ fn refinePosesIteratively(
         .seed_poses = seed_poses,
         .work_poses = work_poses,
         .basic_rect_caches = basic_rect_caches,
+        .last_solve_x = last_solve_x,
+        .changed_images = changed_images,
+        .parameter_images = parameter_images,
+        .cache_initialized = false,
         .image_width = pair_matches[0].image_width,
         .image_height = pair_matches[0].image_height,
         .initial_avg_hfov = initial_avg_hfov,
@@ -762,6 +774,10 @@ const SolveContext = struct {
     seed_poses: []const ImagePose,
     work_poses: []ImagePose,
     basic_rect_caches: []BasicRectEquirectCache,
+    last_solve_x: []f64,
+    changed_images: []bool,
+    parameter_images: []const usize,
+    cache_initialized: bool,
     image_width: u32,
     image_height: u32,
     initial_avg_hfov: f64,
@@ -774,9 +790,7 @@ fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror
     defer prof.end();
 
     std.debug.assert(fvec.len >= ctx.actual_residual_count);
-    @memcpy(ctx.work_poses, ctx.seed_poses);
-    applySolveVector(ctx.layout, ctx.work_poses, x);
-    populateBasicRectEquirectCaches(ctx.work_poses, ctx.image_width, ctx.image_height, ctx.basic_rect_caches);
+    updateSolveContextState(ctx, x);
     const current_avg_hfov = currentAverageHfovDegrees(ctx.work_poses);
     const objective_scale = objectiveFovScale(ctx.initial_avg_hfov, current_avg_hfov);
 
@@ -811,6 +825,56 @@ fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror
     }
 }
 
+fn updateSolveContextState(ctx: *SolveContext, x: []const f64) void {
+    const prof = profiler.scope("optimize.updateSolveContextState");
+    defer prof.end();
+
+    std.debug.assert(x.len == ctx.last_solve_x.len);
+
+    if (!ctx.cache_initialized) {
+        @memcpy(ctx.work_poses, ctx.seed_poses);
+        applySolveVector(ctx.layout, ctx.work_poses, x);
+        populateBasicRectEquirectCaches(ctx.work_poses, ctx.image_width, ctx.image_height, ctx.basic_rect_caches);
+        @memcpy(ctx.last_solve_x, x);
+        ctx.cache_initialized = true;
+        return;
+    }
+
+    @memset(ctx.changed_images, false);
+    var changed_parameter_count: usize = 0;
+    var changed_image_count: usize = 0;
+    for (x, ctx.last_solve_x, 0..) |value, old_value, parameter_index| {
+        if (value == old_value) continue;
+        changed_parameter_count += 1;
+        const image_index = ctx.parameter_images[parameter_index];
+        if (!ctx.changed_images[image_index]) {
+            ctx.changed_images[image_index] = true;
+            changed_image_count += 1;
+        }
+    }
+
+    if (changed_parameter_count == 0) {
+        return;
+    }
+
+    const use_incremental = changed_parameter_count <= 4 and changed_image_count <= 2;
+    if (!use_incremental) {
+        @memcpy(ctx.work_poses, ctx.seed_poses);
+        applySolveVector(ctx.layout, ctx.work_poses, x);
+        populateBasicRectEquirectCaches(ctx.work_poses, ctx.image_width, ctx.image_height, ctx.basic_rect_caches);
+        @memcpy(ctx.last_solve_x, x);
+        return;
+    }
+
+    for (1..ctx.work_poses.len) |image_index| {
+        if (!ctx.changed_images[image_index]) continue;
+        ctx.work_poses[image_index] = ctx.seed_poses[image_index];
+        applySolveVectorImage(ctx.layout[image_index], &ctx.work_poses[image_index], x);
+        populateBasicRectEquirectCache(ctx.work_poses[image_index], ctx.image_width, ctx.image_height, &ctx.basic_rect_caches[image_index]);
+    }
+    @memcpy(ctx.last_solve_x, x);
+}
+
 const EquationAxis = enum { x, y };
 
 fn countLayoutVariables(layout: []const SolveLayout) usize {
@@ -832,6 +896,71 @@ fn countLayoutVariables(layout: []const SolveLayout) usize {
         if (entry.center_shift_y_index) |_| count += 1;
     }
     return count;
+}
+
+fn buildParameterImageIndex(allocator: std.mem.Allocator, layout: []const SolveLayout) ![]usize {
+    const parameter_images = try allocator.alloc(usize, countLayoutVariables(layout));
+    var next_index: usize = 0;
+    for (layout, 0..) |entry, image_index| {
+        if (image_index == 0) continue;
+        if (entry.yaw_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.pitch_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.roll_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.hfov_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.trans_x_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.trans_y_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.trans_z_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.translation_plane_yaw_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.translation_plane_pitch_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.radial_a_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.radial_b_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.radial_c_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.center_shift_x_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+        if (entry.center_shift_y_index) |_| {
+            parameter_images[next_index] = image_index;
+            next_index += 1;
+        }
+    }
+    return parameter_images;
 }
 
 fn appendImageCoefficients(
@@ -1785,21 +1914,25 @@ fn applySolveVector(layout: []const SolveLayout, poses: []ImagePose, solve_x: []
     defer prof.end();
 
     for (1..poses.len) |image_index| {
-        if (layout[image_index].yaw_index) |idx| setSolveSpaceValue(&poses[image_index], .yaw, solve_x[idx]);
-        if (layout[image_index].pitch_index) |idx| setSolveSpaceValue(&poses[image_index], .pitch, solve_x[idx]);
-        if (layout[image_index].roll_index) |idx| setSolveSpaceValue(&poses[image_index], .roll, solve_x[idx]);
-        if (layout[image_index].hfov_index) |idx| setSolveSpaceValue(&poses[image_index], .hfov_delta, solve_x[idx]);
-        if (layout[image_index].trans_x_index) |idx| setSolveSpaceValue(&poses[image_index], .trans_x, solve_x[idx]);
-        if (layout[image_index].trans_y_index) |idx| setSolveSpaceValue(&poses[image_index], .trans_y, solve_x[idx]);
-        if (layout[image_index].trans_z_index) |idx| setSolveSpaceValue(&poses[image_index], .trans_z, solve_x[idx]);
-        if (layout[image_index].translation_plane_yaw_index) |idx| setSolveSpaceValue(&poses[image_index], .translation_plane_yaw, solve_x[idx]);
-        if (layout[image_index].translation_plane_pitch_index) |idx| setSolveSpaceValue(&poses[image_index], .translation_plane_pitch, solve_x[idx]);
-        if (layout[image_index].radial_a_index) |idx| setSolveSpaceValue(&poses[image_index], .radial_a, solve_x[idx]);
-        if (layout[image_index].radial_b_index) |idx| setSolveSpaceValue(&poses[image_index], .radial_b, solve_x[idx]);
-        if (layout[image_index].radial_c_index) |idx| setSolveSpaceValue(&poses[image_index], .radial_c, solve_x[idx]);
-        if (layout[image_index].center_shift_x_index) |idx| setSolveSpaceValue(&poses[image_index], .center_shift_x, solve_x[idx]);
-        if (layout[image_index].center_shift_y_index) |idx| setSolveSpaceValue(&poses[image_index], .center_shift_y, solve_x[idx]);
+        applySolveVectorImage(layout[image_index], &poses[image_index], solve_x);
     }
+}
+
+fn applySolveVectorImage(entry: SolveLayout, pose: *ImagePose, solve_x: []const f64) void {
+    if (entry.yaw_index) |idx| setSolveSpaceValue(pose, .yaw, solve_x[idx]);
+    if (entry.pitch_index) |idx| setSolveSpaceValue(pose, .pitch, solve_x[idx]);
+    if (entry.roll_index) |idx| setSolveSpaceValue(pose, .roll, solve_x[idx]);
+    if (entry.hfov_index) |idx| setSolveSpaceValue(pose, .hfov_delta, solve_x[idx]);
+    if (entry.trans_x_index) |idx| setSolveSpaceValue(pose, .trans_x, solve_x[idx]);
+    if (entry.trans_y_index) |idx| setSolveSpaceValue(pose, .trans_y, solve_x[idx]);
+    if (entry.trans_z_index) |idx| setSolveSpaceValue(pose, .trans_z, solve_x[idx]);
+    if (entry.translation_plane_yaw_index) |idx| setSolveSpaceValue(pose, .translation_plane_yaw, solve_x[idx]);
+    if (entry.translation_plane_pitch_index) |idx| setSolveSpaceValue(pose, .translation_plane_pitch, solve_x[idx]);
+    if (entry.radial_a_index) |idx| setSolveSpaceValue(pose, .radial_a, solve_x[idx]);
+    if (entry.radial_b_index) |idx| setSolveSpaceValue(pose, .radial_b, solve_x[idx]);
+    if (entry.radial_c_index) |idx| setSolveSpaceValue(pose, .radial_c, solve_x[idx]);
+    if (entry.center_shift_x_index) |idx| setSolveSpaceValue(pose, .center_shift_x, solve_x[idx]);
+    if (entry.center_shift_y_index) |idx| setSolveSpaceValue(pose, .center_shift_y, solve_x[idx]);
 }
 
 fn setSolveSpaceValue(pose: *ImagePose, field: PoseField, solve_value: f64) void {
@@ -1993,27 +2126,31 @@ fn populateBasicRectEquirectCaches(poses: []const ImagePose, width: u32, height:
 
     std.debug.assert(poses.len == caches.len);
     for (poses, caches) |pose, *cache| {
-        if (!hasBasicRectilinearPose(pose)) {
-            cache.* = .{ .valid = false };
-            continue;
-        }
-        const pano_distance = 180.0 / std.math.pi;
-        const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
-        const pitch_roll = setMatrix(pose.pitch, 0.0, pose.roll, true);
-        const source_pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true);
-        const world_from_local = matrixMatrixMul(yawMatrix(pose.yaw), transposeMatrix3(source_pitch_roll));
-        cache.* = .{
-            .valid = true,
-            .center = distortionCenter(pose, width, height),
-            .pano_distance = pano_distance,
-            .image_scale = pano_distance / image_focal,
-            .image_focal = image_focal,
-            .pitch_roll = pitch_roll,
-            .world_from_local = world_from_local,
-            .yaw_turn = pose.yaw / degrees_to_radians,
-            .radians_to_pixels = panoRadiansToPixels(width, pose.base_hfov_degrees),
-        };
+        populateBasicRectEquirectCache(pose, width, height, cache);
     }
+}
+
+fn populateBasicRectEquirectCache(pose: ImagePose, width: u32, height: u32, cache: *BasicRectEquirectCache) void {
+    if (!hasBasicRectilinearPose(pose)) {
+        cache.* = .{ .valid = false };
+        return;
+    }
+    const pano_distance = 180.0 / std.math.pi;
+    const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const pitch_roll = setMatrix(pose.pitch, 0.0, pose.roll, true);
+    const source_pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true);
+    const world_from_local = matrixMatrixMul(yawMatrix(pose.yaw), transposeMatrix3(source_pitch_roll));
+    cache.* = .{
+        .valid = true,
+        .center = distortionCenter(pose, width, height),
+        .pano_distance = pano_distance,
+        .image_scale = pano_distance / image_focal,
+        .image_focal = image_focal,
+        .pitch_roll = pitch_roll,
+        .world_from_local = world_from_local,
+        .yaw_turn = pose.yaw / degrees_to_radians,
+        .radians_to_pixels = panoRadiansToPixels(width, pose.base_hfov_degrees),
+    };
 }
 
 fn sourceWorldRay(pose: ImagePose, dx: f64, dy: f64, width: u32, height: u32) Vec3 {
