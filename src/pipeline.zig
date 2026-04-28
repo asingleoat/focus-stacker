@@ -59,15 +59,15 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     defer allocator.free(match_summary);
     try std.fs.File.stderr().writeAll(match_summary);
 
-    var initial_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
-    defer initial_solve.deinit(allocator);
-    const initial_optimize_summary = try optimize.renderSolveSummary(allocator, "before pruning", &initial_solve);
+    var final_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
+    defer final_solve.deinit(allocator);
+    const initial_optimize_summary = try optimize.renderSolveSummary(allocator, "before pruning", &final_solve);
     defer allocator.free(initial_optimize_summary);
     try std.fs.File.stderr().writeAll(initial_optimize_summary);
 
     if (cfg.cp_error_threshold > 0) {
-        const before_prune_count = initial_solve.control_point_count;
-        const after_prune_count = optimize.pruneByResidualThreshold(pair_matches, initial_solve.residuals, cfg.cp_error_threshold);
+        const before_prune_count = final_solve.control_point_count;
+        const after_prune_count = optimize.pruneByResidualThreshold(pair_matches, final_solve.residuals, cfg.cp_error_threshold);
         const prune_summary = try std.fmt.allocPrint(
             allocator,
             "control-point pruning:\n  threshold: {d:.3} px\n  before: {d}\n  after: {d}\n",
@@ -85,11 +85,19 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
         }
 
         if (after_prune_count > 0 and after_prune_count != before_prune_count) {
-            var pruned_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
-            defer pruned_solve.deinit(allocator);
+            var pruned_solve = try optimize.solvePosesFromInitial(
+                allocator,
+                images.len,
+                base_hfov,
+                optimize_vector,
+                pair_matches,
+                final_solve.poses,
+            );
             const pruned_optimize_summary = try optimize.renderSolveSummary(allocator, "after pruning", &pruned_solve);
             defer allocator.free(pruned_optimize_summary);
             try std.fs.File.stderr().writeAll(pruned_optimize_summary);
+            final_solve.deinit(allocator);
+            final_solve = pruned_solve;
         }
     }
 
@@ -98,9 +106,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     }
 
     if (cfg.pto_file) |pto_path| {
-        var pto_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
-        defer pto_solve.deinit(allocator);
-        try pto.writePtoFile(allocator, pto_path, cfg, images, optimize_vector, pair_matches, pto_solve.poses);
+        try pto.writePtoFile(allocator, pto_path, cfg, images, optimize_vector, pair_matches, final_solve.poses);
         if (cfg.verbose > 0) {
             const message = try std.fmt.allocPrint(allocator, "written PTO output to {s}\n", .{pto_path});
             defer allocator.free(message);
@@ -109,10 +115,8 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     }
 
     if (cfg.aligned_prefix) |aligned_prefix| {
-        var remap_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
-        defer remap_solve.deinit(allocator);
         const roi = if (cfg.crop)
-            try remap.computeCommonOverlapRoi(allocator, plan.remap_active.items, images, remap_solve.poses)
+            try remap.computeCommonOverlapRoi(allocator, plan.remap_active.items, images, final_solve.poses)
         else
             null;
         try remap.writeAlignedImages(
@@ -121,7 +125,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
             plan.ordered_indices.items,
             plan.remap_active.items,
             images,
-            remap_solve.poses,
+            final_solve.poses,
             roi,
         );
         if (cfg.verbose > 0) {

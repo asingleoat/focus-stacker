@@ -2,8 +2,9 @@ const std = @import("std");
 const config_mod = @import("config.zig");
 const match_mod = @import("match.zig");
 
-const huber_sigma_pixels: f64 = 2.0;
+const huber_sigma_pixels: f64 = 0.0;
 const radial_solve_space_scale: f64 = 100.0;
+const degrees_to_radians: f64 = std.math.pi / 180.0;
 
 pub const Variable = enum {
     y,
@@ -155,6 +156,17 @@ pub fn solvePoses(
     optimize_vector: []const VariableSet,
     pair_matches: []const match_mod.PairMatches,
 ) SolveError!SolveResult {
+    return solvePosesFromInitial(allocator, image_count, base_hfov_degrees, optimize_vector, pair_matches, null);
+}
+
+pub fn solvePosesFromInitial(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    initial_poses: ?[]const ImagePose,
+) SolveError!SolveResult {
     const control_point_count = countControlPoints(pair_matches);
     if (control_point_count == 0) {
         return error.NoControlPoints;
@@ -162,16 +174,28 @@ pub fn solvePoses(
 
     const poses = try allocator.alloc(ImagePose, image_count);
     errdefer allocator.free(poses);
-    @memset(poses, .{});
-    for (poses) |*pose| {
-        pose.base_hfov_degrees = base_hfov_degrees;
+    if (initial_poses) |seed| {
+        std.debug.assert(seed.len == image_count);
+        @memcpy(poses, seed);
+        for (poses) |*pose| {
+            pose.base_hfov_degrees = base_hfov_degrees;
+        }
+    } else {
+        @memset(poses, .{});
+        for (poses) |*pose| {
+            pose.base_hfov_degrees = base_hfov_degrees;
+        }
     }
 
     const layout = try buildSolveLayout(allocator, optimize_vector);
     defer allocator.free(layout);
 
-    try seedPosesLinear(allocator, layout, pair_matches, poses);
-    try refinePosesIteratively(allocator, layout, pair_matches, poses);
+    if (initial_poses == null) {
+        try seedPosesLinear(allocator, layout, pair_matches, poses);
+    }
+    const initial_avg_hfov = currentAverageHfovDegrees(poses);
+    try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only);
+    try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise);
 
     const residuals = try allocator.alloc(ControlPointResidual, control_point_count);
     errdefer allocator.free(residuals);
@@ -182,8 +206,7 @@ pub fn solvePoses(
 
     for (pair_matches, 0..) |pair_match, pair_index| {
         for (pair_match.control_points, 0..) |cp, control_point_index| {
-            const residual_vec = controlPointResidualVector(poses, pair_match, cp);
-            const residual = @sqrt(residual_vec.x * residual_vec.x + residual_vec.y * residual_vec.y);
+            const residual = controlPointDistanceResidual(poses, pair_match, cp);
 
             residuals[cp_flat_index] = .{
                 .pair_index = pair_index,
@@ -251,19 +274,24 @@ pub fn renderSolveSummary(
         .{ phase_label, result.control_point_count, result.rms_error, result.max_error },
     );
     for (result.poses, 0..) |pose, image_index| {
+        const yaw_degrees = pose.yaw / degrees_to_radians;
+        const pitch_degrees = pose.pitch / degrees_to_radians;
+        const roll_degrees = pose.roll / degrees_to_radians;
+        const translation_plane_yaw_degrees = pose.translation_plane_yaw / degrees_to_radians;
+        const translation_plane_pitch_degrees = pose.translation_plane_pitch / degrees_to_radians;
         try writer.print(
             "    [{d}] y={d:.5} p={d:.5} r={d:.5} v={d:.6} TrX={d:.3} TrY={d:.3} TrZ={d:.6} Tpy={d:.5} Tpp={d:.5} a={d:.6} b={d:.6} c={d:.6} d={d:.3} e={d:.3}\n",
             .{
                 image_index,
-                pose.yaw,
-                pose.pitch,
-                pose.roll,
+                yaw_degrees,
+                pitch_degrees,
+                roll_degrees,
                 pose.hfov_delta,
                 pose.trans_x,
                 pose.trans_y,
                 pose.trans_z,
-                pose.translation_plane_yaw,
-                pose.translation_plane_pitch,
+                translation_plane_yaw_degrees,
+                translation_plane_pitch_degrees,
                 pose.radial_a,
                 pose.radial_b,
                 pose.radial_c,
@@ -508,11 +536,18 @@ const PoseField = enum {
     center_shift_y,
 };
 
+const SolveStrategy = enum {
+    distance_only,
+    componentwise,
+};
+
 fn refinePosesIteratively(
     allocator: std.mem.Allocator,
     layout: []const SolveLayout,
     pair_matches: []const match_mod.PairMatches,
     poses: []ImagePose,
+    initial_avg_hfov: f64,
+    strategy: SolveStrategy,
 ) SolveError!void {
     const variable_count = countLayoutVariables(layout);
     if (variable_count == 0) {
@@ -529,9 +564,11 @@ fn refinePosesIteratively(
     const trial_poses = try allocator.alloc(ImagePose, poses.len);
     defer allocator.free(trial_poses);
 
-    const max_iterations: usize = 12;
+    const max_iterations: usize = switch (strategy) {
+        .distance_only => 8,
+        .componentwise => 12,
+    };
     const damping: f64 = 1e-3;
-    const initial_avg_hfov = currentAverageHfovDegrees(poses);
 
     for (0..max_iterations) |iteration| {
         @memset(normal, 0);
@@ -539,18 +576,33 @@ fn refinePosesIteratively(
 
         for (pair_matches) |pair_match| {
             for (pair_match.control_points) |cp| {
-                const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
+                switch (strategy) {
+                    .distance_only => {
+                        const residual = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+                        var indices = [_]usize{0} ** 16;
+                        var values = [_]f64{0} ** 16;
+                        var count: usize = 0;
 
-                var indices = [_]usize{0} ** 16;
-                var values_x = [_]f64{0} ** 16;
-                var values_y = [_]f64{0} ** 16;
-                var count: usize = 0;
+                        appendDistanceResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.left_image, &indices, &values, &count);
+                        appendDistanceResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.right_image, &indices, &values, &count);
 
-                appendResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.left_image, &indices, &values_x, &values_y, &count);
-                appendResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.right_image, &indices, &values_x, &values_y, &count);
+                        accumulateEquation(normal, rhs, variable_count, indices[0..count], values[0..count], -residual, 1.0);
+                    },
+                    .componentwise => {
+                        const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
 
-                accumulateEquation(normal, rhs, variable_count, indices[0..count], values_x[0..count], -residual.x, 1.0);
-                accumulateEquation(normal, rhs, variable_count, indices[0..count], values_y[0..count], -residual.y, 1.0);
+                        var indices = [_]usize{0} ** 16;
+                        var values_x = [_]f64{0} ** 16;
+                        var values_y = [_]f64{0} ** 16;
+                        var count: usize = 0;
+
+                        appendResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.left_image, &indices, &values_x, &values_y, &count);
+                        appendResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.right_image, &indices, &values_x, &values_y, &count);
+
+                        accumulateEquation(normal, rhs, variable_count, indices[0..count], values_x[0..count], -residual.x, 1.0);
+                        accumulateEquation(normal, rhs, variable_count, indices[0..count], values_y[0..count], -residual.y, 1.0);
+                    },
+                }
             }
         }
 
@@ -568,13 +620,13 @@ fn refinePosesIteratively(
             break;
         }
 
-        const baseline_error = totalSquaredObjectiveResidual(initial_avg_hfov, pair_matches, poses);
+        const baseline_error = totalSquaredStrategyResidual(strategy, initial_avg_hfov, pair_matches, poses);
         var accepted = false;
         var step_scale: f64 = 1.0;
         while (step_scale >= 1.0 / 64.0) {
             @memcpy(trial_poses, poses);
             applyScaledSolveUpdate(layout, trial_poses, delta, step_scale);
-            const trial_error = totalSquaredObjectiveResidual(initial_avg_hfov, pair_matches, trial_poses);
+            const trial_error = totalSquaredStrategyResidual(strategy, initial_avg_hfov, pair_matches, trial_poses);
             if (trial_error < baseline_error) {
                 @memcpy(poses, trial_poses);
                 accepted = true;
@@ -895,6 +947,92 @@ fn appendResidualJacobian(
     }
 }
 
+fn appendDistanceResidualJacobian(
+    layout: []const SolveLayout,
+    initial_avg_hfov: f64,
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+    image_index: usize,
+    indices: []usize,
+    values: []f64,
+    count: *usize,
+) void {
+    if (image_index == 0) return;
+    const entry = layout[image_index];
+
+    if (entry.yaw_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .yaw);
+        count.* += 1;
+    }
+    if (entry.pitch_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .pitch);
+        count.* += 1;
+    }
+    if (entry.roll_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .roll);
+        count.* += 1;
+    }
+    if (entry.hfov_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .hfov_delta);
+        count.* += 1;
+    }
+    if (entry.trans_x_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .trans_x);
+        count.* += 1;
+    }
+    if (entry.trans_y_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .trans_y);
+        count.* += 1;
+    }
+    if (entry.trans_z_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .trans_z);
+        count.* += 1;
+    }
+    if (entry.translation_plane_yaw_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .translation_plane_yaw);
+        count.* += 1;
+    }
+    if (entry.translation_plane_pitch_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .translation_plane_pitch);
+        count.* += 1;
+    }
+    if (entry.radial_a_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .radial_a);
+        count.* += 1;
+    }
+    if (entry.radial_b_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .radial_b);
+        count.* += 1;
+    }
+    if (entry.radial_c_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .radial_c);
+        count.* += 1;
+    }
+    if (entry.center_shift_x_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .center_shift_x);
+        count.* += 1;
+    }
+    if (entry.center_shift_y_index) |idx| {
+        indices[count.*] = idx;
+        values[count.*] = numericalDistanceResidualDerivative(initial_avg_hfov, poses, pair_match, cp, image_index, .center_shift_y);
+        count.* += 1;
+    }
+}
+
 fn numericalResidualDerivative(
     initial_avg_hfov: f64,
     poses: []const ImagePose,
@@ -913,6 +1051,23 @@ fn numericalResidualDerivative(
         .x = (moved.x - base.x) / epsilon,
         .y = (moved.y - base.y) / epsilon,
     };
+}
+
+fn numericalDistanceResidualDerivative(
+    initial_avg_hfov: f64,
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+    image_index: usize,
+    field: PoseField,
+) f64 {
+    const epsilon = solveSpaceEpsilon(field);
+    const base = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+
+    var perturbed_pose = poses[image_index];
+    applySolveSpaceDelta(&perturbed_pose, field, epsilon);
+    const moved = objectiveDistanceResidualWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, image_index, perturbed_pose);
+    return (moved - base) / epsilon;
 }
 
 fn numericalDerivative(
@@ -973,14 +1128,43 @@ fn controlPointResidualVectorWithPoseOverride(
     override_image_index: ?usize,
     override_pose: ImagePose,
 ) Vec2d {
-    const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
-    const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
-    const left = transformPoint(left_pose, cp.left_x, cp.left_y, pair_match.image_width, pair_match.image_height);
-    const right = transformPoint(right_pose, cp.right_x, cp.right_y, pair_match.image_width, pair_match.image_height);
+    const left = panoramaVectorForControlPoint(poses, pair_match, cp.left_image, cp.left_x, cp.left_y, override_image_index, override_pose);
+    const right = panoramaVectorForControlPoint(poses, pair_match, cp.right_image, cp.right_x, cp.right_y, override_image_index, override_pose);
+    const scale = panoRadiansToPixels(pair_match.image_width, poses[0].base_hfov_degrees);
+    const left_theta = zenithAngle(left);
+    const right_theta = zenithAngle(right);
+    var delta_lon = longitudeOf(left) - longitudeOf(right);
+    if (delta_lon < -std.math.pi) delta_lon += 2.0 * std.math.pi;
+    if (delta_lon > std.math.pi) delta_lon -= 2.0 * std.math.pi;
     return .{
-        .x = right.x - left.x,
-        .y = right.y - left.y,
+        .x = delta_lon * @sin(0.5 * (left_theta + right_theta)) * scale,
+        .y = (left_theta - right_theta) * scale,
     };
+}
+
+fn controlPointDistanceResidual(
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) f64 {
+    return controlPointDistanceResidualWithPoseOverride(poses, pair_match, cp, null, .{});
+}
+
+fn controlPointDistanceResidualWithPoseOverride(
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+    override_image_index: ?usize,
+    override_pose: ImagePose,
+) f64 {
+    const left = panoramaVectorForControlPoint(poses, pair_match, cp.left_image, cp.left_x, cp.left_y, override_image_index, override_pose);
+    const right = panoramaVectorForControlPoint(poses, pair_match, cp.right_image, cp.right_x, cp.right_y, override_image_index, override_pose);
+    const cross = cross3(left, right);
+    var dangle = std.math.asin(std.math.clamp(length3(cross), 0.0, 1.0));
+    if (dot3(left, right) < 0.0) {
+        dangle = std.math.pi - dangle;
+    }
+    return dangle * panoRadiansToPixels(pair_match.image_width, poses[0].base_hfov_degrees);
 }
 
 fn objectiveResidualVector(
@@ -990,6 +1174,15 @@ fn objectiveResidualVector(
     cp: match_mod.ControlPoint,
 ) Vec2d {
     return objectiveResidualVectorWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, null, .{});
+}
+
+fn objectiveDistanceResidual(
+    initial_avg_hfov: f64,
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+) f64 {
+    return objectiveDistanceResidualWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, null, .{});
 }
 
 fn objectiveResidualVectorWithPoseOverride(
@@ -1007,6 +1200,19 @@ fn objectiveResidualVectorWithPoseOverride(
     residual.x *= scale;
     residual.y *= scale;
     return residual;
+}
+
+fn objectiveDistanceResidualWithPoseOverride(
+    initial_avg_hfov: f64,
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    cp: match_mod.ControlPoint,
+    override_image_index: ?usize,
+    override_pose: ImagePose,
+) f64 {
+    const residual = controlPointDistanceResidualWithPoseOverride(poses, pair_match, cp, override_image_index, override_pose);
+    const scale = objectiveFovScale(initial_avg_hfov, currentAverageHfovDegreesWithOverride(poses, override_image_index, override_pose));
+    return scale * residual;
 }
 
 fn currentAverageHfovDegrees(poses: []const ImagePose) f64 {
@@ -1138,7 +1344,7 @@ const Vec3 = struct {
 };
 
 fn normalize3(v: Vec3) Vec3 {
-    const norm = @sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    const norm = length3(v);
     if (norm < 1e-12) return .{ .x = 0, .y = 0, .z = 1 };
     return .{
         .x = v.x / norm,
@@ -1160,6 +1366,43 @@ fn sourceWorldRay(pose: ImagePose, dx: f64, dy: f64, width: u32, height: u32) Ve
     const pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true);
     const pitched_rolled = matrixInvMul(pitch_roll, local_ray);
     return rotateYaw(pitched_rolled, pose.yaw);
+}
+
+fn panoramaVectorForControlPoint(
+    poses: []const ImagePose,
+    pair_match: match_mod.PairMatches,
+    image_index: usize,
+    x: f32,
+    y: f32,
+    override_image_index: ?usize,
+    override_pose: ImagePose,
+) Vec3 {
+    const pose = if (override_image_index != null and override_image_index.? == image_index) override_pose else poses[image_index];
+    const center = distortionCenter(pose, pair_match.image_width, pair_match.image_height);
+    const ray = sourceWorldRay(
+        pose,
+        @as(f64, x) - center.x,
+        @as(f64, y) - center.y,
+        pair_match.image_width,
+        pair_match.image_height,
+    );
+    const projected = if (hasTranslation(pose))
+        projectViaTranslationPlane(pose, ray)
+    else
+        ray;
+    return normalize3(projected);
+}
+
+fn panoRadiansToPixels(width: u32, hfov_degrees: f64) f64 {
+    return @as(f64, @floatFromInt(width)) / (hfov_degrees * std.math.pi / 180.0);
+}
+
+fn longitudeOf(v: Vec3) f64 {
+    return std.math.atan2(v.x, -v.z);
+}
+
+fn zenithAngle(v: Vec3) f64 {
+    return std.math.acos(std.math.clamp(v.y, -1.0, 1.0));
 }
 
 fn imagePlaneFromWorldRay(pose: ImagePose, world_ray: Vec3, width: u32) Point2 {
@@ -1301,6 +1544,18 @@ fn dot3(a: Vec3, b: Vec3) f64 {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+fn cross3(a: Vec3, b: Vec3) Vec3 {
+    return .{
+        .x = a.y * b.z - a.z * b.y,
+        .y = a.z * b.x - a.x * b.z,
+        .z = a.x * b.y - a.y * b.x,
+    };
+}
+
+fn length3(v: Vec3) f64 {
+    return @sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
 fn projectRectilinear(v: Vec3, focal: f64) ?Point2 {
     const denom = -v.z;
     if (denom <= 1e-12) return null;
@@ -1397,7 +1652,6 @@ fn applyScaledSolveUpdate(layout: []const SolveLayout, poses: []ImagePose, delta
 fn suppressUnstableLensTerms(iteration: usize, layout: []const SolveLayout, delta: []f64) void {
     if (iteration < 3) {
         for (layout[1..]) |entry| {
-            if (entry.hfov_index) |idx| delta[idx] = 0;
             if (entry.radial_a_index) |idx| delta[idx] = 0;
             if (entry.radial_b_index) |idx| delta[idx] = 0;
             if (entry.radial_c_index) |idx| delta[idx] = 0;
@@ -1464,6 +1718,24 @@ fn totalSquaredObjectiveResidual(initial_avg_hfov: f64, pair_matches: []const ma
         }
     }
     return total;
+}
+
+fn totalSquaredDistanceResidual(initial_avg_hfov: f64, pair_matches: []const match_mod.PairMatches, poses: []const ImagePose) f64 {
+    var total: f64 = 0;
+    for (pair_matches) |pair_match| {
+        for (pair_match.control_points) |cp| {
+            const residual = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+            total += residual * residual;
+        }
+    }
+    return total;
+}
+
+fn totalSquaredStrategyResidual(strategy: SolveStrategy, initial_avg_hfov: f64, pair_matches: []const match_mod.PairMatches, poses: []const ImagePose) f64 {
+    return switch (strategy) {
+        .distance_only => totalSquaredDistanceResidual(initial_avg_hfov, pair_matches, poses),
+        .componentwise => totalSquaredObjectiveResidual(initial_avg_hfov, pair_matches, poses),
+    };
 }
 
 fn accumulateAbsolutePriors(normal: []f64, variable_count: usize, layout: []const SolveLayout) void {
