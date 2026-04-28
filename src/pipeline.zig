@@ -5,6 +5,7 @@ const gray = @import("gray.zig");
 const image_io = @import("image_io.zig");
 const match = @import("match.zig");
 const optimize = @import("optimize.zig");
+const profiler = @import("profiler.zig");
 const pto = @import("pto.zig");
 const remap = @import("remap.zig");
 const sequence = @import("sequence.zig");
@@ -30,6 +31,9 @@ pub const Stage = enum {
 pub const RunError = anyerror;
 
 pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError!void {
+    const prof = profiler.scope("pipeline.run");
+    defer prof.end();
+
     const images = try collectInputImages(allocator, cfg);
     defer allocator.free(images);
     const base_hfov = cfg.hfov orelse images[0].hfov_degrees orelse 50.0;
@@ -146,6 +150,9 @@ fn collectInputImages(
     allocator: std.mem.Allocator,
     cfg: *const config_mod.Config,
 ) RunError![]sequence.InputImage {
+    const prof = profiler.scope("pipeline.collectInputImages");
+    defer prof.end();
+
     const paths = cfg.input_files.items;
     var images: std.ArrayList(sequence.InputImage) = .empty;
     defer images.deinit(allocator);
@@ -199,6 +206,9 @@ fn analyzePairs(
     images: []const sequence.InputImage,
     plan: *const sequence.Plan,
 ) RunError![]match.PairMatches {
+    const prof = profiler.scope("pipeline.analyzePairs");
+    defer prof.end();
+
     if (plan.pairs.items.len == 0) {
         return allocator.alloc(match.PairMatches, 0);
     }
@@ -275,6 +285,9 @@ fn loadReducedGrayImage(
     path: []const u8,
     pyr_level: u8,
 ) RunError!gray.GrayImage {
+    const prof = profiler.scope("pipeline.loadReducedGrayImage");
+    defer prof.end();
+
     var decoded = try image_io.loadImage(allocator, path);
     defer decoded.deinit(allocator);
     return gray.fromLoadedReducedLikeHugin(allocator, &decoded, pyr_level);
@@ -287,6 +300,9 @@ fn writeFirstPairPreview(
     plan: *const sequence.Plan,
     pair_matches: []const match.PairMatches,
 ) RunError!void {
+    const prof = profiler.scope("pipeline.writeFirstPairPreview");
+    defer prof.end();
+
     const first_index = plan.ordered_indices.items[0];
     var reduced = try loadReducedGrayImage(allocator, images[first_index].path, cfg.pyr_level);
     defer reduced.deinit(allocator);

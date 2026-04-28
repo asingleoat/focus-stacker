@@ -3,11 +3,15 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const function_timing = b.option(bool, "function-timing", "Enable comptime-gated function timing instrumentation") orelse false;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "function_timing", function_timing);
 
     const core = b.addModule("align_stack_core", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    core.addOptions("build_options", build_options);
     configureImageDeps(core);
 
     const exe = b.addExecutable(.{

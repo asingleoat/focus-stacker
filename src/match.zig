@@ -1,6 +1,7 @@
 const std = @import("std");
 const features = @import("features.zig");
 const gray = @import("gray.zig");
+const profiler = @import("profiler.zig");
 const sequence = @import("sequence.zig");
 
 pub const PairOptions = struct {
@@ -82,6 +83,9 @@ pub fn analyzePair(
     right: *const gray.GrayImage,
     right_full: *const gray.GrayImage,
 ) std.mem.Allocator.Error!PairMatches {
+    const prof = profiler.scope("match.analyzePair");
+    defer prof.end();
+
     const rects = try features.buildGridRects(allocator, left.width, left.height, opts.grid_size);
     defer allocator.free(rects);
 
@@ -289,6 +293,9 @@ fn matchCandidate(
     candidate: features.InterestPoint,
     opts: PairOptions,
 ) MatchResult {
+    const prof = profiler.scope("match.matchCandidate");
+    defer prof.end();
+
     return matchAroundCenter(
         left,
         right,
@@ -311,6 +318,9 @@ fn matchAroundCenter(
     template_size: u32,
     search_width: u32,
 ) MatchResult {
+    const prof = profiler.scope("match.matchAroundCenter");
+    defer prof.end();
+
     const templ_half = @as(i32, @intCast(template_size / 2));
     const templ_pos_x = @as(i32, @intCast(left_x));
     const templ_pos_y = @as(i32, @intCast(left_y));
@@ -514,6 +524,9 @@ fn buildTemplateStats(
     patch_h: u32,
     storage: []f64,
 ) ?TemplateStats {
+    const prof = profiler.scope("match.buildTemplateStats");
+    defer prof.end();
+
     const count_usize = @as(usize, patch_w) * @as(usize, patch_h);
     if (count_usize == 0 or count_usize > storage.len) return null;
 
@@ -569,6 +582,9 @@ fn computeCorrelationSurfaceLikeHugin(
     yend: i32,
     template: TemplateStats,
 ) !?CorrelationSurface {
+    const prof = profiler.scope("match.computeCorrelationSurfaceLikeHugin");
+    defer prof.end();
+
     const enable_frequency_correlation = false;
     if (!enable_frequency_correlation) return null;
     if (search_w > 64 or search_h > 64) return null;

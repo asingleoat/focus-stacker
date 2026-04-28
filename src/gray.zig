@@ -1,5 +1,6 @@
 const std = @import("std");
 const image_io = @import("image_io.zig");
+const profiler = @import("profiler.zig");
 
 pub const GrayImage = struct {
     width: u32,
@@ -37,6 +38,9 @@ pub fn quantizeInPlace(image: *GrayImage, sample_type: image_io.SampleType) void
 }
 
 pub fn fromLoaded(allocator: std.mem.Allocator, image: *const image_io.Image) std.mem.Allocator.Error!GrayImage {
+    const prof = profiler.scope("gray.fromLoaded");
+    defer prof.end();
+
     const count = @as(usize, image.info.width) * @as(usize, image.info.height);
     const pixels = try allocator.alloc(f32, count);
     errdefer allocator.free(pixels);
@@ -58,6 +62,9 @@ pub fn fromLoadedReducedLikeHugin(
     image: *const image_io.Image,
     levels: u8,
 ) std.mem.Allocator.Error!GrayImage {
+    const prof = profiler.scope("gray.fromLoadedReducedLikeHugin");
+    defer prof.end();
+
     if (levels == 0) {
         return fromLoaded(allocator, image);
     }
@@ -69,6 +76,9 @@ pub fn fromLoadedReducedLikeHugin(
 }
 
 pub fn reduceByHalf(allocator: std.mem.Allocator, src: *const GrayImage) std.mem.Allocator.Error!GrayImage {
+    const prof = profiler.scope("gray.reduceByHalf");
+    defer prof.end();
+
     const dst_width = (src.width + 1) / 2;
     const dst_height = (src.height + 1) / 2;
     const dst_pixels = try allocator.alloc(f32, @as(usize, dst_width) * @as(usize, dst_height));
@@ -116,6 +126,9 @@ pub fn reduceNTimes(
     src: *const GrayImage,
     levels: u8,
 ) std.mem.Allocator.Error!GrayImage {
+    const prof = profiler.scope("gray.reduceNTimes");
+    defer prof.end();
+
     var current = try src.clone(allocator);
     errdefer current.deinit(allocator);
 
@@ -172,6 +185,9 @@ fn reduceAndConvert(
     src: []const T,
     levels: u8,
 ) std.mem.Allocator.Error!GrayImage {
+    const prof = profiler.scope("gray.reduceAndConvert");
+    defer prof.end();
+
     const channels = @as(usize, info.color_channels);
     var width = info.width;
     var height = info.height;
@@ -218,6 +234,9 @@ fn reduceTypedByHalf(
     dst_width: u32,
     dst_height: u32,
 ) void {
+    const prof = profiler.scope("gray.reduceTypedByHalf");
+    defer prof.end();
+
     std.debug.assert(src_width > 1 and src_height > 1);
     std.debug.assert(dst_width == (src_width + 1) / 2);
     std.debug.assert(dst_height == (src_height + 1) / 2);

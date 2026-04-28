@@ -2,6 +2,7 @@ const std = @import("std");
 const config_mod = @import("config.zig");
 const match_mod = @import("match.zig");
 const minpack_mod = @import("minpack.zig");
+const profiler = @import("profiler.zig");
 
 const huber_sigma_pixels: f64 = 0.0;
 const radial_solve_space_scale: f64 = 100.0;
@@ -168,6 +169,9 @@ pub fn solvePoses(
     optimize_vector: []const VariableSet,
     pair_matches: []const match_mod.PairMatches,
 ) SolveError!SolveResult {
+    const prof = profiler.scope("optimize.solvePoses");
+    defer prof.end();
+
     return solvePosesFromInitial(allocator, image_count, base_hfov_degrees, optimize_vector, pair_matches, null);
 }
 
@@ -179,6 +183,9 @@ pub fn solvePosesFromInitial(
     pair_matches: []const match_mod.PairMatches,
     initial_poses: ?[]const ImagePose,
 ) SolveError!SolveResult {
+    const prof = profiler.scope("optimize.solvePosesFromInitial");
+    defer prof.end();
+
     const control_point_count = countControlPoints(pair_matches);
     if (control_point_count == 0) {
         return error.NoControlPoints;
@@ -602,6 +609,9 @@ pub fn evaluateObjectiveResidualsPadded(
     poses: []const ImagePose,
     min_count: ?usize,
 ) ![]f64 {
+    const prof = profiler.scope("optimize.evaluateObjectiveResidualsPadded");
+    defer prof.end();
+
     const residual_count = switch (strategy) {
         .distance_only => countControlPoints(pair_matches),
         .componentwise => countControlPoints(pair_matches) * 2,
@@ -670,6 +680,9 @@ fn refinePosesIteratively(
     initial_avg_hfov: f64,
     strategy: SolveStrategy,
 ) SolveError!void {
+    const prof = profiler.scope("optimize.refinePosesIteratively");
+    defer prof.end();
+
     const variable_count = countLayoutVariables(layout);
     if (variable_count == 0) {
         return;
@@ -757,6 +770,9 @@ const SolveContext = struct {
 };
 
 fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror!void {
+    const prof = profiler.scope("optimize.evaluateSolveVector");
+    defer prof.end();
+
     std.debug.assert(fvec.len >= ctx.actual_residual_count);
     @memcpy(ctx.work_poses, ctx.seed_poses);
     applySolveVector(ctx.layout, ctx.work_poses, x);
@@ -1282,6 +1298,9 @@ fn controlPointResidualVectorWithPoseOverride(
     override_image_index: ?usize,
     override_pose: ImagePose,
 ) Vec2d {
+    const prof = profiler.scope("optimize.controlPointResidualVectorWithPoseOverride");
+    defer prof.end();
+
     const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
     const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
     if (hasBasicRectilinearPose(left_pose) and hasBasicRectilinearPose(right_pose)) {
@@ -1317,6 +1336,9 @@ fn controlPointDistanceResidualWithPoseOverride(
     override_image_index: ?usize,
     override_pose: ImagePose,
 ) f64 {
+    const prof = profiler.scope("optimize.controlPointDistanceResidualWithPoseOverride");
+    defer prof.end();
+
     const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
     const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
     if (hasBasicRectilinearPose(left_pose) and hasBasicRectilinearPose(right_pose)) {
@@ -1442,6 +1464,9 @@ fn hasBasicRectilinearPose(pose: ImagePose) bool {
 }
 
 fn exactDistSphereResidualVector(left_pose: ImagePose, right_pose: ImagePose, pair_match: match_mod.PairMatches, cp: match_mod.ControlPoint) Vec2d {
+    const prof = profiler.scope("optimize.exactDistSphereResidualVector");
+    defer prof.end();
+
     const left = imageToEquirectDegrees(left_pose, @as(f64, cp.left_x), @as(f64, cp.left_y), pair_match.image_width, pair_match.image_height);
     const right = imageToEquirectDegrees(right_pose, @as(f64, cp.right_x), @as(f64, cp.right_y), pair_match.image_width, pair_match.image_height);
     const lon_left = left.x * degrees_to_radians;
@@ -1475,6 +1500,9 @@ fn exactDistSphereResidualVectorCached(left: BasicRectEquirectCache, right: Basi
 }
 
 fn exactDistSphereDistance(left_pose: ImagePose, right_pose: ImagePose, pair_match: match_mod.PairMatches, cp: match_mod.ControlPoint) f64 {
+    const prof = profiler.scope("optimize.exactDistSphereDistance");
+    defer prof.end();
+
     const left = imageToEquirectDegrees(left_pose, @as(f64, cp.left_x), @as(f64, cp.left_y), pair_match.image_width, pair_match.image_height);
     const right = imageToEquirectDegrees(right_pose, @as(f64, cp.right_x), @as(f64, cp.right_y), pair_match.image_width, pair_match.image_height);
     const left_lon = left.x * degrees_to_radians;
@@ -1517,6 +1545,9 @@ pub fn imagePointToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, 
 }
 
 fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
+    const prof = profiler.scope("optimize.imageToEquirectDegrees");
+    defer prof.end();
+
     const center = distortionCenter(pose, width, height);
     const pano_distance = 180.0 / std.math.pi;
     const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));

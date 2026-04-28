@@ -1,4 +1,5 @@
 const std = @import("std");
+const profiler = @import("profiler.zig");
 
 const c = @cImport({
     @cInclude("stdio.h");
@@ -73,6 +74,9 @@ pub const SaveError = error{
 };
 
 pub fn loadInfo(allocator: std.mem.Allocator, path: []const u8) (LoadError || std.mem.Allocator.Error)!ImageInfo {
+    const prof = profiler.scope("image_io.loadInfo");
+    defer prof.end();
+
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -85,6 +89,9 @@ pub fn loadInfo(allocator: std.mem.Allocator, path: []const u8) (LoadError || st
 }
 
 pub fn loadImage(allocator: std.mem.Allocator, path: []const u8) (LoadError || std.mem.Allocator.Error)!Image {
+    const prof = profiler.scope("image_io.loadImage");
+    defer prof.end();
+
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -197,6 +204,9 @@ fn jpegErrorExit(common: ?*c.jpeg_common_struct) callconv(.c) void {
 }
 
 fn loadJpegInfo(path_z: [:0]const u8) LoadError!ImageInfo {
+    const prof = profiler.scope("image_io.loadJpegInfo");
+    defer prof.end();
+
     const file = c.fopen(path_z.ptr, "rb") orelse return error.OpenFailed;
     defer _ = c.fclose(file);
 
@@ -222,6 +232,9 @@ fn loadJpegInfo(path_z: [:0]const u8) LoadError!ImageInfo {
 }
 
 fn loadJpegImage(allocator: std.mem.Allocator, path_z: [:0]const u8) (LoadError || std.mem.Allocator.Error)!Image {
+    const prof = profiler.scope("image_io.loadJpegImage");
+    defer prof.end();
+
     const file = c.fopen(path_z.ptr, "rb") orelse return error.OpenFailed;
     defer _ = c.fclose(file);
 
@@ -306,6 +319,9 @@ fn infoFromJpegHeader(path_z: [:0]const u8, decompress: *c.jpeg_decompress_struc
 }
 
 fn loadPngInfo(path_z: [:0]const u8) LoadError!ImageInfo {
+    const prof = profiler.scope("image_io.loadPngInfo");
+    defer prof.end();
+
     var image: c.png_image = std.mem.zeroes(c.png_image);
     image.version = c.PNG_IMAGE_VERSION;
     defer c.png_image_free(&image);
@@ -318,6 +334,9 @@ fn loadPngInfo(path_z: [:0]const u8) LoadError!ImageInfo {
 }
 
 fn loadPngImage(allocator: std.mem.Allocator, path_z: [:0]const u8) (LoadError || std.mem.Allocator.Error)!Image {
+    const prof = profiler.scope("image_io.loadPngImage");
+    defer prof.end();
+
     var image: c.png_image = std.mem.zeroes(c.png_image);
     image.version = c.PNG_IMAGE_VERSION;
     defer c.png_image_free(&image);
@@ -384,6 +403,9 @@ fn infoFromPngImage(path_z: [:0]const u8, image: c.png_image) ImageInfo {
 }
 
 fn loadTiffInfo(path_z: [:0]const u8) LoadError!ImageInfo {
+    const prof = profiler.scope("image_io.loadTiffInfo");
+    defer prof.end();
+
     const tiff = c.TIFFOpen(path_z.ptr, "r") orelse return error.OpenFailed;
     defer c.TIFFClose(tiff);
 
@@ -391,6 +413,9 @@ fn loadTiffInfo(path_z: [:0]const u8) LoadError!ImageInfo {
 }
 
 fn loadTiffImage(allocator: std.mem.Allocator, path_z: [:0]const u8) (LoadError || std.mem.Allocator.Error)!Image {
+    const prof = profiler.scope("image_io.loadTiffImage");
+    defer prof.end();
+
     const tiff = c.TIFFOpen(path_z.ptr, "r") orelse return error.OpenFailed;
     defer c.TIFFClose(tiff);
 
@@ -546,6 +571,9 @@ const ExifSummary = struct {
 };
 
 fn readExifSummary(path_z: [:0]const u8) ExifSummary {
+    const prof = profiler.scope("image_io.readExifSummary");
+    defer prof.end();
+
     const exif_data = c.exif_data_new_from_file(path_z.ptr) orelse return .{};
     defer c.exif_data_unref(exif_data);
 

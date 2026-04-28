@@ -1,5 +1,6 @@
 const std = @import("std");
 const gray = @import("gray.zig");
+const profiler = @import("profiler.zig");
 const vigra = @import("vigra.zig");
 
 pub const Rect = struct {
@@ -36,6 +37,9 @@ pub fn buildGridRects(
     height: u32,
     grid_size: u32,
 ) std.mem.Allocator.Error![]Rect {
+    const prof = profiler.scope("features.buildGridRects");
+    defer prof.end();
+
     var rects: std.ArrayList(Rect) = .empty;
     defer rects.deinit(allocator);
 
@@ -64,6 +68,9 @@ pub fn detectInterestPointsPartial(
     scale: f64,
     max_points: u32,
 ) std.mem.Allocator.Error![]InterestPoint {
+    const prof = profiler.scope("features.detectInterestPointsPartial");
+    defer prof.end();
+
     if (rect.width() < 3 or rect.height() < 3 or max_points == 0) {
         return allocator.alloc(InterestPoint, 0);
     }
@@ -138,6 +145,9 @@ fn extractRectImage(
     image: *const gray.GrayImage,
     rect: Rect,
 ) std.mem.Allocator.Error!gray.GrayImage {
+    const prof = profiler.scope("features.extractRectImage");
+    defer prof.end();
+
     const width = rect.width();
     const height = rect.height();
     const pixels = try allocator.alloc(f32, @as(usize, width) * @as(usize, height));

@@ -5,6 +5,7 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+    defer writeProfilerReport();
 
     const argv = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, argv);
@@ -40,35 +41,35 @@ pub fn main() !void {
     core.pipeline.run(allocator, &cfg) catch |err| switch (err) {
         error.NoUsableInputFiles => {
             try std.fs.File.stderr().writeAll("ERROR: No valid files given. Nothing to do.\n");
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.NotEnoughUsableInputFiles => {
             try std.fs.File.stderr().writeAll("ERROR: Need at least two usable non-raw input images.\n");
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.MismatchedImageSizes => {
             try std.fs.File.stderr().writeAll("ERROR: Align_image_stack requires all input images to have the same size.\n");
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.UnsupportedPixelFormat => {
             try std.fs.File.stderr().writeAll("ERROR: Encountered an unsupported image pixel format.\n");
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.ReferenceImageHasNoControlPointsAfterPruning => {
             try std.fs.File.stderr().writeAll(
                 "ERROR: After control-point pruning the reference image has no remaining control points; optimizing HFOV would be ill-defined.\n",
             );
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.NotEnoughControlPointsAfterPruning => {
             try std.fs.File.stderr().writeAll(
                 "ERROR: After control-point pruning there are fewer control points left than active optimization parameters.\n",
             );
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.OpenFailed, error.DecodeFailed, error.InvalidImage, error.UnsupportedFormat => {
             try std.fs.File.stderr().writeAll("ERROR: Image loading failed.\n");
-            std.process.exit(1);
+            exitWithReport(1);
         },
         error.NotImplemented => {
             const message = try std.fmt.allocPrint(
@@ -86,10 +87,23 @@ pub fn main() !void {
             );
             defer allocator.free(message);
             try std.fs.File.stderr().writeAll(message);
-            std.process.exit(1);
+            exitWithReport(1);
         },
         else => return err,
     };
+}
+
+fn exitWithReport(code: u8) noreturn {
+    writeProfilerReport();
+    std.process.exit(code);
+}
+
+fn writeProfilerReport() void {
+    if (!core.profiler.enabled) return;
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    core.profiler.maybeWriteReport(&stderr_writer.interface) catch {};
+    stderr_writer.interface.flush() catch {};
 }
 
 fn fatalWithUsage(
@@ -99,12 +113,12 @@ fn fatalWithUsage(
 ) noreturn {
     std.fs.File.stderr().writeAll(message) catch {};
     const usage = core.config.renderUsage(allocator, exe_name) catch {
-        std.process.exit(1);
+        exitWithReport(1);
     };
     defer allocator.free(usage);
     std.fs.File.stderr().writeAll("\n") catch {};
     std.fs.File.stderr().writeAll(usage) catch {};
-    std.process.exit(1);
+    exitWithReport(1);
 }
 
 test {
