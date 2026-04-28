@@ -8,6 +8,7 @@ pub const PairOptions = struct {
     grid_size: u32,
     corr_threshold: f32,
     pyr_level: u8,
+    verbose: u8 = 0,
     template_size: u32 = 20,
     search_width: u32 = 100,
     full_res_template_size: u32 = 20,
@@ -75,7 +76,9 @@ pub fn analyzePair(
     opts: PairOptions,
     pair: sequence.MatchPair,
     left: *const gray.GrayImage,
+    left_full: *const gray.GrayImage,
     right: *const gray.GrayImage,
+    right_full: *const gray.GrayImage,
 ) std.mem.Allocator.Error!PairMatches {
     const rects = try features.buildGridRects(allocator, left.width, left.height, opts.grid_size);
     defer allocator.free(rects);
@@ -86,6 +89,15 @@ pub fn analyzePair(
     var candidates_considered: usize = 0;
     const requested_candidates = opts.points_per_grid * 5;
     const scale_factor = @as(f32, @floatFromInt(@as(u32, 1) << @intCast(opts.pyr_level)));
+    const scale_factor_int = @as(u32, 1) << @intCast(opts.pyr_level);
+    const full_res_search_width = @max(scale_factor_int, 1);
+    var coarse_control_point_count: usize = 0;
+    var coarse_score_sum: f64 = 0;
+    var coarse_best_score: ?f32 = null;
+
+    if (opts.verbose > 0) {
+        std.debug.print("Trying to find {d} corners... \n", .{opts.points_per_grid});
+    }
 
     for (rects) |rect| {
         const candidates = try features.detectInterestPointsPartial(allocator, left, rect, 2.0, requested_candidates);
@@ -99,28 +111,70 @@ pub fn analyzePair(
                 continue;
             }
 
+            coarse_control_point_count += 1;
+            coarse_score_sum += result.score;
+            coarse_best_score = if (coarse_best_score) |best|
+                @max(best, result.score)
+            else
+                result.score;
+
+            const left_x = @as(f32, @floatFromInt(candidate.x)) * scale_factor;
+            const left_y = @as(f32, @floatFromInt(candidate.y)) * scale_factor;
+
+            var final_right_x = result.x * scale_factor;
+            var final_right_y = result.y * scale_factor;
+            var final_score = result.score;
+
+            if (opts.pyr_level > 0) {
+                const refined = matchAroundCenter(
+                    left_full,
+                    right_full,
+                    candidate.x * scale_factor_int,
+                    candidate.y * scale_factor_int,
+                    truncFloatToPixel(result.x * scale_factor, right_full.width),
+                    truncFloatToPixel(result.y * scale_factor, right_full.height),
+                    opts.full_res_template_size,
+                    full_res_search_width,
+                );
+                if (refined.score < opts.corr_threshold) {
+                    continue;
+                }
+                final_right_x = refined.x;
+                final_right_y = refined.y;
+                final_score = refined.score;
+            }
+
             try control_points.append(allocator, .{
                 .left_image = pair.left_index,
                 .right_image = pair.right_index,
-                .left_x = @as(f32, @floatFromInt(candidate.x)) * scale_factor,
-                .left_y = @as(f32, @floatFromInt(candidate.y)) * scale_factor,
-                .right_x = result.x * scale_factor,
-                .right_y = result.y * scale_factor,
-                .score = result.score,
+                .left_x = left_x,
+                .left_y = left_y,
+                .right_x = final_right_x,
+                .right_y = final_right_y,
+                .score = final_score,
                 .coarse_right_x = result.x * scale_factor,
                 .coarse_right_y = result.y * scale_factor,
                 .coarse_score = result.score,
+                .refined_score = final_score,
             });
             accepted_in_rect += 1;
             if (accepted_in_rect >= opts.points_per_grid) {
                 break;
             }
         }
+
+        if (opts.verbose > 0) {
+            std.debug.print(
+                "Number of good matches: {d}, bad matches: {d}\n",
+                .{ accepted_in_rect, candidates.len - accepted_in_rect },
+            );
+        }
     }
 
-    const coarse_control_point_count = control_points.items.len;
-    const coarse_mean_score = computeMeanCoarseScore(control_points.items);
-    const coarse_best_score = computeBestCoarseScore(control_points.items);
+    const coarse_mean_score = if (coarse_control_point_count == 0)
+        null
+    else
+        @as(f32, @floatCast(coarse_score_sum / @as(f64, @floatFromInt(coarse_control_point_count))));
     const owned = try control_points.toOwnedSlice(allocator);
 
     return .{
@@ -131,6 +185,7 @@ pub fn analyzePair(
         .coarse_control_point_count = coarse_control_point_count,
         .coarse_mean_score = coarse_mean_score,
         .coarse_best_score = coarse_best_score,
+        .refined_control_point_count = owned.len,
         .control_point_storage = owned,
         .control_points = owned,
     };
@@ -150,46 +205,10 @@ pub fn refinePairMatches(
         return;
     }
 
-    const scale_factor = @as(u32, 1) << @intCast(opts.pyr_level);
-    const full_res_search_width = @max(scale_factor, 1);
-
-    var write_index: usize = 0;
-    for (pair_matches.control_points, 0..) |cp, read_index| {
-        const left_x = floatCenterToPixel(cp.left_x, left_full.width);
-        const left_y = floatCenterToPixel(cp.left_y, left_full.height);
-        const right_x = floatCenterToPixel(cp.coarse_right_x, right_full.width);
-        const right_y = floatCenterToPixel(cp.coarse_right_y, right_full.height);
-
-        const refined = matchAroundCenter(
-            left_full,
-            right_full,
-            left_x,
-            left_y,
-            right_x,
-            right_y,
-            opts.full_res_template_size,
-            full_res_search_width,
-        );
-        if (refined.score < opts.corr_threshold) {
-            continue;
-        }
-
-        var updated = cp;
-        updated.right_x = refined.x;
-        updated.right_y = refined.y;
-        updated.score = refined.score;
-        updated.refined_score = refined.score;
-
-        if (write_index != read_index) {
-            pair_matches.control_points[write_index] = updated;
-        } else {
-            pair_matches.control_points[read_index] = updated;
-        }
-        write_index += 1;
-    }
-
-    pair_matches.control_points.len = write_index;
-    pair_matches.refined_control_point_count = write_index;
+    pair_matches.refined_control_point_count = pair_matches.control_points.len;
+    _ = left_full;
+    _ = right_full;
+    return;
 }
 
 pub fn renderSummary(
@@ -439,29 +458,11 @@ fn matchAroundCenter(
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
 }
 
-fn floatCenterToPixel(value: f32, limit: u32) u32 {
+fn truncFloatToPixel(value: f32, limit: u32) u32 {
     if (value <= 0) return 0;
-    const rounded = @as(i64, @intFromFloat(@round(value)));
+    const rounded = @as(i64, @intFromFloat(value));
     const max_value = @as(i64, limit - 1);
     return @as(u32, @intCast(@min(max_value, @max(@as(i64, 0), rounded))));
-}
-
-fn computeMeanCoarseScore(points: []const ControlPoint) ?f32 {
-    if (points.len == 0) return null;
-    var sum: f64 = 0;
-    for (points) |cp| {
-        sum += cp.coarse_score;
-    }
-    return @as(f32, @floatCast(sum / @as(f64, @floatFromInt(points.len))));
-}
-
-fn computeBestCoarseScore(points: []const ControlPoint) ?f32 {
-    if (points.len == 0) return null;
-    var best = points[0].coarse_score;
-    for (points[1..]) |cp| {
-        best = @max(best, cp.coarse_score);
-    }
-    return best;
 }
 
 const WindowContext = struct {
@@ -624,12 +625,13 @@ test "pair matching recovers a small translation" {
         .grid_size = 1,
         .corr_threshold = 0.8,
         .pyr_level = 0,
+        .verbose = 0,
         .template_size = 8,
         .search_width = 12,
     }, .{
         .left_index = 0,
         .right_index = 1,
-    }, &left, &right);
+    }, &left, &left, &right, &right);
     defer matches.deinit(allocator);
 
     try std.testing.expect(matches.control_points.len > 0);
@@ -702,13 +704,14 @@ test "full-resolution refinement can prune and tighten coarse matches" {
         .grid_size = 1,
         .corr_threshold = 0.8,
         .pyr_level = 1,
+        .verbose = 0,
         .template_size = 8,
         .search_width = 12,
         .full_res_template_size = 10,
     }, .{
         .left_index = 0,
         .right_index = 1,
-    }, &left_reduced, &right_reduced);
+    }, &left_reduced, &left_full, &right_reduced, &right_full);
     defer matches.deinit(allocator);
 
     try std.testing.expect(matches.control_points.len > 0);
@@ -718,6 +721,7 @@ test "full-resolution refinement can prune and tighten coarse matches" {
         .grid_size = 1,
         .corr_threshold = 0.8,
         .pyr_level = 1,
+        .verbose = 0,
         .template_size = 8,
         .search_width = 12,
         .full_res_template_size = 10,

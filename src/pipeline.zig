@@ -211,6 +211,7 @@ fn analyzePairs(
         .grid_size = cfg.grid_size,
         .corr_threshold = @as(f32, @floatCast(cfg.corr_thresh)),
         .pyr_level = cfg.pyr_level,
+        .verbose = cfg.verbose,
     };
 
     if (cfg.align_to_first) {
@@ -225,7 +226,7 @@ fn analyzePairs(
             var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
             defer right_full.deinit(allocator);
 
-            var pair_result = try match.analyzePair(allocator, options, pair, &left, &right);
+            var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
             match.refinePairMatches(options, &pair_result, &left_full, &right_full);
             try results.append(allocator, pair_result);
         }
@@ -247,7 +248,7 @@ fn analyzePairs(
 
             var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
             var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
-            var pair_result = try match.analyzePair(allocator, options, pair, &left, &right);
+            var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
             match.refinePairMatches(options, &pair_result, &left_full, &right_full);
             try results.append(allocator, pair_result);
 
@@ -279,14 +280,22 @@ fn loadReducedGrayImage(
 
     var gray_image = try gray.fromLoaded(allocator, &decoded);
     errdefer gray_image.deinit(allocator);
+    gray.quantizeInPlace(&gray_image, decoded.info.sample_type);
 
     if (pyr_level == 0) {
         return gray_image;
     }
 
-    const reduced = try gray.reduceNTimes(allocator, &gray_image, pyr_level);
-    gray_image.deinit(allocator);
-    return reduced;
+    var current = gray_image;
+    var level: u8 = 0;
+    while (level < pyr_level) : (level += 1) {
+        var next = try gray.reduceByHalf(allocator, &current);
+        gray.quantizeInPlace(&next, decoded.info.sample_type);
+        current.deinit(allocator);
+        current = next;
+    }
+
+    return current;
 }
 
 fn writeFirstPairPreview(

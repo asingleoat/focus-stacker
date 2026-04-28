@@ -24,6 +24,18 @@ pub const GrayImage = struct {
     }
 };
 
+pub fn quantizeInPlace(image: *GrayImage, sample_type: image_io.SampleType) void {
+    const max_value: f32 = switch (sample_type) {
+        .u8 => 255.0,
+        .u16 => 65535.0,
+    };
+
+    for (image.pixels) |*pixel| {
+        const clamped = @max(@as(f32, 0), @min(@as(f32, 1), pixel.*));
+        pixel.* = @round(clamped * max_value) / max_value;
+    }
+}
+
 pub fn fromLoaded(allocator: std.mem.Allocator, image: *const image_io.Image) std.mem.Allocator.Error!GrayImage {
     const count = @as(usize, image.info.width) * @as(usize, image.info.height);
     const pixels = try allocator.alloc(f32, count);
@@ -223,4 +235,23 @@ test "fixture jpeg converts and reduces" {
     try std.testing.expectEqual(@as(u32, 78), gray.height);
     try std.testing.expectEqual(@as(u32, 50), reduced.width);
     try std.testing.expectEqual(@as(u32, 39), reduced.height);
+}
+
+test "quantize in place follows source sample grid" {
+    const allocator = std.testing.allocator;
+    const pixels = try allocator.dupe(f32, &[_]f32{ 0.0, 0.5, 0.5008, 1.0 });
+    defer allocator.free(pixels);
+
+    var image = GrayImage{
+        .width = 4,
+        .height = 1,
+        .pixels = pixels,
+    };
+
+    quantizeInPlace(&image, .u8);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), image.pixels[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), image.pixels[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0 / 255.0), image.pixels[2], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), image.pixels[3], 1e-6);
 }
