@@ -1,4 +1,5 @@
 const std = @import("std");
+const sparse_matrix = @import("sparse_matrix.zig");
 const optimize = @import("optimize.zig");
 const parity_pto = @import("parity_pto.zig");
 
@@ -90,6 +91,24 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "jac-pattern-stats")) {
+        if (args.len < 4) usage();
+        const strategy = try parseStrategy(args[3]);
+        var pattern = try optimize.buildObjectiveJacobianPattern(allocator, project.optimize_vector, project.pair_matches, strategy);
+        defer pattern.deinit(allocator);
+        var groups = try sparse_matrix.partitionIndependentColumns(allocator, &pattern);
+        defer groups.deinit(allocator);
+        var max_group_size: usize = 0;
+        for (0..groups.groupCount()) |group_index| {
+            max_group_size = @max(max_group_size, groups.groupColumns(group_index).len);
+        }
+        std.debug.print(
+            "rows={d}\ncols={d}\nnnz={d}\ngroups={d}\nmax_group_size={d}\n",
+            .{ pattern.row_count, pattern.col_count, pattern.row_idx.len, groups.groupCount(), max_group_size },
+        );
+        return;
+    }
+
     if (std.mem.eql(u8, command, "jac-column")) {
         if (args.len < 5) usage();
         const strategy = try parseStrategy(args[3]);
@@ -129,6 +148,7 @@ fn usage() noreturn {
         \\  parity_probe image-vars <pto> [x...]
         \\  parity_probe equirect-point <pto> <image_index> <x> <y> [x...]
         \\  parity_probe fvec <pto> <distance_only|componentwise|1|2> [x...]
+        \\  parity_probe jac-pattern-stats <pto> <distance_only|componentwise|1|2>
         \\  parity_probe jac-column <pto> <distance_only|componentwise|1|2> <param_index> [x...]
         \\  parity_probe cp-error <pto> <cp_index> [x...]
         \\

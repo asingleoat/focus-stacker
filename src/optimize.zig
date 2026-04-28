@@ -668,6 +668,79 @@ pub fn evaluateObjectiveResiduals(
     return evaluateObjectiveResidualsPadded(allocator, strategy, initial_avg_hfov, pair_matches, poses, null);
 }
 
+pub fn evaluateObjectiveJacobianSparse(
+    allocator: std.mem.Allocator,
+    strategy: ObjectiveStrategy,
+    optimize_vector: []const VariableSet,
+    base_poses: []const ImagePose,
+    pair_matches: []const match_mod.PairMatches,
+    solve_x: []const f64,
+    mindeltax: f64,
+) !sparse_matrix.CcsMatrix {
+    var pattern = try buildObjectiveJacobianPattern(allocator, optimize_vector, pair_matches, strategy);
+    defer pattern.deinit(allocator);
+    var groups = try sparse_matrix.partitionIndependentColumns(allocator, &pattern);
+    defer groups.deinit(allocator);
+
+    const initial_avg_hfov = averageHfovDegrees(base_poses);
+    const base_eval_poses = try decodeSolveVector(allocator, optimize_vector, base_poses, solve_x);
+    defer allocator.free(base_eval_poses);
+    const base_fvec = try evaluateObjectiveResidualsPadded(
+        allocator,
+        strategy,
+        initial_avg_hfov,
+        pair_matches,
+        base_eval_poses,
+        null,
+    );
+    defer allocator.free(base_fvec);
+
+    var matrix = try sparse_matrix.clonePatternToMatrix(allocator, &pattern);
+    errdefer matrix.deinit(allocator);
+    const shifted_x = try allocator.dupe(f64, solve_x);
+    defer allocator.free(shifted_x);
+    const step_sizes = try allocator.alloc(f64, solve_x.len);
+    defer allocator.free(step_sizes);
+    @memset(step_sizes, 0.0);
+
+    const eps = @sqrt(@max(std.math.floatEps(f64) * 10.0, std.math.floatEps(f64)));
+    for (0..groups.groupCount()) |group_index| {
+        @memcpy(shifted_x, solve_x);
+        const columns = groups.groupColumns(group_index);
+        for (columns) |column| {
+            var h = eps * @abs(shifted_x[column]);
+            if (h < mindeltax) h = mindeltax;
+            if (h == 0.0) h = eps;
+            step_sizes[column] = h;
+            shifted_x[column] += h;
+        }
+
+        const shifted_poses = try decodeSolveVector(allocator, optimize_vector, base_poses, shifted_x);
+        defer allocator.free(shifted_poses);
+        const shifted_fvec = try evaluateObjectiveResidualsPadded(
+            allocator,
+            strategy,
+            initial_avg_hfov,
+            pair_matches,
+            shifted_poses,
+            null,
+        );
+        defer allocator.free(shifted_fvec);
+
+        for (columns) |column| {
+            const h = step_sizes[column];
+            const start = matrix.col_ptr[column];
+            const end = matrix.col_ptr[column + 1];
+            for (start..end) |entry_index| {
+                const row = matrix.row_idx[entry_index];
+                matrix.values[entry_index] = (shifted_fvec[row] - base_fvec[row]) / h;
+            }
+        }
+    }
+
+    return matrix;
+}
+
 pub fn evaluateObjectiveResidualsPadded(
     allocator: std.mem.Allocator,
     strategy: ObjectiveStrategy,
@@ -3148,6 +3221,123 @@ test "objective jacobian sparsity matches image-pair locality" {
     try std.testing.expectEqualSlices(usize, &.{ 1, 5 }, groups.groupColumns(1));
     try std.testing.expectEqualSlices(usize, &.{ 2, 6 }, groups.groupColumns(2));
     try std.testing.expectEqualSlices(usize, &.{ 3, 7 }, groups.groupColumns(3));
+}
+
+test "sparse grouped objective jacobian matches dense finite differences" {
+    const allocator = std.testing.allocator;
+
+    const optimize_vector = [_]VariableSet{
+        VariableSet.initEmpty(),
+        VariableSet.initMany(&.{ .y, .p, .r, .v }),
+        VariableSet.initMany(&.{ .y, .p, .r, .v }),
+    };
+    const base_poses = [_]ImagePose{
+        .{ .base_hfov_degrees = 50.0 },
+        .{ .yaw = 0.001, .pitch = -0.002, .roll = 0.003, .hfov_delta = 0.25, .base_hfov_degrees = 50.0 },
+        .{ .yaw = -0.002, .pitch = 0.001, .roll = -0.004, .hfov_delta = 0.5, .base_hfov_degrees = 50.0 },
+    };
+    var cps = [_]match_mod.ControlPoint{
+        .{
+            .left_image = 0,
+            .right_image = 1,
+            .left_x = 10,
+            .left_y = 20,
+            .right_x = 11,
+            .right_y = 21,
+            .score = 1.0,
+            .coarse_right_x = 11,
+            .coarse_right_y = 21,
+            .coarse_score = 1.0,
+            .refined_score = 1.0,
+        },
+        .{
+            .left_image = 0,
+            .right_image = 2,
+            .left_x = 30,
+            .left_y = 40,
+            .right_x = 31,
+            .right_y = 41,
+            .score = 1.0,
+            .coarse_right_x = 31,
+            .coarse_right_y = 41,
+            .coarse_score = 1.0,
+            .refined_score = 1.0,
+        },
+    };
+    const pair_matches = [_]match_mod.PairMatches{
+        .{
+            .pair = .{ .left_index = 0, .right_index = 1 },
+            .image_width = 100,
+            .image_height = 80,
+            .candidates_considered = 1,
+            .control_point_storage = cps[0..1],
+            .control_points = cps[0..1],
+        },
+        .{
+            .pair = .{ .left_index = 0, .right_index = 2 },
+            .image_width = 100,
+            .image_height = 80,
+            .candidates_considered = 1,
+            .control_point_storage = cps[1..2],
+            .control_points = cps[1..2],
+        },
+    };
+
+    const solve_x = try encodeSolveVector(allocator, &optimize_vector, &base_poses);
+    defer allocator.free(solve_x);
+    var sparse_jac = try evaluateObjectiveJacobianSparse(
+        allocator,
+        .componentwise,
+        &optimize_vector,
+        &base_poses,
+        &pair_matches,
+        solve_x,
+        0.0,
+    );
+    defer sparse_jac.deinit(allocator);
+
+    const initial_avg_hfov = averageHfovDegrees(&base_poses);
+    const base_eval_poses = try decodeSolveVector(allocator, &optimize_vector, &base_poses, solve_x);
+    defer allocator.free(base_eval_poses);
+    const base_fvec = try evaluateObjectiveResidualsPadded(
+        allocator,
+        .componentwise,
+        initial_avg_hfov,
+        &pair_matches,
+        base_eval_poses,
+        null,
+    );
+    defer allocator.free(base_fvec);
+
+    const shifted_x = try allocator.dupe(f64, solve_x);
+    defer allocator.free(shifted_x);
+    const eps = @sqrt(@max(std.math.floatEps(f64) * 10.0, std.math.floatEps(f64)));
+    for (0..solve_x.len) |column| {
+        @memcpy(shifted_x, solve_x);
+        var h = eps * @abs(shifted_x[column]);
+        if (h == 0.0) h = eps;
+        shifted_x[column] += h;
+
+        const shifted_poses = try decodeSolveVector(allocator, &optimize_vector, &base_poses, shifted_x);
+        defer allocator.free(shifted_poses);
+        const shifted_fvec = try evaluateObjectiveResidualsPadded(
+            allocator,
+            .componentwise,
+            initial_avg_hfov,
+            &pair_matches,
+            shifted_poses,
+            null,
+        );
+        defer allocator.free(shifted_fvec);
+
+        const start = sparse_jac.col_ptr[column];
+        const end = sparse_jac.col_ptr[column + 1];
+        for (start..end) |entry_index| {
+            const row = sparse_jac.row_idx[entry_index];
+            const dense_value = (shifted_fvec[row] - base_fvec[row]) / h;
+            try std.testing.expectApproxEqAbs(dense_value, sparse_jac.values[entry_index], 1e-9);
+        }
+    }
 }
 
 test "pruning removes residual outliers" {

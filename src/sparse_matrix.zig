@@ -44,6 +44,21 @@ pub const CcsPattern = struct {
     }
 };
 
+pub const CcsMatrix = struct {
+    row_count: usize,
+    col_count: usize,
+    row_idx: []usize,
+    col_ptr: []usize,
+    values: []f64,
+
+    pub fn deinit(self: *CcsMatrix, allocator: std.mem.Allocator) void {
+        allocator.free(self.row_idx);
+        allocator.free(self.col_ptr);
+        allocator.free(self.values);
+        self.* = undefined;
+    }
+};
+
 pub const ColumnGroups = struct {
     group_offsets: []usize,
     columns: []usize,
@@ -172,6 +187,16 @@ pub fn partitionIndependentColumns(allocator: std.mem.Allocator, pattern: *const
     return .{
         .group_offsets = try group_offsets.toOwnedSlice(allocator),
         .columns = try columns.toOwnedSlice(allocator),
+    };
+}
+
+pub fn clonePatternToMatrix(allocator: std.mem.Allocator, pattern: *const CcsPattern) !CcsMatrix {
+    return .{
+        .row_count = pattern.row_count,
+        .col_count = pattern.col_count,
+        .row_idx = try allocator.dupe(usize, pattern.row_idx),
+        .col_ptr = try allocator.dupe(usize, pattern.col_ptr),
+        .values = try allocator.alloc(f64, pattern.row_idx.len),
     };
 }
 
