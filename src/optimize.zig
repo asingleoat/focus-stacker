@@ -836,94 +836,36 @@ pub fn transformPoint(pose: ImagePose, x: anytype, y: anytype, width: u32, heigh
     const yf = @as(f64, y);
     const src_center = distortionCenter(pose, width, height);
     const dest_center = panoramaCenter(width, height);
-    const dx = xf - src_center.x;
-    const dy = yf - src_center.y;
-    const distorted = applyRadialDistortion(pose, dx, dy, width, height);
-    const src_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
     const dest_focal = panoramaFocalLengthPixels(width, pose);
-    const ray = normalize3(.{
-        .x = distorted.x / src_focal,
-        .y = distorted.y / src_focal,
-        .z = 1.0,
-    });
-    const rotated = applyRotation(pose, ray);
-    const camera = Vec3{
-        .x = pose.trans_x,
-        .y = pose.trans_y,
-        .z = pose.trans_z,
-    };
-    const plane = translationPlane(pose);
-    const denom = signedDenom(dot3(rotated, plane.normal));
-    const scale_to_plane = (plane.offset - dot3(camera, plane.normal)) / denom;
-    const plane_point = Vec3{
-        .x = camera.x + scale_to_plane * rotated.x,
-        .y = camera.y + scale_to_plane * rotated.y,
-        .z = camera.z + scale_to_plane * rotated.z,
-    };
+    const ray = sourceWorldRay(pose, xf - src_center.x, yf - src_center.y, width, height);
+    const projected = if (hasTranslation(pose))
+        projectViaTranslationPlane(pose, ray)
+    else
+        ray;
+    const projected_xy = projectRectilinear(projected, dest_focal) orelse return .{ .x = -1.0, .y = -1.0 };
     return .{
-        .x = dest_center.x + dest_focal * plane_point.x,
-        .y = dest_center.y + dest_focal * plane_point.y,
+        .x = dest_center.x + projected_xy.x,
+        .y = dest_center.y + projected_xy.y,
     };
 }
 
 pub fn inverseTransformPoint(pose: ImagePose, out_x: f64, out_y: f64, width: u32, height: u32) Point2 {
     const src_center = distortionCenter(pose, width, height);
     const dest_center = panoramaCenter(width, height);
-    const src_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
     const dest_focal = panoramaFocalLengthPixels(width, pose);
-    const plane_x = (out_x - dest_center.x) / dest_focal;
-    const plane_y = (out_y - dest_center.y) / dest_focal;
-    const plane_point = Vec3{
-        .x = plane_x,
-        .y = plane_y,
-        .z = planeZAtXY(pose, plane_x, plane_y),
-    };
-    const camera = Vec3{
-        .x = pose.trans_x,
-        .y = pose.trans_y,
-        .z = pose.trans_z,
-    };
-    const rotated_ray = normalize3(.{
-        .x = plane_point.x - camera.x,
-        .y = plane_point.y - camera.y,
-        .z = plane_point.z - camera.z,
-    });
-    const local_ray = applyInverseRotation(pose, rotated_ray);
-    const denom = signedDenom(local_ray.z);
-    const radial_x = src_focal * (local_ray.x / denom);
-    const radial_y = src_focal * (local_ray.y / denom);
+    const pano_ray = rectilinearRay(out_x - dest_center.x, out_y - dest_center.y, dest_focal);
+    const camera_ray = if (hasTranslation(pose))
+        rayFromTranslationPlane(pose, pano_ray) orelse return .{ .x = -1.0, .y = -1.0 }
+    else
+        pano_ray;
+    const radial = imagePlaneFromWorldRay(pose, camera_ray, width);
+    const radial_x = radial.x;
+    const radial_y = radial.y;
     const undistorted = invertRadialDistortion(pose, radial_x, radial_y, width, height);
     return .{
         .x = src_center.x + undistorted.x,
         .y = src_center.y + undistorted.y,
     };
-}
-
-const TranslationPlane = struct {
-    normal: Vec3,
-    offset: f64,
-};
-
-fn translationPlane(pose: ImagePose) TranslationPlane {
-    return .{
-        .normal = applyRotationYawPitch(pose.translation_plane_yaw, pose.translation_plane_pitch, .{ .x = 0, .y = 0, .z = 1 }),
-        .offset = 1.0,
-    };
-}
-
-fn planeZAtXY(pose: ImagePose, x: f64, y: f64) f64 {
-    const plane = translationPlane(pose);
-    return (plane.offset - plane.normal.x * x - plane.normal.y * y) / signedDenom(plane.normal.z);
-}
-
-fn signedDenom(value: f64) f64 {
-    if (@abs(value) >= 1e-6) return value;
-    if (value < 0) return -1e-6;
-    return 1e-6;
-}
-
-fn dot3(a: Vec3, b: Vec3) f64 {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
 fn focalLengthPixels(width: u32, hfov_degrees: f64) f64 {
@@ -962,56 +904,162 @@ fn normalize3(v: Vec3) Vec3 {
     };
 }
 
-fn applyRotation(pose: ImagePose, ray: Vec3) Vec3 {
-    const yawed_pitched = applyRotationYawPitch(pose.yaw, pose.pitch, ray);
-    const cz = @cos(pose.roll);
-    const sz = @sin(pose.roll);
+const Matrix3 = [3][3]f64;
+
+fn sourceWorldRay(pose: ImagePose, dx: f64, dy: f64, width: u32, height: u32) Vec3 {
+    const distorted = applyRadialDistortion(pose, dx, dy, width, height);
+    const src_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const local_ray = rectilinearRay(distorted.x, distorted.y, src_focal);
+    const pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true);
+    const pitched_rolled = matrixInvMul(pitch_roll, local_ray);
+    return rotateYaw(pitched_rolled, pose.yaw);
+}
+
+fn imagePlaneFromWorldRay(pose: ImagePose, world_ray: Vec3, width: u32) Point2 {
+    const pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true);
+    const unyawed = rotateYaw(world_ray, -pose.yaw);
+    const local_ray = matrixMul(pitch_roll, unyawed);
+    const src_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const denom = -local_ray.z;
+    if (@abs(denom) < 1e-12) return .{ .x = -1.0, .y = -1.0 };
     return .{
-        .x = cz * yawed_pitched.x - sz * yawed_pitched.y,
-        .y = sz * yawed_pitched.x + cz * yawed_pitched.y,
-        .z = yawed_pitched.z,
+        .x = src_focal * (local_ray.x / denom),
+        .y = src_focal * (local_ray.y / denom),
     };
 }
 
-fn applyRotationYawPitch(yaw: f64, pitch: f64, ray: Vec3) Vec3 {
-    const cy = @cos(yaw);
-    const sy = @sin(yaw);
-    const cx = @cos(pitch);
-    const sx = @sin(pitch);
+fn rectilinearRay(x: f64, y: f64, focal: f64) Vec3 {
+    return normalize3(.{
+        .x = x,
+        .y = y,
+        .z = -focal,
+    });
+}
 
-    const yawed = Vec3{
-        .x = cy * ray.x + sy * ray.z,
+fn rotateYaw(ray: Vec3, yaw: f64) Vec3 {
+    const c = @cos(yaw);
+    const s = @sin(yaw);
+    return .{
+        .x = c * ray.x - s * ray.z,
         .y = ray.y,
-        .z = -sy * ray.x + cy * ray.z,
-    };
-    return .{
-        .x = yawed.x,
-        .y = cx * yawed.y - sx * yawed.z,
-        .z = sx * yawed.y + cx * yawed.z,
+        .z = s * ray.x + c * ray.z,
     };
 }
 
-fn applyInverseRotation(pose: ImagePose, ray: Vec3) Vec3 {
-    const cz = @cos(-pose.roll);
-    const sz = @sin(-pose.roll);
-    const unrolled = Vec3{
-        .x = cz * ray.x - sz * ray.y,
-        .y = sz * ray.x + cz * ray.y,
-        .z = ray.z,
+fn setMatrix(a: f64, b: f64, c: f64, cl: bool) Matrix3 {
+    const mx: Matrix3 = .{
+        .{ 1.0, 0.0, 0.0 },
+        .{ 0.0, @cos(a), @sin(a) },
+        .{ 0.0, -@sin(a), @cos(a) },
     };
-    const cx = @cos(-pose.pitch);
-    const sx = @sin(-pose.pitch);
-    const unpitched = Vec3{
-        .x = unrolled.x,
-        .y = cx * unrolled.y - sx * unrolled.z,
-        .z = sx * unrolled.y + cx * unrolled.z,
+    const my: Matrix3 = .{
+        .{ @cos(b), 0.0, -@sin(b) },
+        .{ 0.0, 1.0, 0.0 },
+        .{ @sin(b), 0.0, @cos(b) },
     };
-    const cy = @cos(-pose.yaw);
-    const sy = @sin(-pose.yaw);
+    const mz: Matrix3 = .{
+        .{ @cos(c), @sin(c), 0.0 },
+        .{ -@sin(c), @cos(c), 0.0 },
+        .{ 0.0, 0.0, 1.0 },
+    };
+    const dummy = if (cl) matrixMatrixMul(mz, mx) else matrixMatrixMul(mx, mz);
+    return matrixMatrixMul(dummy, my);
+}
+
+fn matrixMul(m: Matrix3, v: Vec3) Vec3 {
     return .{
-        .x = cy * unpitched.x + sy * unpitched.z,
-        .y = unpitched.y,
-        .z = -sy * unpitched.x + cy * unpitched.z,
+        .x = m[0][0] * v.x + m[0][1] * v.y + m[0][2] * v.z,
+        .y = m[1][0] * v.x + m[1][1] * v.y + m[1][2] * v.z,
+        .z = m[2][0] * v.x + m[2][1] * v.y + m[2][2] * v.z,
+    };
+}
+
+fn matrixInvMul(m: Matrix3, v: Vec3) Vec3 {
+    return .{
+        .x = m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z,
+        .y = m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z,
+        .z = m[0][2] * v.x + m[1][2] * v.y + m[2][2] * v.z,
+    };
+}
+
+fn matrixMatrixMul(m1: Matrix3, m2: Matrix3) Matrix3 {
+    var result: Matrix3 = undefined;
+    for (0..3) |i| {
+        for (0..3) |k| {
+            result[i][k] = m1[i][0] * m2[0][k] + m1[i][1] * m2[1][k] + m1[i][2] * m2[2][k];
+        }
+    }
+    return result;
+}
+
+fn hasTranslation(pose: ImagePose) bool {
+    return @abs(pose.trans_x) > 1e-12 or @abs(pose.trans_y) > 1e-12 or @abs(pose.trans_z) > 1e-12;
+}
+
+fn translationPlaneNormal(pose: ImagePose) Vec3 {
+    return cartErect(pose.translation_plane_yaw, -pose.translation_plane_pitch, 1.0);
+}
+
+fn projectViaTranslationPlane(pose: ImagePose, world_ray: Vec3) Vec3 {
+    const camera = Vec3{ .x = pose.trans_x, .y = pose.trans_y, .z = pose.trans_z };
+    const target = Vec3{
+        .x = camera.x + world_ray.x,
+        .y = camera.y + world_ray.y,
+        .z = camera.z + world_ray.z,
+    };
+    return linePlaneIntersection(translationPlaneNormal(pose), camera, target) orelse .{ .x = 0.0, .y = 0.0, .z = 1.0 };
+}
+
+fn rayFromTranslationPlane(pose: ImagePose, pano_ray: Vec3) ?Vec3 {
+    const plane_hit = linePlaneIntersection(
+        translationPlaneNormal(pose),
+        .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+        pano_ray,
+    ) orelse return null;
+    return normalize3(.{
+        .x = plane_hit.x - pose.trans_x,
+        .y = plane_hit.y - pose.trans_y,
+        .z = plane_hit.z - pose.trans_z,
+    });
+}
+
+fn linePlaneIntersection(normal: Vec3, p1: Vec3, p2: Vec3) ?Vec3 {
+    const direction = Vec3{
+        .x = p2.x - p1.x,
+        .y = p2.y - p1.y,
+        .z = p2.z - p1.z,
+    };
+    const numerator = 1.0 - dot3(normal, p1);
+    const denominator = dot3(normal, direction);
+    if (@abs(denominator) < 1e-12) return null;
+    const u = numerator / denominator;
+    return .{
+        .x = p1.x + u * direction.x,
+        .y = p1.y + u * direction.y,
+        .z = p1.z + u * direction.z,
+    };
+}
+
+fn cartErect(x: f64, y: f64, distance: f64) Vec3 {
+    const phi = x / distance;
+    const theta_zenith = std.math.pi * 0.5 - (y / distance);
+    return .{
+        .x = @sin(theta_zenith) * @sin(phi),
+        .y = @cos(theta_zenith),
+        .z = @sin(theta_zenith) * -@cos(phi),
+    };
+}
+
+fn dot3(a: Vec3, b: Vec3) f64 {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+fn projectRectilinear(v: Vec3, focal: f64) ?Point2 {
+    const denom = -v.z;
+    if (denom <= 1e-12) return null;
+    return .{
+        .x = focal * (v.x / denom),
+        .y = focal * (v.y / denom),
     };
 }
 

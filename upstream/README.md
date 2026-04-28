@@ -11,3 +11,15 @@ This directory contains the vendored upstream Hugin release snapshot used as the
 - CLI documentation reference: `upstream/hugin-2025.0.1/doc/align_image_stack.pod`
 
 Treat `upstream/hugin-2025.0.1/` as reference material, not as a target for local edits.
+
+This directory also contains the vendored `libpano13` source that the active Nix flake resolves for `panotools`.
+
+- Transitive dependency: `libpano13`
+- Nix package: `panotools`
+- Source release: `libpano13-2.9.23`
+- Source URL: `mirror://sourceforge/panotools/libpano13-2.9.23.tar.gz`
+- Primary transform references:
+  - `upstream/libpano13-2.9.23/libpano13-2.9.23/adjust.c`
+  - `upstream/libpano13-2.9.23/libpano13-2.9.23/math.c`
+
+Treat `upstream/libpano13-2.9.23/` as reference material, not as a target for local edits.
