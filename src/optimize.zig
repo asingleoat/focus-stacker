@@ -1,10 +1,12 @@
 const std = @import("std");
 const config_mod = @import("config.zig");
 const match_mod = @import("match.zig");
+const minpack_mod = @import("minpack.zig");
 
 const huber_sigma_pixels: f64 = 0.0;
 const radial_solve_space_scale: f64 = 100.0;
 const degrees_to_radians: f64 = std.math.pi / 180.0;
+const solve_space_relative_epsilon: f64 = @sqrt(std.math.floatEps(f64));
 
 pub const Variable = enum {
     y,
@@ -553,91 +555,91 @@ fn refinePosesIteratively(
     if (variable_count == 0) {
         return;
     }
+    const solve_x = try allocator.alloc(f64, variable_count);
+    defer allocator.free(solve_x);
+    const seed_poses = try allocator.dupe(ImagePose, poses);
+    defer allocator.free(seed_poses);
+    const work_poses = try allocator.dupe(ImagePose, poses);
+    defer allocator.free(work_poses);
+    fillSolveVector(layout, poses, solve_x);
 
-    const matrix_len = variable_count * variable_count;
-    const normal = try allocator.alloc(f64, matrix_len);
-    defer allocator.free(normal);
-    const rhs = try allocator.alloc(f64, variable_count);
-    defer allocator.free(rhs);
-    const delta = try allocator.alloc(f64, variable_count);
-    defer allocator.free(delta);
-    const trial_poses = try allocator.alloc(ImagePose, poses.len);
-    defer allocator.free(trial_poses);
-
-    const max_iterations: usize = switch (strategy) {
-        .distance_only => 8,
-        .componentwise => 12,
+    const actual_residual_count = switch (strategy) {
+        .distance_only => countControlPoints(pair_matches),
+        .componentwise => countControlPoints(pair_matches) * 2,
     };
-    const damping: f64 = 1e-3;
+    const residual_count = @max(actual_residual_count, variable_count);
 
-    for (0..max_iterations) |iteration| {
-        @memset(normal, 0);
-        @memset(rhs, 0);
+    var ctx = SolveContext{
+        .layout = layout,
+        .pair_matches = pair_matches,
+        .seed_poses = seed_poses,
+        .work_poses = work_poses,
+        .initial_avg_hfov = initial_avg_hfov,
+        .strategy = strategy,
+        .actual_residual_count = actual_residual_count,
+    };
 
-        for (pair_matches) |pair_match| {
-            for (pair_match.control_points) |cp| {
-                switch (strategy) {
-                    .distance_only => {
-                        const residual = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
-                        var indices = [_]usize{0} ** 16;
-                        var values = [_]f64{0} ** 16;
-                        var count: usize = 0;
+    const params = minpack_mod.Params{
+        .ftol = switch (strategy) {
+            .distance_only => 0.05,
+            .componentwise => 1.0e-6,
+        },
+        .xtol = std.math.floatEps(f64),
+        .gtol = std.math.floatEps(f64),
+        .maxfev = 100 * (variable_count + 1) * 100,
+        .epsfcn = std.math.floatEps(f64) * 10.0,
+        .factor = 100.0,
+    };
+    _ = minpack_mod.lmdif(SolveContext, allocator, &ctx, evaluateSolveVector, solve_x, residual_count, params) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
+    applySolveVector(layout, poses, solve_x);
+}
 
-                        appendDistanceResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.left_image, &indices, &values, &count);
-                        appendDistanceResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.right_image, &indices, &values, &count);
+const SolveContext = struct {
+    layout: []const SolveLayout,
+    pair_matches: []const match_mod.PairMatches,
+    seed_poses: []const ImagePose,
+    work_poses: []ImagePose,
+    initial_avg_hfov: f64,
+    strategy: SolveStrategy,
+    actual_residual_count: usize,
+};
 
-                        accumulateEquation(normal, rhs, variable_count, indices[0..count], values[0..count], -residual, 1.0);
-                    },
-                    .componentwise => {
-                        const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
+fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror!void {
+    std.debug.assert(fvec.len >= ctx.actual_residual_count);
+    @memcpy(ctx.work_poses, ctx.seed_poses);
+    applySolveVector(ctx.layout, ctx.work_poses, x);
 
-                        var indices = [_]usize{0} ** 16;
-                        var values_x = [_]f64{0} ** 16;
-                        var values_y = [_]f64{0} ** 16;
-                        var count: usize = 0;
-
-                        appendResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.left_image, &indices, &values_x, &values_y, &count);
-                        appendResidualJacobian(layout, initial_avg_hfov, poses, pair_match, cp, cp.right_image, &indices, &values_x, &values_y, &count);
-
-                        accumulateEquation(normal, rhs, variable_count, indices[0..count], values_x[0..count], -residual.x, 1.0);
-                        accumulateEquation(normal, rhs, variable_count, indices[0..count], values_y[0..count], -residual.y, 1.0);
-                    },
-                }
+    var out_index: usize = 0;
+    var squared_sum: f64 = 0.0;
+    for (ctx.pair_matches) |pair_match| {
+        for (pair_match.control_points) |cp| {
+            switch (ctx.strategy) {
+                .distance_only => {
+                    const residual = objectiveDistanceResidual(ctx.initial_avg_hfov, ctx.work_poses, pair_match, cp);
+                    fvec[out_index] = residual;
+                    squared_sum += residual * residual;
+                    out_index += 1;
+                },
+                .componentwise => {
+                    const residual = objectiveResidualVector(ctx.initial_avg_hfov, ctx.work_poses, pair_match, cp);
+                    fvec[out_index] = residual.x;
+                    fvec[out_index + 1] = residual.y;
+                    squared_sum += residual.x * residual.x + residual.y * residual.y;
+                    out_index += 2;
+                },
             }
         }
+    }
 
-        for (0..variable_count) |i| {
-            normal[i * variable_count + i] += damping;
-        }
-        accumulateUpdatePriors(normal, rhs, variable_count, layout, poses);
-
-        @memcpy(delta, rhs);
-        try solveLinearSystemInPlace(normal, delta, variable_count);
-        suppressUnstableLensTerms(iteration, layout, delta);
-        clampSolveDelta(layout, delta);
-
-        if (maxAbs(delta) < 1e-4) {
-            break;
-        }
-
-        const baseline_error = totalSquaredStrategyResidual(strategy, initial_avg_hfov, pair_matches, poses);
-        var accepted = false;
-        var step_scale: f64 = 1.0;
-        while (step_scale >= 1.0 / 64.0) {
-            @memcpy(trial_poses, poses);
-            applyScaledSolveUpdate(layout, trial_poses, delta, step_scale);
-            const trial_error = totalSquaredStrategyResidual(strategy, initial_avg_hfov, pair_matches, trial_poses);
-            if (trial_error < baseline_error) {
-                @memcpy(poses, trial_poses);
-                accepted = true;
-                break;
-            }
-            step_scale *= 0.5;
-        }
-
-        if (!accepted) {
-            break;
-        }
+    const fill_value = if (ctx.actual_residual_count > 0)
+        @sqrt(squared_sum / @as(f64, @floatFromInt(ctx.actual_residual_count)))
+    else
+        0.0;
+    for (out_index..fvec.len) |i| {
+        fvec[i] = fill_value;
     }
 }
 
@@ -1041,11 +1043,11 @@ fn numericalResidualDerivative(
     image_index: usize,
     field: PoseField,
 ) Vec2d {
-    const epsilon = solveSpaceEpsilon(field);
-    const base = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
-
     var perturbed_pose = poses[image_index];
-    applySolveSpaceDelta(&perturbed_pose, field, epsilon);
+    const base_value = solveSpaceValue(perturbed_pose, field);
+    const epsilon = solveSpaceEpsilon(base_value);
+    setSolveSpaceValue(&perturbed_pose, field, base_value + epsilon);
+    const base = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
     const moved = objectiveResidualVectorWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, image_index, perturbed_pose);
     return .{
         .x = (moved.x - base.x) / epsilon,
@@ -1061,11 +1063,11 @@ fn numericalDistanceResidualDerivative(
     image_index: usize,
     field: PoseField,
 ) f64 {
-    const epsilon = solveSpaceEpsilon(field);
-    const base = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
-
     var perturbed_pose = poses[image_index];
-    applySolveSpaceDelta(&perturbed_pose, field, epsilon);
+    const base_value = solveSpaceValue(perturbed_pose, field);
+    const epsilon = solveSpaceEpsilon(base_value);
+    setSolveSpaceValue(&perturbed_pose, field, base_value + epsilon);
+    const base = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
     const moved = objectiveDistanceResidualWithPoseOverride(initial_avg_hfov, poses, pair_match, cp, image_index, perturbed_pose);
     return (moved - base) / epsilon;
 }
@@ -1128,6 +1130,12 @@ fn controlPointResidualVectorWithPoseOverride(
     override_image_index: ?usize,
     override_pose: ImagePose,
 ) Vec2d {
+    const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
+    const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
+    if (hasBasicRectilinearPose(left_pose) and hasBasicRectilinearPose(right_pose)) {
+        return exactDistSphereResidualVector(left_pose, right_pose, pair_match, cp);
+    }
+
     const left = panoramaVectorForControlPoint(poses, pair_match, cp.left_image, cp.left_x, cp.left_y, override_image_index, override_pose);
     const right = panoramaVectorForControlPoint(poses, pair_match, cp.right_image, cp.right_x, cp.right_y, override_image_index, override_pose);
     const scale = panoRadiansToPixels(pair_match.image_width, poses[0].base_hfov_degrees);
@@ -1157,6 +1165,12 @@ fn controlPointDistanceResidualWithPoseOverride(
     override_image_index: ?usize,
     override_pose: ImagePose,
 ) f64 {
+    const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
+    const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
+    if (hasBasicRectilinearPose(left_pose) and hasBasicRectilinearPose(right_pose)) {
+        return exactDistSphereDistance(left_pose, right_pose, pair_match, cp);
+    }
+
     const left = panoramaVectorForControlPoint(poses, pair_match, cp.left_image, cp.left_x, cp.left_y, override_image_index, override_pose);
     const right = panoramaVectorForControlPoint(poses, pair_match, cp.right_image, cp.right_x, cp.right_y, override_image_index, override_pose);
     const cross = cross3(left, right);
@@ -1215,6 +1229,111 @@ fn objectiveDistanceResidualWithPoseOverride(
     return scale * residual;
 }
 
+fn hasBasicRectilinearPose(pose: ImagePose) bool {
+    return !hasTranslation(pose) and
+        @abs(pose.radial_a) <= 1e-12 and
+        @abs(pose.radial_b) <= 1e-12 and
+        @abs(pose.radial_c) <= 1e-12 and
+        @abs(pose.center_shift_x) <= 1e-12 and
+        @abs(pose.center_shift_y) <= 1e-12;
+}
+
+fn exactDistSphereResidualVector(left_pose: ImagePose, right_pose: ImagePose, pair_match: match_mod.PairMatches, cp: match_mod.ControlPoint) Vec2d {
+    const left = imageToEquirectDegrees(left_pose, @as(f64, cp.left_x), @as(f64, cp.left_y), pair_match.image_width, pair_match.image_height);
+    const right = imageToEquirectDegrees(right_pose, @as(f64, cp.right_x), @as(f64, cp.right_y), pair_match.image_width, pair_match.image_height);
+    const lon_left = left.x * degrees_to_radians;
+    const lon_right = right.x * degrees_to_radians;
+    const lat_left = left.y * degrees_to_radians + std.math.pi * 0.5;
+    const lat_right = right.y * degrees_to_radians + std.math.pi * 0.5;
+    var delta_lon = lon_left - lon_right;
+    if (delta_lon < -std.math.pi) delta_lon += 2.0 * std.math.pi;
+    if (delta_lon > std.math.pi) delta_lon -= 2.0 * std.math.pi;
+    const scale = panoRadiansToPixels(pair_match.image_width, left_pose.base_hfov_degrees);
+    return .{
+        .x = (delta_lon * @sin(0.5 * (lat_left + lat_right))) * scale,
+        .y = (lat_left - lat_right) * scale,
+    };
+}
+
+fn exactDistSphereDistance(left_pose: ImagePose, right_pose: ImagePose, pair_match: match_mod.PairMatches, cp: match_mod.ControlPoint) f64 {
+    const left = imageToEquirectDegrees(left_pose, @as(f64, cp.left_x), @as(f64, cp.left_y), pair_match.image_width, pair_match.image_height);
+    const right = imageToEquirectDegrees(right_pose, @as(f64, cp.right_x), @as(f64, cp.right_y), pair_match.image_width, pair_match.image_height);
+    const left_lon = left.x * degrees_to_radians;
+    const right_lon = right.x * degrees_to_radians;
+    const left_lat = left.y * degrees_to_radians + std.math.pi * 0.5;
+    const right_lat = right.y * degrees_to_radians + std.math.pi * 0.5;
+    const left_vec = latLonToVec3(left_lon, left_lat);
+    const right_vec = latLonToVec3(right_lon, right_lat);
+    const cross = cross3(left_vec, right_vec);
+    var dangle = std.math.asin(std.math.clamp(length3(cross), 0.0, 1.0));
+    if (dot3(left_vec, right_vec) < 0.0) dangle = std.math.pi - dangle;
+    return dangle * panoRadiansToPixels(pair_match.image_width, left_pose.base_hfov_degrees);
+}
+
+fn latLonToVec3(lon: f64, lat_zenith: f64) Vec3 {
+    return .{
+        .x = @sin(lon) * @sin(lat_zenith),
+        .y = @cos(lat_zenith),
+        .z = -@cos(lon) * @sin(lat_zenith),
+    };
+}
+
+fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
+    const center = distortionCenter(pose, width, height);
+    const pano_distance = 180.0 / std.math.pi;
+    const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const scale = pano_distance / image_focal;
+
+    var p = Point2{
+        .x = (x - center.x) * scale,
+        .y = (y - center.y) * scale,
+    };
+    p = sphereTpRectPoint(p, pano_distance);
+    p = perspSpherePoint(p, setMatrix(pose.pitch, 0.0, pose.roll, true), pano_distance);
+    p = erectSphereTpPoint(p, pano_distance);
+    return rotateErectPoint(p, pano_distance * std.math.pi, pose.yaw / degrees_to_radians);
+}
+
+fn sphereTpRectPoint(p: Point2, distance: f64) Point2 {
+    const r = @sqrt(p.x * p.x + p.y * p.y) / distance;
+    const theta = if (r == 0.0) 1.0 else std.math.atan(r) / r;
+    return .{ .x = theta * p.x, .y = theta * p.y };
+}
+
+fn perspSpherePoint(p: Point2, m: Matrix3, distance: f64) Point2 {
+    const r = @sqrt(p.x * p.x + p.y * p.y);
+    const theta = r / distance;
+    const s = if (r == 0.0) 0.0 else @sin(theta) / r;
+    var v = Vec3{
+        .x = s * p.x,
+        .y = s * p.y,
+        .z = @cos(theta),
+    };
+    v = matrixInvMul(m, v);
+    const r2 = @sqrt(v.x * v.x + v.y * v.y);
+    const scale = if (r2 == 0.0) 0.0 else distance * std.math.atan2(r2, v.z) / r2;
+    return .{ .x = scale * v.x, .y = scale * v.y };
+}
+
+fn erectSphereTpPoint(p: Point2, distance: f64) Point2 {
+    const r = @sqrt(p.x * p.x + p.y * p.y);
+    const theta = r / distance;
+    const s = if (theta == 0.0) 1.0 / distance else @sin(theta) / r;
+    const v1 = s * p.x;
+    const v0 = @cos(theta);
+    return .{
+        .x = distance * std.math.atan2(v1, v0),
+        .y = distance * std.math.atan((s * p.y) / @sqrt(v0 * v0 + v1 * v1)),
+    };
+}
+
+fn rotateErectPoint(p: Point2, half_turn: f64, turn: f64) Point2 {
+    var x = p.x + turn;
+    while (x < -half_turn) x += 2.0 * half_turn;
+    while (x > half_turn) x -= 2.0 * half_turn;
+    return .{ .x = x, .y = p.y };
+}
+
 fn currentAverageHfovDegrees(poses: []const ImagePose) f64 {
     return currentAverageHfovDegreesWithOverride(poses, null, .{});
 }
@@ -1241,43 +1360,105 @@ fn huberResidualComponent(value: f64, sigma: f64) f64 {
     return @sqrt(2.0 * sigma * magnitude - sigma * sigma);
 }
 
-fn solveSpaceEpsilon(field: PoseField) f64 {
-    return switch (field) {
-        .yaw, .pitch, .roll => 1e-5,
-        .hfov_delta => 1e-5,
-        .trans_x, .trans_y => 1e-3,
-        .trans_z => 1e-5,
-        .translation_plane_yaw, .translation_plane_pitch => 1e-5,
-        .radial_a, .radial_b, .radial_c => 1e-3,
-        .center_shift_x, .center_shift_y => 1e-3,
-    };
+fn solveSpaceEpsilon(base_value: f64) f64 {
+    const scaled = @abs(solve_space_relative_epsilon * base_value);
+    return if (scaled > 0.0) scaled else solve_space_relative_epsilon;
 }
 
-fn poseSpaceDelta(field: PoseField, solve_delta: f64) f64 {
-    return switch (field) {
-        .radial_a, .radial_b, .radial_c => solve_delta / radial_solve_space_scale,
-        else => solve_delta,
-    };
+fn solveSpaceValue(pose: ImagePose, field: PoseField) f64 {
+    switch (field) {
+        .yaw => return pose.yaw / degrees_to_radians,
+        .pitch => return pose.pitch / degrees_to_radians,
+        .roll => return pose.roll / degrees_to_radians,
+        .hfov_delta => return effectiveHfovDegrees(pose),
+        .trans_x => return pose.trans_x,
+        .trans_y => return pose.trans_y,
+        .trans_z => return pose.trans_z,
+        .translation_plane_yaw => return pose.translation_plane_yaw / degrees_to_radians,
+        .translation_plane_pitch => return pose.translation_plane_pitch / degrees_to_radians,
+        .radial_a => return pose.radial_a * radial_solve_space_scale,
+        .radial_b => return pose.radial_b * radial_solve_space_scale,
+        .radial_c => return pose.radial_c * radial_solve_space_scale,
+        .center_shift_x => return pose.center_shift_x,
+        .center_shift_y => return pose.center_shift_y,
+    }
+}
+
+fn fillSolveVector(layout: []const SolveLayout, poses: []const ImagePose, solve_x: []f64) void {
+    for (1..poses.len) |image_index| {
+        const pose = poses[image_index];
+        if (layout[image_index].yaw_index) |idx| solve_x[idx] = solveSpaceValue(pose, .yaw);
+        if (layout[image_index].pitch_index) |idx| solve_x[idx] = solveSpaceValue(pose, .pitch);
+        if (layout[image_index].roll_index) |idx| solve_x[idx] = solveSpaceValue(pose, .roll);
+        if (layout[image_index].hfov_index) |idx| solve_x[idx] = solveSpaceValue(pose, .hfov_delta);
+        if (layout[image_index].trans_x_index) |idx| solve_x[idx] = solveSpaceValue(pose, .trans_x);
+        if (layout[image_index].trans_y_index) |idx| solve_x[idx] = solveSpaceValue(pose, .trans_y);
+        if (layout[image_index].trans_z_index) |idx| solve_x[idx] = solveSpaceValue(pose, .trans_z);
+        if (layout[image_index].translation_plane_yaw_index) |idx| solve_x[idx] = solveSpaceValue(pose, .translation_plane_yaw);
+        if (layout[image_index].translation_plane_pitch_index) |idx| solve_x[idx] = solveSpaceValue(pose, .translation_plane_pitch);
+        if (layout[image_index].radial_a_index) |idx| solve_x[idx] = solveSpaceValue(pose, .radial_a);
+        if (layout[image_index].radial_b_index) |idx| solve_x[idx] = solveSpaceValue(pose, .radial_b);
+        if (layout[image_index].radial_c_index) |idx| solve_x[idx] = solveSpaceValue(pose, .radial_c);
+        if (layout[image_index].center_shift_x_index) |idx| solve_x[idx] = solveSpaceValue(pose, .center_shift_x);
+        if (layout[image_index].center_shift_y_index) |idx| solve_x[idx] = solveSpaceValue(pose, .center_shift_y);
+    }
+}
+
+fn applySolveVector(layout: []const SolveLayout, poses: []ImagePose, solve_x: []const f64) void {
+    for (1..poses.len) |image_index| {
+        if (layout[image_index].yaw_index) |idx| setSolveSpaceValue(&poses[image_index], .yaw, solve_x[idx]);
+        if (layout[image_index].pitch_index) |idx| setSolveSpaceValue(&poses[image_index], .pitch, solve_x[idx]);
+        if (layout[image_index].roll_index) |idx| setSolveSpaceValue(&poses[image_index], .roll, solve_x[idx]);
+        if (layout[image_index].hfov_index) |idx| setSolveSpaceValue(&poses[image_index], .hfov_delta, solve_x[idx]);
+        if (layout[image_index].trans_x_index) |idx| setSolveSpaceValue(&poses[image_index], .trans_x, solve_x[idx]);
+        if (layout[image_index].trans_y_index) |idx| setSolveSpaceValue(&poses[image_index], .trans_y, solve_x[idx]);
+        if (layout[image_index].trans_z_index) |idx| setSolveSpaceValue(&poses[image_index], .trans_z, solve_x[idx]);
+        if (layout[image_index].translation_plane_yaw_index) |idx| setSolveSpaceValue(&poses[image_index], .translation_plane_yaw, solve_x[idx]);
+        if (layout[image_index].translation_plane_pitch_index) |idx| setSolveSpaceValue(&poses[image_index], .translation_plane_pitch, solve_x[idx]);
+        if (layout[image_index].radial_a_index) |idx| setSolveSpaceValue(&poses[image_index], .radial_a, solve_x[idx]);
+        if (layout[image_index].radial_b_index) |idx| setSolveSpaceValue(&poses[image_index], .radial_b, solve_x[idx]);
+        if (layout[image_index].radial_c_index) |idx| setSolveSpaceValue(&poses[image_index], .radial_c, solve_x[idx]);
+        if (layout[image_index].center_shift_x_index) |idx| setSolveSpaceValue(&poses[image_index], .center_shift_x, solve_x[idx]);
+        if (layout[image_index].center_shift_y_index) |idx| setSolveSpaceValue(&poses[image_index], .center_shift_y, solve_x[idx]);
+    }
+}
+
+fn setSolveSpaceValue(pose: *ImagePose, field: PoseField, solve_value: f64) void {
+    switch (field) {
+        .yaw => pose.yaw = normalizeAngleRadians(solve_value * degrees_to_radians),
+        .pitch => pose.pitch = normalizeAngleRadians(solve_value * degrees_to_radians),
+        .roll => pose.roll = normalizeAngleRadians(solve_value * degrees_to_radians),
+        .hfov_delta => pose.hfov_delta = @abs(solve_value) - pose.base_hfov_degrees,
+        .trans_x => pose.trans_x = solve_value,
+        .trans_y => pose.trans_y = solve_value,
+        .trans_z => pose.trans_z = solve_value,
+        .translation_plane_yaw => {
+            pose.translation_plane_yaw = solve_value * degrees_to_radians;
+            const limit = 80.0 * degrees_to_radians;
+            while (pose.translation_plane_yaw > pose.yaw + limit) pose.translation_plane_yaw -= std.math.pi;
+            while (pose.translation_plane_yaw < pose.yaw - limit) pose.translation_plane_yaw += std.math.pi;
+        },
+        .translation_plane_pitch => {
+            pose.translation_plane_pitch = solve_value * degrees_to_radians;
+            const limit = 80.0 * degrees_to_radians;
+            while (pose.translation_plane_pitch > pose.pitch + limit) pose.translation_plane_pitch -= std.math.pi;
+            while (pose.translation_plane_pitch < pose.pitch - limit) pose.translation_plane_pitch += std.math.pi;
+        },
+        .radial_a => pose.radial_a = solve_value / radial_solve_space_scale,
+        .radial_b => pose.radial_b = solve_value / radial_solve_space_scale,
+        .radial_c => pose.radial_c = solve_value / radial_solve_space_scale,
+        .center_shift_x => pose.center_shift_x = solve_value,
+        .center_shift_y => pose.center_shift_y = solve_value,
+    }
 }
 
 fn applySolveSpaceDelta(pose: *ImagePose, field: PoseField, solve_delta: f64) void {
-    const delta = poseSpaceDelta(field, solve_delta);
-    switch (field) {
-        .yaw => pose.yaw += delta,
-        .pitch => pose.pitch += delta,
-        .roll => pose.roll += delta,
-        .hfov_delta => pose.hfov_delta += delta,
-        .trans_x => pose.trans_x += delta,
-        .trans_y => pose.trans_y += delta,
-        .trans_z => pose.trans_z += delta,
-        .translation_plane_yaw => pose.translation_plane_yaw += delta,
-        .translation_plane_pitch => pose.translation_plane_pitch += delta,
-        .radial_a => pose.radial_a += delta,
-        .radial_b => pose.radial_b += delta,
-        .radial_c => pose.radial_c += delta,
-        .center_shift_x => pose.center_shift_x += delta,
-        .center_shift_y => pose.center_shift_y += delta,
-    }
+    const current = solveSpaceValue(pose.*, field);
+    setSolveSpaceValue(pose, field, current + solve_delta);
+}
+
+fn normalizeAngleRadians(angle: f64) f64 {
+    return std.math.atan2(@sin(angle), @cos(angle));
 }
 
 pub fn transformPoint(pose: ImagePose, x: anytype, y: anytype, width: u32, height: u32) Point2 {
@@ -1673,15 +1854,9 @@ fn suppressUnstableLensTerms(iteration: usize, layout: []const SolveLayout, delt
 
 fn clampSolveDelta(layout: []const SolveLayout, delta: []f64) void {
     for (layout[1..]) |entry| {
-        if (entry.yaw_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.02, 0.02);
-        if (entry.pitch_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.02, 0.02);
-        if (entry.roll_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.05, 0.05);
-        if (entry.hfov_index) |idx| delta[idx] = std.math.clamp(delta[idx], -1.0, 1.0);
         if (entry.trans_x_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.02, 0.02);
         if (entry.trans_y_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.02, 0.02);
         if (entry.trans_z_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.01, 0.01);
-        if (entry.translation_plane_yaw_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.02, 0.02);
-        if (entry.translation_plane_pitch_index) |idx| delta[idx] = std.math.clamp(delta[idx], -0.02, 0.02);
         if (entry.radial_a_index) |idx| delta[idx] = std.math.clamp(delta[idx], -4.0, 4.0);
         if (entry.radial_b_index) |idx| delta[idx] = std.math.clamp(delta[idx], -4.0, 4.0);
         if (entry.radial_c_index) |idx| delta[idx] = std.math.clamp(delta[idx], -4.0, 4.0);
@@ -1747,7 +1922,6 @@ fn accumulateAbsolutePriors(normal: []f64, variable_count: usize, layout: []cons
 fn addEntryAbsolutePriors(normal: []f64, variable_count: usize, entry: SolveLayout) void {
     if (entry.trans_x_index) |idx| addDiagonalPrior(normal, variable_count, idx, 4.0);
     if (entry.trans_y_index) |idx| addDiagonalPrior(normal, variable_count, idx, 4.0);
-    if (entry.hfov_index) |idx| addDiagonalPrior(normal, variable_count, idx, 1e-3);
     if (entry.trans_z_index) |idx| addDiagonalPrior(normal, variable_count, idx, 25.0);
     if (entry.translation_plane_yaw_index) |idx| addDiagonalPrior(normal, variable_count, idx, 10.0);
     if (entry.translation_plane_pitch_index) |idx| addDiagonalPrior(normal, variable_count, idx, 10.0);
@@ -1762,10 +1936,9 @@ fn accumulateUpdatePriors(normal: []f64, rhs: []f64, variable_count: usize, layo
     for (layout, poses) |entry, pose| {
         addEntryUpdatePrior(normal, rhs, variable_count, entry.trans_x_index, pose.trans_x, 4.0);
         addEntryUpdatePrior(normal, rhs, variable_count, entry.trans_y_index, pose.trans_y, 4.0);
-        addEntryUpdatePrior(normal, rhs, variable_count, entry.hfov_index, pose.hfov_delta, 1e-3);
         addEntryUpdatePrior(normal, rhs, variable_count, entry.trans_z_index, pose.trans_z, 25.0);
-        addEntryUpdatePrior(normal, rhs, variable_count, entry.translation_plane_yaw_index, pose.translation_plane_yaw, 10.0);
-        addEntryUpdatePrior(normal, rhs, variable_count, entry.translation_plane_pitch_index, pose.translation_plane_pitch, 10.0);
+        addEntryUpdatePrior(normal, rhs, variable_count, entry.translation_plane_yaw_index, solveSpaceValue(pose, .translation_plane_yaw), 10.0);
+        addEntryUpdatePrior(normal, rhs, variable_count, entry.translation_plane_pitch_index, solveSpaceValue(pose, .translation_plane_pitch), 10.0);
         addEntryUpdatePrior(normal, rhs, variable_count, entry.radial_a_index, pose.radial_a * radial_solve_space_scale, 1e-2);
         addEntryUpdatePrior(normal, rhs, variable_count, entry.radial_b_index, pose.radial_b * radial_solve_space_scale, 1e-2);
         addEntryUpdatePrior(normal, rhs, variable_count, entry.radial_c_index, pose.radial_c * radial_solve_space_scale, 1e-2);
