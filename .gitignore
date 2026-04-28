@@ -38,6 +38,10 @@ core.*
 verify*.pto
 upstream_verify*.pto
 debug-out.pto
+port_mdi_t100.pto
+upstream_mdi_t100.pto
+portcheck_*.tif
 alignedtest_*.tif
 croppedtest_*.tif
 verifyalign*.tif
+tmp_e2e/

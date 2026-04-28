@@ -402,6 +402,10 @@ fn evaluateNcc(
     right_y: u32,
     radius: u32,
 ) f32 {
+    if (!isPatchInside(left, left_x, left_y, radius) or !isPatchInside(right, right_x, right_y, radius)) {
+        return -1;
+    }
+
     const x0_left = left_x - radius;
     const y0_left = left_y - radius;
     const x0_right = right_x - radius;

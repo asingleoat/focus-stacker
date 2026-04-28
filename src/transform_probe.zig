@@ -5,8 +5,8 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(std.heap.page_allocator);
     defer std.process.argsFree(std.heap.page_allocator, args);
 
-    if (args.len != 14) {
-        std.debug.print("usage: transform_probe width height hfov yaw_deg pitch_deg roll_deg trx try trz x y tpy_deg tpp_deg\n", .{});
+    if (args.len != 14 and args.len != 16) {
+        std.debug.print("usage: transform_probe width height hfov yaw_deg pitch_deg roll_deg trx try trz x y tpy_deg tpp_deg [d e]\n", .{});
         std.process.exit(1);
     }
 
@@ -23,6 +23,8 @@ pub fn main() !void {
     const y = try std.fmt.parseFloat(f64, args[11]);
     const tpy_deg = try std.fmt.parseFloat(f64, args[12]);
     const tpp_deg = try std.fmt.parseFloat(f64, args[13]);
+    const d = if (args.len >= 16) try std.fmt.parseFloat(f64, args[14]) else 0.0;
+    const e = if (args.len >= 16) try std.fmt.parseFloat(f64, args[15]) else 0.0;
 
     const pose = optimize.ImagePose{
         .yaw = yaw_deg * std.math.pi / 180.0,
@@ -33,6 +35,8 @@ pub fn main() !void {
         .trans_z = trz,
         .translation_plane_yaw = tpy_deg * std.math.pi / 180.0,
         .translation_plane_pitch = tpp_deg * std.math.pi / 180.0,
+        .center_shift_x = d,
+        .center_shift_y = e,
         .base_hfov_degrees = base_hfov,
     };
 
