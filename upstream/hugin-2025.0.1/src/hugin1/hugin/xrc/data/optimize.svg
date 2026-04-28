@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="22" height="22" version="1.0" xmlns="http://www.w3.org/2000/svg">
+  <g fill-rule="evenodd">
+    <g transform="matrix(1 0 0 1.0936 1 .90638)" opacity=".5">
+      <rect y="1" width="20" height="16" fill="#80b3ff" opacity="1"/>
+      <path d="m-9.5e-8 10.5c3 2.9565 17-3.0435 20-0.04348l-2e-6 7h-20v-6.9565z" fill="#165016"/>
+    </g>
+    <rect y="4" width="10" height="7.5" fill="#80b3ff"/>
+    <path d="m12 10.5h10v7.5h-10v-7.5z" fill="#165016"/>
+    <path d="m9 6.9142v3.5858h-3.5858l1.0757-1.0757-2.1515-2.1515 1.4343-1.4343 2.1515 2.1515 1.0757-1.0757z" fill="#fff"/>
+    <path d="m13 15.086v-3.5858h3.5858l-1.0757 1.0757 2.1515 2.1515-1.4343 1.4343-2.1515-2.1515-1.0757 1.0757z" fill="#fff"/>
+  </g>
+</svg>

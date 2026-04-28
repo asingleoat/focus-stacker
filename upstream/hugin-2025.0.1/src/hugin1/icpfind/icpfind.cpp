@@ -1,0 +1,160 @@
+// -*- c-basic-offset: 4 -*-
+
+/** @file icpfind.cpp
+ *
+ *  @brief program to heuristic detection of control points in panoramas
+ *  
+ *  @author Thomas Modes
+ *
+ */
+
+/*  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public
+ *  License as published by the Free Software Foundation; either
+ *  version 2 of the License, or (at your option) any later version.
+ *
+ *  This software is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ *  General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public
+ *  License along with this software. If not, see
+ *  <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "icpfind.h"
+
+#include <fstream>
+#include <sstream>
+
+#include "AutoCtrlPointCreator.h"
+#include <panodata/Panorama.h>
+#include <base_wx/platform.h>
+#include "hugin/config_defaults.h"
+#if defined __WXGTK__
+#include "base_wx/wxPlatform.h"
+#endif
+
+extern "C"
+{
+    #include <pano13/filter.h>  // for PT_setProgressFcn, PT_setInfoDlgFcn
+}
+
+void iCPApp::ReadDetectorConfig()
+{
+#if defined __WXGTK__
+    CheckConfigFilename();
+#endif
+    wxConfig config("hugin");
+    //read cp detectors settings
+    CPDetectorConfig cpdetector_config;
+    cpdetector_config.Read(&config);
+    //write current cp detectors settings
+    cpdetector_config.Write(&config);
+    config.Flush();
+
+    if(m_setting<0 || m_setting>=cpdetector_config.settings.size())
+    {
+        m_cpsetting=cpdetector_config.settings[cpdetector_config.GetDefaultGenerator()];
+    }
+    else
+    {
+        m_cpsetting=cpdetector_config.settings[m_setting];
+    };
+
+    if(m_matches==-1)
+    {
+        m_matches=config.Read("/Assistant/nControlPoints", HUGIN_ASS_NCONTROLPOINTS);
+    };
+};
+
+void iCPApp::OnInitCmdLine(wxCmdLineParser &parser)
+{
+    parser.AddSwitch("h","help","shows this help message");
+    parser.AddOption("s","setting","used setting",wxCMD_LINE_VAL_NUMBER);
+    parser.AddOption("m","matches","number of matches",wxCMD_LINE_VAL_NUMBER);
+    parser.AddOption("o","output","output project",wxCMD_LINE_VAL_STRING,wxCMD_LINE_OPTION_MANDATORY);
+    parser.AddParam("input.pto",wxCMD_LINE_VAL_STRING,wxCMD_LINE_OPTION_MANDATORY);
+};
+
+bool iCPApp::OnCmdLineParsed(wxCmdLineParser &parser)
+{
+    // we don't call the parents method of OnCmdLineParse, this will pull in other options we don't want
+    if(!parser.Found("s",&m_setting))
+    {
+        m_setting=-1;
+    };
+    if(!parser.Found("m",&m_matches))
+    {
+        m_matches=-1;
+    };
+    parser.Found("o",&m_output);
+    m_input=parser.GetParam();
+    return true;
+};
+
+// dummy panotools progress functions
+static int ptProgress( int command, char* argument )
+{
+	return 1;
+}
+static int ptinfoDlg( int command, char* argument )
+{
+	return 1;
+}
+
+int iCPApp::OnRun()
+{
+    ReadDetectorConfig();
+    //read input project
+    HuginBase::PanoramaMemento newPano;
+    int ptoVersion = 0;
+    wxFileName file(m_input);
+    file.MakeAbsolute();
+    std::ifstream in((const char *)file.GetFullPath().mb_str(HUGIN_CONV_FILENAME));
+    if(!in.good())
+    {
+        std::cerr << "could not open script : " << file.GetFullPath().char_str() << std::endl;
+        return 1;
+    }
+    if(!newPano.loadPTScript(in, ptoVersion,(std::string)file.GetPath(wxPATH_GET_VOLUME | wxPATH_GET_SEPARATOR).mb_str(HUGIN_CONV_FILENAME)))
+    {
+        std::cerr << "could not parse script: " << file.GetFullPath().char_str() << std::endl;
+        return 1;
+    };
+    pano.setMemento(newPano);
+ 
+    //match images
+    AutoCtrlPointCreator matcher;
+    HuginBase::UIntSet imgs;
+    fill_set(imgs,0, pano.getNrOfImages()-1);
+    //deactivate libpano messages
+    PT_setProgressFcn(ptProgress);
+    PT_setInfoDlgFcn(ptinfoDlg);
+    HuginBase::CPVector cps = matcher.automatch(m_cpsetting,pano,imgs,m_matches,NULL);
+    PT_setProgressFcn(NULL);
+    PT_setInfoDlgFcn(NULL);
+    if(cps.empty())
+    {
+        return 1;
+    };
+    for(unsigned i=0;i<cps.size();i++)
+    {
+        pano.addCtrlPoint(cps[i]);
+    };
+
+    //write output
+    wxFileName outputFile(m_output);
+    outputFile.MakeAbsolute();
+    const std::string output(outputFile.GetFullPath().mb_str(HUGIN_CONV_FILENAME));
+    if (pano.WritePTOFile(output, hugin_utils::getPathPrefix(output)))
+    {
+        std::cout << std::endl << "Written output to " << output << std::endl;
+    };
+
+    return 0;
+};
+
+IMPLEMENT_APP_CONSOLE(iCPApp)

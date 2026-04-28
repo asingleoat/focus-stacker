@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="22" height="22" version="1.0" xmlns="http://www.w3.org/2000/svg">
+  <g opacity=".2">
+    <g>
+      <rect y="14" width="10" height="8" rx="2" ry="2" opacity="1"/>
+      <rect x="12" y="14" width="10" height="8" rx="2" ry="2" opacity="1"/>
+      <rect x="12" width="10" height="8" rx="2" ry="2" opacity="1"/>
+      <rect width="10" height="8" rx="2" ry="2" opacity="1"/>
+      <path d="m3 2v1.5 15 1.5h1.5 13 1.5v-1.5-15-1.5h-1.5-13-1.5zm3 3h10v12h-10v-12z" fill-rule="evenodd" opacity="1"/>
+    </g>
+    <path d="m5 18 12-14" fill="none" stroke="#000" stroke-width="3"/>
+    <path d="m17 18-12-14" fill="none" stroke="#000" stroke-width="3"/>
+  </g>
+  <g>
+    <g fill="none" stroke="#f57900">
+      <path d="m5 18 12-14"/>
+      <path d="m17 18-12-14"/>
+      <g stroke-width="1px">
+        <path d="m17 18.5h-11"/>
+        <path d="m4 3.5h14"/>
+        <path d="m17.5 5v11"/>
+        <path d="m4.5 5v11"/>
+      </g>
+    </g>
+    <g>
+      <rect x="1" y="15" width="8" height="6" rx="1" ry="1" fill="#fff"/>
+      <rect x="2" y="16" width="6" height="4" fill="#729fcf"/>
+      <rect x="2" y="17" width="6" height="3" fill="#4e9a06"/>
+      <rect x="13" y="15" width="8" height="6" rx="1" ry="1" fill="#fff"/>
+      <rect x="14" y="16" width="6" height="4" fill="#729fcf"/>
+      <rect x="14" y="17" width="6" height="3" fill="#4e9a06"/>
+      <rect x="13" y="1" width="8" height="6" rx="1" ry="1" fill="#fff"/>
+      <rect x="14" y="2" width="6" height="4" fill="#729fcf"/>
+      <rect x="14" y="5" width="6" height="1" fill="#4e9a06"/>
+      <rect x="1" y="1" width="8" height="6" rx="1" ry="1" fill="#fff"/>
+      <rect x="2" y="2" width="6" height="4" fill="#729fcf"/>
+      <rect x="2" y="5" width="6" height="1" fill="#4e9a06"/>
+    </g>
+  </g>
+</svg>

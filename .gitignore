@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+zig-out/
+.zig-cache/
+.zig-global-cache/
+*.o
+*.a
+*.so
+*.out
+
+# Nix
+result
+result-*
+.direnv/
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Local config (may contain IPs)
+.env
+pi.conf.local
+
+# Logs
+*.log
+
+# Core dumps
+core
+core.*
+
+# Local agent/runtime state
+.codex/
+
+# Generated alignment outputs
+verify*.pto
+upstream_verify*.pto
+debug-out.pto
+alignedtest_*.tif
+croppedtest_*.tif
+verifyalign*.tif

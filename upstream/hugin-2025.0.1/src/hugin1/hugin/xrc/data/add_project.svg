@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="22" height="22" version="1.0" xmlns="http://www.w3.org/2000/svg">
+  <rect y="2" width="22" height="17.501" fill="#80b3ff" fill-opacity=".99608" fill-rule="evenodd"/>
+  <path d="m-1.045e-7 13.5c3.3 2.7625 18.7-2.8437 22-0.040627l-2e-6 6.5406h-22v-6.5z" fill="#165016" fill-rule="evenodd"/>
+  <rect x="4" y="9" width="0" height="0" fill="#80b3ff" fill-opacity=".99608"/>
+  <path d="m9 4.5v4.5h-4.5v4h4.5v4.5h4v-4.5h4.5v-4h-4.5v-4.5h-4z" fill="#fff"/>
+</svg>

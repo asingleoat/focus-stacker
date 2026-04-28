@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="22" height="22" version="1.0" xmlns="http://www.w3.org/2000/svg">
+  <g fill-rule="evenodd">
+    <g transform="matrix(.9 0 0 1 3.1 2)" opacity=".5">
+      <rect transform="matrix(.5 0 0 .53333 -1.05e-7 1.9333)" x="2" y="2" width="40" height="30" fill="#80b3ff" opacity="1"/>
+      <path transform="matrix(.33333 0 0 .34783 .33333 -.47826)" d="m2 36c9 8.5 51-8.75 60-0.12499l-7e-6 20.125h-60v-20z" fill="#165016"/>
+    </g>
+    <g transform="matrix(.9 0 0 1 -.9 -2)">
+      <rect transform="matrix(.5 0 0 .53333 -1.05e-7 1.9333)" x="2" y="2" width="40" height="30" fill="#80b3ff"/>
+      <path transform="matrix(.33333 0 0 .34783 .33333 -.47826)" d="m2 36c9 8.5 51-8.75 60-0.12499l-7e-6 20.125h-60v-20z" fill="#165016"/>
+    </g>
+    <path transform="translate(-3 -2)" d="m23 16v5h-5l1.5-1.5-3-3 2-2 3 3 1.5-1.5z" fill="#fff"/>
+  </g>
+</svg>

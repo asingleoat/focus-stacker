@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="22" height="22" version="1.0" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <defs>
+    <linearGradient id="linearGradient2394" x1="3" x2="20" y1="3" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff" offset="0"/>
+      <stop stop-color="#ccc" offset="1"/>
+    </linearGradient>
+    <linearGradient id="linearGradient3287" x1="3" x2="20" y1="3" y2="20" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#eef5ff" offset="0"/>
+      <stop stop-color="#5b9dff" stop-opacity=".94118" offset="1"/>
+    </linearGradient>
+  </defs>
+  <g>
+    <path d="m2 2h12 7v19h-17l-2-2v-17z" fill="url(#linearGradient2394)"/>
+    <g fill="#808080">
+      <path d="m22 22v-21h-21v18l3 3h18zm-1-1h-16.625l-2.375-2.375v-16.625h19v19z"/>
+      <path d="m4 2v11h15v-11h-1v10h-13v-10h-1z" fill-rule="evenodd"/>
+      <path d="m5 14v7h1v-6h10v6h1v-7h-1-10-1z"/>
+      <rect x="8" y="16" width="3" height="4"/>
+    </g>
+    <rect x="5" y="2" width="13" height="3" fill="#dc8171"/>
+    <path d="m4 2h-2v17l2 2h1v-7h12v7h4v-19h-2v11h-15v-11z" fill="url(#linearGradient3287)" fill-rule="evenodd"/>
+  </g>
+</svg>

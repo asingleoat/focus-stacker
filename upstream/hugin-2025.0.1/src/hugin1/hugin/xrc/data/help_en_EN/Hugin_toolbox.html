@@ -1,0 +1,67 @@
+
+<!DOCTYPE html>
+<html class="client-nojs" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8"/>
+<title>Hugin toolbox - PanoTools.org Wiki</title>
+
+
+
+
+<style media="screen" type="text/css" title="Screen style sheet"> @import url(manual.css); </style>
+
+<meta name="generator" content="MediaWiki 1.35.3"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+
+
+
+
+<!--[if lt IE 9]><![endif]-->
+</head>
+<body class="mediawiki ltr sitedir-ltr mw-hide-empty-elt ns-0 ns-subject page-Hugin_toolbox rootpage-Hugin_toolbox skin-vector action-view skin-vector-legacy">
+
+
+<div id="content" class="mw-body" role="main">
+	<a id="top"></a>
+	
+	
+	<h1 id="firstHeading" class="firstHeading" lang="en">Hugin toolbox</h1>
+	<div id="bodyContent" class="mw-body-content">
+		<div id="siteSub" class="noprint">From PanoTools.org Wiki</div>
+		
+		
+		
+		
+		
+		
+		<div id="mw-content-text" lang="en" dir="ltr" class="mw-content-ltr"><div class="mw-parser-output"><p><b>Hugin_toolbox</b> is a small helper program which allows to use the Hugin tools for several smaller task instead of calling the complete Hugin.
+</p>
+<h2><a name="Enfuse_GUI"><span class="mw-headline">Enfuse GUI</span></a></h2>
+<p>The first part is a GUI for <a href="Enfuse.html" title="Enfuse">enfuse</a>.
+</p><p>In the upper half you can load image files. Only the checked image files are used for the blending. You can also create brighter or darker versions of images for exposure fusion, which can be helpful for creating an image with a better brightness distribution.
+</p><p>In the lower half you can change the parameters of enfuse. See the enfuse manual for a more detailed description of these parameters. You can save and load a parameter set with Load/Save. The reset button resets the parameters back to default values.
+</p><p>The preview buttons does process the preview image in full resolution. To save the output use the output button (it is not necessary to process the preview before).
+</p>
+<h2><a name="Perspective_GUI"><span class="mw-headline">Perspective GUI</span></a></h2>
+<p>The second part is for do perspective correction on images (see e.g. <a rel="nofollow" class="external text" href="https://hugin.sourceforge.io/tutorials/perspective/en.shtml">Hugin tutorial on perspective correction</a>)
+</p><p>After loading the image the focal length and crop factor is read from the EXIF data. The rotation of the input image can be selected by the choice box.
+</p><p>There are 2 mode for correction
+</p>
+<ul><li><b>Rectangle</b>: Adjust the rectangle to an area which should be rectangular in the projected image.</li>
+<li><b>Lines</b>: Create a new line by dragging with left mouse button on a free space. Existing lines or line end points can be moved by dragging with left mouse button. A line can be deleted by clicking with the right mouse button. Lines can be created automatically with <b>find lines</b> button.</li></ul>
+<p>The crop of the output can be 
+</p>
+<ul><li><b>outside</b>: In this case the output contains (nearly) the complete input images, but it contains also masked areas without image information.</li>
+<li><b>inside</b>: The crop is so selected that no unused areas are in the output.</li></ul>
+<p>The output can be saved as TIF, JPEG or PNG image. For further tuning you can also save a pto project file and open this file then in <a href="Hugin.html" title="Hugin">Hugin</a>.
+</p>
+
+<!--
+Transclusion expansion time report (%,ms,calls,template)
+100.00%    0.000      1 -total
+-->
+
+
+</div></div><div class="printfooter">Retrieved from "<a dir="ltr" href="https://wiki.panotools.org/index.php?title=Hugin_toolbox&amp;oldid=17462">https://wiki.panotools.org/index.php?title=Hugin_toolbox&amp;oldid=17462</a>"</div>
+		</div></div></body></html>
