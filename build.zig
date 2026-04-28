@@ -37,7 +37,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     configureImageDeps(parity_probe.root_module);
-    b.installArtifact(parity_probe);
 
     const upstream_probe = b.addExecutable(.{
         .name = "upstream_probe",
@@ -48,7 +47,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     configurePano13Deps(b, upstream_probe.root_module);
-    b.installArtifact(upstream_probe);
 
     const match_probe = b.addExecutable(.{
         .name = "match_probe",
@@ -62,10 +60,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     configureImageDeps(match_probe.root_module);
-    b.installArtifact(match_probe);
 
     const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
@@ -74,7 +70,6 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const run_parity_probe = b.addRunArtifact(parity_probe);
-    run_parity_probe.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_parity_probe.addArgs(args);
     }
@@ -82,7 +77,6 @@ pub fn build(b: *std.Build) void {
     parity_step.dependOn(&run_parity_probe.step);
 
     const run_upstream_probe = b.addRunArtifact(upstream_probe);
-    run_upstream_probe.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_upstream_probe.addArgs(args);
     }
@@ -90,7 +84,6 @@ pub fn build(b: *std.Build) void {
     upstream_step.dependOn(&run_upstream_probe.step);
 
     const run_match_probe = b.addRunArtifact(match_probe);
-    run_match_probe.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_match_probe.addArgs(args);
     }
@@ -122,7 +115,9 @@ fn configureImageDeps(module: *std.Build.Module) void {
 
 fn configurePano13Deps(b: *std.Build, module: *std.Build.Module) void {
     module.link_libc = true;
-    module.linkSystemLibrary("pano13", .{});
+    module.linkSystemLibrary("pano13", .{
+        .use_pkg_config = .no,
+        .search_strategy = .paths_first,
+    });
     module.addIncludePath(b.path("upstream/libpano13-2.9.23/libpano13-2.9.23"));
-    module.addLibraryPath(.{ .cwd_relative = "/nix/store/05gim5y9nzjmvmkqhsxzb510cxz757bi-libpano13-2.9.23/lib" });
 }
