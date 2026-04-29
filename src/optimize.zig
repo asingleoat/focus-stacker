@@ -198,7 +198,21 @@ pub fn solvePoses(
     const prof = profiler.scope("optimize.solvePoses");
     defer prof.end();
 
-    return solvePosesFromInitial(allocator, image_count, base_hfov_degrees, optimize_vector, pair_matches, null);
+    return solvePosesWithVerbose(allocator, image_count, base_hfov_degrees, optimize_vector, pair_matches, null, 0);
+}
+
+pub fn solvePosesVerbose(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    verbose: u8,
+) SolveError!SolveResult {
+    const prof = profiler.scope("optimize.solvePoses");
+    defer prof.end();
+
+    return solvePosesWithVerbose(allocator, image_count, base_hfov_degrees, optimize_vector, pair_matches, null, verbose);
 }
 
 pub fn buildLinearSeedPoses(
@@ -228,13 +242,55 @@ pub fn solvePosesFromInitial(
     pair_matches: []const match_mod.PairMatches,
     initial_poses: ?[]const ImagePose,
 ) SolveError!SolveResult {
-    return solvePosesFromInitialWithJacobianMode(
+    return solvePosesFromInitialWithVerbose(
         allocator,
         image_count,
         base_hfov_degrees,
         optimize_vector,
         pair_matches,
         initial_poses,
+        0,
+    );
+}
+
+pub fn solvePosesFromInitialWithVerbose(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    initial_poses: ?[]const ImagePose,
+    verbose: u8,
+) SolveError!SolveResult {
+    return solvePosesFromInitialWithJacobianModeAndVerbose(
+        allocator,
+        image_count,
+        base_hfov_degrees,
+        optimize_vector,
+        pair_matches,
+        initial_poses,
+        verbose,
+        .auto,
+    );
+}
+
+fn solvePosesWithVerbose(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    initial_poses: ?[]const ImagePose,
+    verbose: u8,
+) SolveError!SolveResult {
+    return solvePosesFromInitialWithJacobianModeAndVerbose(
+        allocator,
+        image_count,
+        base_hfov_degrees,
+        optimize_vector,
+        pair_matches,
+        initial_poses,
+        verbose,
         .auto,
     );
 }
@@ -248,12 +304,41 @@ pub fn solvePosesFromInitialWithJacobianMode(
     initial_poses: ?[]const ImagePose,
     jacobian_mode: JacobianMode,
 ) SolveError!SolveResult {
+    return solvePosesFromInitialWithJacobianModeAndVerbose(
+        allocator,
+        image_count,
+        base_hfov_degrees,
+        optimize_vector,
+        pair_matches,
+        initial_poses,
+        0,
+        jacobian_mode,
+    );
+}
+
+fn solvePosesFromInitialWithJacobianModeAndVerbose(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    initial_poses: ?[]const ImagePose,
+    verbose: u8,
+    jacobian_mode: JacobianMode,
+) SolveError!SolveResult {
     const prof = profiler.scope("optimize.solvePosesFromInitial");
     defer prof.end();
 
     const control_point_count = countControlPoints(pair_matches);
     if (control_point_count == 0) {
         return error.NoControlPoints;
+    }
+
+    if (verbose > 0) {
+        std.debug.print(
+            "optimization: starting global solve for {d} images across {d} pairs and {d} control points\n",
+            .{ image_count, pair_matches.len, control_point_count },
+        );
     }
 
     const poses = try allocator.alloc(ImagePose, image_count);
@@ -278,8 +363,8 @@ pub fn solvePosesFromInitialWithJacobianMode(
         try seedPosesLinear(allocator, layout, pair_matches, poses);
     }
     const initial_avg_hfov = currentAverageHfovDegrees(poses);
-    const distance_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only, jacobian_mode);
-    const component_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise, jacobian_mode);
+    const distance_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only, jacobian_mode, verbose);
+    const component_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise, jacobian_mode, verbose);
 
     const residuals = try allocator.alloc(ControlPointResidual, control_point_count);
     errdefer allocator.free(residuals);
@@ -301,6 +386,13 @@ pub fn solvePosesFromInitialWithJacobianMode(
             max_error = @max(max_error, residual);
             cp_flat_index += 1;
         }
+    }
+
+    if (verbose > 0) {
+        std.debug.print(
+            "optimization: completed global solve (distance info={d}, component info={d})\n",
+            .{ distance_lm.info, component_lm.info },
+        );
     }
 
     return .{
@@ -943,6 +1035,7 @@ fn refinePosesIteratively(
     initial_avg_hfov: f64,
     strategy: SolveStrategy,
     jacobian_mode: JacobianMode,
+    verbose: u8,
 ) SolveError!minpack_mod.Result {
     const prof = profiler.scope("optimize.refinePosesIteratively");
     defer prof.end();
@@ -1033,7 +1126,15 @@ fn refinePosesIteratively(
         .maxfev = 100 * (variable_count + 1) * 100,
         .epsfcn = std.math.floatEps(f64) * 10.0,
         .factor = 100.0,
+        .progress_label = if (verbose > 0) strategyLabel(strategy) else null,
+        .progress_trial_step_interval = if (verbose > 0) 25 else 0,
     };
+    if (verbose > 0) {
+        std.debug.print(
+            "optimization: {s} phase starting (variables={d}, residuals={d}, jacobian={s})\n",
+            .{ strategyLabel(strategy), variable_count, residual_count, jacobianModeLabel(jacobian_mode, ctx.grouped_jacobian != null, ctx.dense_jacobian != null) },
+        );
+    }
     const solve_result = if (ctx.grouped_jacobian != null)
         if (jacobian_mode == .grouped or (jacobian_mode == .auto and pair_matches.len > 1))
             minpack_mod.lmdifWithJacobian(
@@ -1074,8 +1175,43 @@ fn refinePosesIteratively(
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
+    if (verbose > 0) {
+        std.debug.print(
+            "optimization: {s} phase done (info={d}, outer={d}, trial={d}, accepted={d}, nfev={d}, jacobian_evals={d})\n",
+            .{
+                strategyLabel(strategy),
+                lm_result.info,
+                lm_result.outer_iterations,
+                lm_result.trial_steps,
+                lm_result.accepted_steps,
+                lm_result.nfev,
+                lm_result.jacobian_evaluations,
+            },
+        );
+    }
     applySolveVector(layout, poses, solve_x);
     return lm_result;
+}
+
+fn strategyLabel(strategy: SolveStrategy) []const u8 {
+    return switch (strategy) {
+        .distance_only => "distance",
+        .componentwise => "componentwise",
+    };
+}
+
+fn jacobianModeLabel(jacobian_mode: JacobianMode, has_grouped: bool, has_dense: bool) []const u8 {
+    return switch (jacobian_mode) {
+        .grouped => "grouped",
+        .dense_custom => "dense-custom",
+        .none => "finite-difference",
+        .auto => if (has_grouped)
+            "auto-grouped"
+        else if (has_dense)
+            "auto-dense-custom"
+        else
+            "auto-finite-difference",
+    };
 }
 
 fn layoutRequiresDenseSolver(layout: []const SolveLayout) bool {

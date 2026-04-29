@@ -8,6 +8,8 @@ pub const Params = struct {
     maxfev: usize,
     epsfcn: f64,
     factor: f64,
+    progress_label: ?[]const u8 = null,
+    progress_trial_step_interval: usize = 0,
 };
 
 pub const Result = struct {
@@ -82,6 +84,13 @@ fn lmdifAdvanced(
     const n = x.len;
     if (n == 0 or m < n) return makeResult(0, 0, 0, 0, 0, 0, 0);
 
+    if (params.progress_label) |label| {
+        std.debug.print(
+            "optimizer {s}: LM start (variables={d}, residuals={d}, maxfev={d})\n",
+            .{ label, n, m, params.maxfev },
+        );
+    }
+
     const fvec = try allocator.alloc(f64, m);
     defer allocator.free(fvec);
     const diag = try allocator.alloc(f64, n);
@@ -133,6 +142,13 @@ fn lmdifAdvanced(
             const iter_prof = profiler.scope("minpack.lmdif.outer_iteration");
             defer iter_prof.end();
             outer_iterations += 1;
+
+            if (params.progress_label) |label| {
+                std.debug.print(
+                    "optimizer {s}: outer iteration {d} (nfev={d}, accepted={d}, trial_steps={d})\n",
+                    .{ label, outer_iterations, nfev, accepted_steps, trial_steps },
+                );
+            }
 
             if (jacobianFn) |buildJacobian| {
                 const added = try buildJacobian(ctx, x, fvec, fjac, m, n, params.epsfcn);
@@ -205,6 +221,17 @@ fn lmdifAdvanced(
                     const trial_prof = profiler.scope("minpack.lmdif.trial_step");
                     defer trial_prof.end();
                     trial_steps += 1;
+
+                    if (params.progress_label) |label| {
+                        if (params.progress_trial_step_interval > 0 and
+                            trial_steps % params.progress_trial_step_interval == 0)
+                        {
+                            std.debug.print(
+                                "optimizer {s}: trial step {d} (nfev={d}, accepted={d}, lmpar_iters={d})\n",
+                                .{ label, trial_steps, nfev, accepted_steps, lmpar_iterations },
+                            );
+                        }
+                    }
 
                     lmpar_iterations += if (sparse_style_lm) |*workspace|
                         try lmparSparseStyleDense(

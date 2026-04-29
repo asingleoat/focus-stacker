@@ -63,7 +63,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
     defer allocator.free(match_summary);
     try std.fs.File.stderr().writeAll(match_summary);
 
-    var final_solve = try optimize.solvePoses(allocator, images.len, base_hfov, optimize_vector, pair_matches);
+    var final_solve = try optimize.solvePosesVerbose(allocator, images.len, base_hfov, optimize_vector, pair_matches, cfg.verbose);
     defer final_solve.deinit(allocator);
     const initial_optimize_summary = try optimize.renderSolveSummary(allocator, "before pruning", &final_solve);
     defer allocator.free(initial_optimize_summary);
@@ -89,13 +89,17 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
         }
 
         if (after_prune_count > 0 and after_prune_count != before_prune_count) {
-            var pruned_solve = try optimize.solvePosesFromInitial(
+            if (cfg.verbose > 0) {
+                try std.fs.File.stderr().writeAll("optimization: restarting after control-point pruning\n");
+            }
+            var pruned_solve = try optimize.solvePosesFromInitialWithVerbose(
                 allocator,
                 images.len,
                 base_hfov,
                 optimize_vector,
                 pair_matches,
                 final_solve.poses,
+                cfg.verbose,
             );
             const pruned_optimize_summary = try optimize.renderSolveSummary(allocator, "after pruning", &pruned_solve);
             defer allocator.free(pruned_optimize_summary);
