@@ -69,6 +69,84 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "solve-stats-linear-seed-dense-jac")) {
+        const seed_poses = try optimize.buildLinearSeedPoses(
+            allocator,
+            project.images.len,
+            base_poses[0].base_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+        );
+        defer allocator.free(seed_poses);
+        const result = try optimize.solvePosesFromInitialWithJacobianMode(
+            allocator,
+            project.images.len,
+            project.pano_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+            seed_poses,
+            .dense_custom,
+        );
+        defer allocator.free(result.poses);
+        defer allocator.free(result.residuals);
+        printLmStats("distance", result.distance_lm);
+        printLmStats("component", result.component_lm);
+        std.debug.print("rms={d:.12}\ncontrol_points={d}\n", .{ result.rms_error, result.control_point_count });
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "solve-stats-linear-seed-no-jac")) {
+        const seed_poses = try optimize.buildLinearSeedPoses(
+            allocator,
+            project.images.len,
+            base_poses[0].base_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+        );
+        defer allocator.free(seed_poses);
+        const result = try optimize.solvePosesFromInitialWithJacobianMode(
+            allocator,
+            project.images.len,
+            project.pano_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+            seed_poses,
+            .none,
+        );
+        defer allocator.free(result.poses);
+        defer allocator.free(result.residuals);
+        printLmStats("distance", result.distance_lm);
+        printLmStats("component", result.component_lm);
+        std.debug.print("rms={d:.12}\ncontrol_points={d}\n", .{ result.rms_error, result.control_point_count });
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "solve-stats-linear-seed-grouped-jac")) {
+        const seed_poses = try optimize.buildLinearSeedPoses(
+            allocator,
+            project.images.len,
+            base_poses[0].base_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+        );
+        defer allocator.free(seed_poses);
+        const result = try optimize.solvePosesFromInitialWithJacobianMode(
+            allocator,
+            project.images.len,
+            project.pano_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+            seed_poses,
+            .grouped,
+        );
+        defer allocator.free(result.poses);
+        defer allocator.free(result.residuals);
+        printLmStats("distance", result.distance_lm);
+        printLmStats("component", result.component_lm);
+        std.debug.print("rms={d:.12}\ncontrol_points={d}\n", .{ result.rms_error, result.control_point_count });
+        return;
+    }
+
     if (std.mem.eql(u8, command, "solve-lm-params")) {
         const decoded_initial_poses = if (args.len > 3)
             try decodeInitialPoses(allocator, project.optimize_vector, base_poses, args[3..])
@@ -232,6 +310,36 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "jac-column-grouped")) {
+        if (args.len < 5) usage();
+        const strategy = try parseStrategy(args[3]);
+        const parameter_index = try std.fmt.parseInt(usize, args[4], 10);
+        const solve_x = try collectSolveVector(allocator, args[5..], project.optimize_vector, base_poses);
+        defer allocator.free(solve_x);
+        var matrix = try optimize.evaluateObjectiveJacobianSparse(
+            allocator,
+            strategy,
+            project.optimize_vector,
+            base_poses,
+            project.pair_matches,
+            solve_x,
+            0.0,
+        );
+        defer matrix.deinit(allocator);
+        if (parameter_index >= matrix.col_count) return error.ParameterIndexOutOfRange;
+        const column = try allocator.alloc(f64, matrix.row_count);
+        defer allocator.free(column);
+        @memset(column, 0.0);
+        const start = matrix.col_ptr[parameter_index];
+        const end = matrix.col_ptr[parameter_index + 1];
+        for (start..end) |entry_index| {
+            const row = matrix.row_idx[entry_index];
+            column[row] = matrix.values[entry_index];
+        }
+        try printVector(column);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "cp-error")) {
         if (args.len < 4) usage();
         const cp_index = try std.fmt.parseInt(usize, args[3], 10);
@@ -257,6 +365,9 @@ fn usage() noreturn {
         \\  parity_probe lm-params <pto>
         \\  parity_probe linear-seed-lm-params <pto>
         \\  parity_probe solve-stats-linear-seed <pto>
+        \\  parity_probe solve-stats-linear-seed-dense-jac <pto>
+        \\  parity_probe solve-stats-linear-seed-no-jac <pto>
+        \\  parity_probe solve-stats-linear-seed-grouped-jac <pto>
         \\  parity_probe solve-lm-params <pto>
         \\  parity_probe solve-stats <pto> [x...]
         \\  parity_probe image-vars <pto> [x...]
@@ -266,6 +377,7 @@ fn usage() noreturn {
         \\  parity_probe fvec-uncached <pto> <distance_only|componentwise|1|2> [x...]
         \\  parity_probe jac-pattern-stats <pto> <distance_only|componentwise|1|2>
         \\  parity_probe jac-column <pto> <distance_only|componentwise|1|2> <param_index> [x...]
+        \\  parity_probe jac-column-grouped <pto> <distance_only|componentwise|1|2> <param_index> [x...]
         \\  parity_probe cp-error <pto> <cp_index> [x...]
         \\
     , .{});

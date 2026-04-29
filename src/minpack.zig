@@ -36,7 +36,7 @@ pub fn lmdif(
     m: usize,
     params: Params,
 ) !Result {
-    return lmdifAdvanced(Context, allocator, ctx, evalFn, null, x, m, params);
+    return lmdifAdvanced(Context, allocator, ctx, evalFn, null, false, x, m, params);
 }
 
 pub fn lmdifWithJacobian(
@@ -49,7 +49,20 @@ pub fn lmdifWithJacobian(
     m: usize,
     params: Params,
 ) !Result {
-    return lmdifAdvanced(Context, allocator, ctx, evalFn, jacobianFn, x, m, params);
+    return lmdifAdvanced(Context, allocator, ctx, evalFn, jacobianFn, true, x, m, params);
+}
+
+pub fn lmdifWithJacobianDenseStep(
+    comptime Context: type,
+    allocator: std.mem.Allocator,
+    ctx: *Context,
+    evalFn: *const fn (*Context, []const f64, []f64) anyerror!void,
+    jacobianFn: JacobianFn(Context),
+    x: []f64,
+    m: usize,
+    params: Params,
+) !Result {
+    return lmdifAdvanced(Context, allocator, ctx, evalFn, jacobianFn, false, x, m, params);
 }
 
 fn lmdifAdvanced(
@@ -58,6 +71,7 @@ fn lmdifAdvanced(
     ctx: *Context,
     evalFn: *const fn (*Context, []const f64, []f64) anyerror!void,
     jacobianFn: ?JacobianFn(Context),
+    use_sparse_style_lm: bool,
     x: []f64,
     m: usize,
     params: Params,
@@ -86,7 +100,7 @@ fn lmdifAdvanced(
     defer allocator.free(ipvt);
     const fjac = try allocator.alloc(f64, m * n);
     defer allocator.free(fjac);
-    var sparse_style_lm = if (jacobianFn != null)
+    var sparse_style_lm = if (jacobianFn != null and use_sparse_style_lm)
         try SparseStyleLmWorkspace.init(allocator, m, n)
     else
         null;

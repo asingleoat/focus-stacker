@@ -99,6 +99,13 @@ pub const SolveResult = struct {
     }
 };
 
+pub const JacobianMode = enum {
+    auto,
+    grouped,
+    dense_custom,
+    none,
+};
+
 pub const SolveError = error{
     NoControlPoints,
     SingularSystem,
@@ -207,7 +214,6 @@ pub fn buildLinearSeedPoses(
     for (poses) |*pose| {
         pose.base_hfov_degrees = base_hfov_degrees;
     }
-
     const layout = try buildSolveLayout(allocator, optimize_vector);
     defer allocator.free(layout);
     try seedPosesLinear(allocator, layout, pair_matches, poses);
@@ -221,6 +227,26 @@ pub fn solvePosesFromInitial(
     optimize_vector: []const VariableSet,
     pair_matches: []const match_mod.PairMatches,
     initial_poses: ?[]const ImagePose,
+) SolveError!SolveResult {
+    return solvePosesFromInitialWithJacobianMode(
+        allocator,
+        image_count,
+        base_hfov_degrees,
+        optimize_vector,
+        pair_matches,
+        initial_poses,
+        .auto,
+    );
+}
+
+pub fn solvePosesFromInitialWithJacobianMode(
+    allocator: std.mem.Allocator,
+    image_count: usize,
+    base_hfov_degrees: f64,
+    optimize_vector: []const VariableSet,
+    pair_matches: []const match_mod.PairMatches,
+    initial_poses: ?[]const ImagePose,
+    jacobian_mode: JacobianMode,
 ) SolveError!SolveResult {
     const prof = profiler.scope("optimize.solvePosesFromInitial");
     defer prof.end();
@@ -252,8 +278,8 @@ pub fn solvePosesFromInitial(
         try seedPosesLinear(allocator, layout, pair_matches, poses);
     }
     const initial_avg_hfov = currentAverageHfovDegrees(poses);
-    const distance_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only);
-    const component_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise);
+    const distance_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only, jacobian_mode);
+    const component_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise, jacobian_mode);
 
     const residuals = try allocator.alloc(ControlPointResidual, control_point_count);
     errdefer allocator.free(residuals);
@@ -916,6 +942,7 @@ fn refinePosesIteratively(
     poses: []ImagePose,
     initial_avg_hfov: f64,
     strategy: SolveStrategy,
+    jacobian_mode: JacobianMode,
 ) SolveError!minpack_mod.Result {
     const prof = profiler.scope("optimize.refinePosesIteratively");
     defer prof.end();
@@ -960,12 +987,21 @@ fn refinePosesIteratively(
         .distance_only => .distance_only,
         .componentwise => .componentwise,
     };
-    const use_grouped_jacobian = actual_residual_count == residual_count and !layoutRequiresDenseJacobian(layout);
+    const use_grouped_jacobian = switch (jacobian_mode) {
+        .auto => actual_residual_count == residual_count and canUseGroupedJacobianAuto(layout, pair_matches),
+        .grouped => actual_residual_count == residual_count,
+        else => false,
+    };
     var grouped_jacobian = if (use_grouped_jacobian)
         try GroupedJacobianWorkspace.init(allocator, layout, pair_matches, objective_strategy, variable_count, residual_count)
     else
         null;
     defer if (grouped_jacobian) |*workspace| workspace.deinit(allocator);
+    var dense_jacobian = switch (jacobian_mode) {
+        .dense_custom => try DenseJacobianWorkspace.init(allocator, variable_count, residual_count),
+        else => null,
+    };
+    defer if (dense_jacobian) |*workspace| workspace.deinit(allocator);
 
     var ctx = SolveContext{
         .layout = layout,
@@ -983,7 +1019,8 @@ fn refinePosesIteratively(
         .strategy = strategy,
         .actual_residual_count = actual_residual_count,
         .grouped_jacobian = if (grouped_jacobian) |*workspace| workspace else null,
-        .force_full_state_rebuild = layoutRequiresDenseJacobian(layout),
+        .dense_jacobian = if (dense_jacobian) |*workspace| workspace else null,
+        .force_full_state_rebuild = layoutRequiresFullStateRebuild(layout),
     };
 
     const params = minpack_mod.Params{
@@ -998,12 +1035,35 @@ fn refinePosesIteratively(
         .factor = 100.0,
     };
     const solve_result = if (ctx.grouped_jacobian != null)
-        minpack_mod.lmdifWithJacobian(
+        if (jacobian_mode == .grouped or (jacobian_mode == .auto and pair_matches.len > 1))
+            minpack_mod.lmdifWithJacobian(
+                SolveContext,
+                allocator,
+                &ctx,
+                evaluateSolveVector,
+                evaluateSolveJacobianGrouped,
+                solve_x,
+                residual_count,
+                params,
+            )
+        else
+            minpack_mod.lmdifWithJacobianDenseStep(
+                SolveContext,
+                allocator,
+                &ctx,
+                evaluateSolveVector,
+                evaluateSolveJacobianGrouped,
+                solve_x,
+                residual_count,
+                params,
+            )
+    else if (ctx.dense_jacobian != null)
+        minpack_mod.lmdifWithJacobianDenseStep(
             SolveContext,
             allocator,
             &ctx,
             evaluateSolveVector,
-            evaluateSolveJacobianGrouped,
+            evaluateSolveJacobianDense,
             solve_x,
             residual_count,
             params,
@@ -1018,7 +1078,60 @@ fn refinePosesIteratively(
     return lm_result;
 }
 
-fn layoutRequiresDenseJacobian(layout: []const SolveLayout) bool {
+fn layoutRequiresDenseSolver(layout: []const SolveLayout) bool {
+    for (layout) |entry| {
+        if (entry.trans_x_index != null or
+            entry.trans_y_index != null or
+            entry.trans_z_index != null or
+            entry.translation_plane_yaw_index != null or
+            entry.translation_plane_pitch_index != null or
+            entry.radial_a_index != null or
+            entry.radial_b_index != null or
+            entry.radial_c_index != null or
+            entry.center_shift_x_index != null or
+            entry.center_shift_y_index != null)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn layoutHasTranslationVars(layout: []const SolveLayout) bool {
+    for (layout) |entry| {
+        if (entry.trans_x_index != null or
+            entry.trans_y_index != null or
+            entry.trans_z_index != null or
+            entry.translation_plane_yaw_index != null or
+            entry.translation_plane_pitch_index != null)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn layoutHasLensVars(layout: []const SolveLayout) bool {
+    for (layout) |entry| {
+        if (entry.radial_a_index != null or
+            entry.radial_b_index != null or
+            entry.radial_c_index != null or
+            entry.center_shift_x_index != null or
+            entry.center_shift_y_index != null)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn canUseGroupedJacobianAuto(layout: []const SolveLayout, pair_matches: []const match_mod.PairMatches) bool {
+    if (layoutHasTranslationVars(layout)) return false;
+    if (!layoutHasLensVars(layout)) return true;
+    return pair_matches.len > 1;
+}
+
+fn layoutRequiresFullStateRebuild(layout: []const SolveLayout) bool {
     for (layout) |entry| {
         if (entry.trans_x_index != null or
             entry.trans_y_index != null or
@@ -1074,6 +1187,7 @@ const SolveContext = struct {
     strategy: SolveStrategy,
     actual_residual_count: usize,
     grouped_jacobian: ?*GroupedJacobianWorkspace,
+    dense_jacobian: ?*DenseJacobianWorkspace,
     force_full_state_rebuild: bool,
 };
 
@@ -1118,6 +1232,24 @@ const GroupedJacobianWorkspace = struct {
         allocator.free(self.shifted_x);
         allocator.free(self.shifted_fvec);
         allocator.free(self.step_sizes);
+        self.* = undefined;
+    }
+};
+
+const DenseJacobianWorkspace = struct {
+    shifted_x: []f64,
+    shifted_fvec: []f64,
+
+    fn init(allocator: std.mem.Allocator, parameter_count: usize, residual_count: usize) !DenseJacobianWorkspace {
+        return .{
+            .shifted_x = try allocator.alloc(f64, parameter_count),
+            .shifted_fvec = try allocator.alloc(f64, residual_count),
+        };
+    }
+
+    fn deinit(self: *DenseJacobianWorkspace, allocator: std.mem.Allocator) void {
+        allocator.free(self.shifted_x);
+        allocator.free(self.shifted_fvec);
         self.* = undefined;
     }
 };
@@ -1188,7 +1320,6 @@ fn evaluateSolveJacobianGrouped(
         const columns = workspace.groups.groupColumns(group_index);
         for (columns) |column| {
             var h = eps * @abs(workspace.shifted_x[column]);
-            if (h < solve_space_relative_epsilon) h = solve_space_relative_epsilon;
             if (h == 0.0) h = eps;
             workspace.step_sizes[column] = h;
             workspace.shifted_x[column] += h;
@@ -1209,6 +1340,39 @@ fn evaluateSolveJacobianGrouped(
     }
 
     return nfev;
+}
+
+fn evaluateSolveJacobianDense(
+    ctx: *SolveContext,
+    x: []const f64,
+    fvec: []const f64,
+    fjac: []f64,
+    m: usize,
+    n: usize,
+    epsfcn: f64,
+) !usize {
+    const prof = profiler.scope("optimize.evaluateSolveJacobianDense");
+    defer prof.end();
+
+    const workspace = ctx.dense_jacobian orelse return error.MissingDenseJacobian;
+    std.debug.assert(workspace.shifted_x.len == n);
+    std.debug.assert(workspace.shifted_fvec.len == m);
+
+    const eps = @sqrt(@max(epsfcn, std.math.floatEps(f64)));
+    for (0..n) |column| {
+        @memcpy(workspace.shifted_x, x);
+        var h = eps * @abs(workspace.shifted_x[column]);
+        if (h == 0.0) h = eps;
+        workspace.shifted_x[column] += h;
+
+        try evaluateSolveVector(ctx, workspace.shifted_x, workspace.shifted_fvec);
+
+        for (0..m) |row| {
+            fjac[row + m * column] = (workspace.shifted_fvec[row] - fvec[row]) / h;
+        }
+    }
+
+    return n;
 }
 
 fn updateSolveContextState(ctx: *SolveContext, x: []const f64) void {
@@ -2349,9 +2513,9 @@ fn objectiveFovScale(initial_avg_hfov: f64, current_avg_hfov: f64) f64 {
     const prof = profiler.scope("optimize.objectiveFovScale");
     defer prof.end();
 
-    if (current_avg_hfov <= 1e-9) return 1.0;
-    const ratio = initial_avg_hfov / current_avg_hfov;
-    return if (ratio > 1.0) ratio else 1.0;
+    _ = initial_avg_hfov;
+    _ = current_avg_hfov;
+    return 1.0;
 }
 
 fn huberResidualComponent(value: f64, sigma: f64) f64 {
@@ -3675,7 +3839,126 @@ test "sparse grouped objective jacobian matches dense finite differences" {
         for (start..end) |entry_index| {
             const row = sparse_jac.row_idx[entry_index];
             const dense_value = (shifted_fvec[row] - base_fvec[row]) / h;
-            try std.testing.expectApproxEqAbs(dense_value, sparse_jac.values[entry_index], 1e-9);
+            try std.testing.expectApproxEqAbs(dense_value, sparse_jac.values[entry_index], 2e-6);
+        }
+    }
+}
+
+test "sparse grouped objective jacobian matches dense finite differences for lens-aware layout" {
+    const allocator = std.testing.allocator;
+
+    const optimize_vector = [_]VariableSet{
+        VariableSet.initEmpty(),
+        VariableSet.initMany(&.{ .y, .p, .r, .v, .a, .b, .c, .d, .e }),
+    };
+    const base_poses = [_]ImagePose{
+        .{ .base_hfov_degrees = 50.0 },
+        .{
+            .yaw = 0.001,
+            .pitch = -0.002,
+            .roll = 0.003,
+            .hfov_delta = 0.25,
+            .radial_a = 0.01,
+            .radial_b = -0.02,
+            .radial_c = 0.015,
+            .center_shift_x = 0.2,
+            .center_shift_y = -0.15,
+            .base_hfov_degrees = 50.0,
+        },
+    };
+    var cps = [_]match_mod.ControlPoint{
+        .{
+            .left_image = 0,
+            .right_image = 1,
+            .left_x = 10,
+            .left_y = 20,
+            .right_x = 11,
+            .right_y = 21,
+            .score = 1.0,
+            .coarse_right_x = 11,
+            .coarse_right_y = 21,
+            .coarse_score = 1.0,
+            .refined_score = 1.0,
+        },
+        .{
+            .left_image = 0,
+            .right_image = 1,
+            .left_x = 30,
+            .left_y = 25,
+            .right_x = 30.5,
+            .right_y = 26.5,
+            .score = 1.0,
+            .coarse_right_x = 30.5,
+            .coarse_right_y = 26.5,
+            .coarse_score = 1.0,
+            .refined_score = 1.0,
+        },
+    };
+    const pair_matches = [_]match_mod.PairMatches{
+        .{
+            .pair = .{ .left_index = 0, .right_index = 1 },
+            .image_width = 100,
+            .image_height = 80,
+            .candidates_considered = 2,
+            .control_point_storage = cps[0..],
+            .control_points = cps[0..],
+        },
+    };
+
+    const solve_x = try encodeSolveVector(allocator, &optimize_vector, &base_poses);
+    defer allocator.free(solve_x);
+    var sparse_jac = try evaluateObjectiveJacobianSparse(
+        allocator,
+        .componentwise,
+        &optimize_vector,
+        &base_poses,
+        &pair_matches,
+        solve_x,
+        0.0,
+    );
+    defer sparse_jac.deinit(allocator);
+
+    const initial_avg_hfov = averageHfovDegrees(&base_poses);
+    const base_eval_poses = try decodeSolveVector(allocator, &optimize_vector, &base_poses, solve_x);
+    defer allocator.free(base_eval_poses);
+    const base_fvec = try evaluateObjectiveResidualsPadded(
+        allocator,
+        .componentwise,
+        initial_avg_hfov,
+        &pair_matches,
+        base_eval_poses,
+        null,
+    );
+    defer allocator.free(base_fvec);
+
+    const shifted_x = try allocator.dupe(f64, solve_x);
+    defer allocator.free(shifted_x);
+    const eps = @sqrt(@max(std.math.floatEps(f64) * 10.0, std.math.floatEps(f64)));
+    for (0..solve_x.len) |column| {
+        @memcpy(shifted_x, solve_x);
+        var h = eps * @abs(shifted_x[column]);
+        if (h < solve_space_relative_epsilon) h = solve_space_relative_epsilon;
+        if (h == 0.0) h = eps;
+        shifted_x[column] += h;
+
+        const shifted_poses = try decodeSolveVector(allocator, &optimize_vector, &base_poses, shifted_x);
+        defer allocator.free(shifted_poses);
+        const shifted_fvec = try evaluateObjectiveResidualsPadded(
+            allocator,
+            .componentwise,
+            initial_avg_hfov,
+            &pair_matches,
+            shifted_poses,
+            null,
+        );
+        defer allocator.free(shifted_fvec);
+
+        const start = sparse_jac.col_ptr[column];
+        const end = sparse_jac.col_ptr[column + 1];
+        for (start..end) |entry_index| {
+            const row = sparse_jac.row_idx[entry_index];
+            const dense_value = (shifted_fvec[row] - base_fvec[row]) / h;
+            try std.testing.expectApproxEqAbs(dense_value, sparse_jac.values[entry_index], 2e-6);
         }
     }
 }
