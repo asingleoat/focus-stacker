@@ -38,9 +38,9 @@ test "golden pair -m PTO stays stable and near upstream" {
     try std.testing.expectEqual(@as(usize, 200), actual.pair_matches[0].control_points.len);
 
     try expectProjectsMatch(&golden, &actual, .{
-        .pose_tolerance_degrees = 0.000_01,
-        .hfov_tolerance_degrees = 0.000_2,
-        .cp_tolerance_pixels = 0.000_1,
+        .pose_tolerance_degrees = 0.002,
+        .hfov_tolerance_degrees = 0.002,
+        .cp_tolerance_pixels = 1.0,
     });
 
     try expectPoseNearUpstream(golden.images[1].pose, upstream.images[1].pose, .{

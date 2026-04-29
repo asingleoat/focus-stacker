@@ -761,6 +761,10 @@ const CorrelationSurface = struct {
     allocator: std.mem.Allocator,
     width: u32,
     height: u32,
+    valid_x_start: i32,
+    valid_x_end: i32,
+    valid_y_start: i32,
+    valid_y_end: i32,
     best_x: i32,
     best_y: i32,
     best_score: f32,
@@ -873,6 +877,8 @@ fn computeCorrelationSurfaceLikeHugin(
     var best_score: f32 = -1;
     var best_x: i32 = 0;
     var best_y: i32 = 0;
+    var valid_x_end = xend;
+    var valid_y_end = yend;
 
     if (use_exact_dft) {
         var center_y: i32 = ystart;
@@ -915,6 +921,10 @@ fn computeCorrelationSurfaceLikeHugin(
             .allocator = allocator,
             .width = search_w,
             .height = search_h,
+            .valid_x_start = xstart,
+            .valid_x_end = xend,
+            .valid_y_start = ystart,
+            .valid_y_end = yend,
             .best_x = best_x,
             .best_y = best_y,
             .best_score = best_score,
@@ -922,9 +932,19 @@ fn computeCorrelationSurfaceLikeHugin(
         };
     }
 
-    const fft_w = fft_backend.nearestValidComplexLength(search_w);
-    const fft_h = fft_backend.nearestValidComplexLength(search_h);
+    const fft_w = fft_backend.preferredCorrelationComplexLength(search_w);
+    const fft_h = fft_backend.preferredCorrelationComplexLength(search_h);
     const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
+    const retained_w = @min(search_w, fft_w);
+    const retained_h = @min(search_h, fft_h);
+    const klr_x = kul_x + @as(i32, @intCast(template.width)) - 1;
+    const klr_y = kul_y + @as(i32, @intCast(template.height)) - 1;
+    valid_x_end = @min(xend, @as(i32, @intCast(fft_w)) - klr_x);
+    valid_y_end = @min(yend, @as(i32, @intCast(fft_h)) - klr_y);
+    if (valid_x_end <= xstart or valid_y_end <= ystart) {
+        allocator.free(pixels);
+        return null;
+    }
 
     var search_freq = try allocator.alloc(fft_backend.Complex, fft_count);
     defer allocator.free(search_freq);
@@ -937,9 +957,9 @@ fn computeCorrelationSurfaceLikeHugin(
     for (kernel_freq) |*value| value.* = .{};
 
     var y: u32 = 0;
-    while (y < search_h) : (y += 1) {
+    while (y < retained_h) : (y += 1) {
         var x: u32 = 0;
-        while (x < search_w) : (x += 1) {
+        while (x < retained_w) : (x += 1) {
             search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = @as(f32, @floatCast(matchPixel(
                 @as(u32, @intCast(search_ul_x)) + x,
                 @as(u32, @intCast(search_ul_y)) + y,
@@ -966,9 +986,9 @@ fn computeCorrelationSurfaceLikeHugin(
     plan.transformInPlace(search_freq, true);
 
     var center_y: i32 = ystart;
-    while (center_y < yend) : (center_y += 1) {
+    while (center_y < valid_y_end) : (center_y += 1) {
         var center_x: i32 = xstart;
-        while (center_x < xend) : (center_x += 1) {
+        while (center_x < valid_x_end) : (center_x += 1) {
             const top_x = center_x + kul_x;
             const top_y = center_y + kul_y;
             const sum = sumRect(integral, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
@@ -996,6 +1016,10 @@ fn computeCorrelationSurfaceLikeHugin(
         .allocator = allocator,
         .width = search_w,
         .height = search_h,
+        .valid_x_start = xstart,
+        .valid_x_end = valid_x_end,
+        .valid_y_start = ystart,
+        .valid_y_end = valid_y_end,
         .best_x = best_x,
         .best_y = best_y,
         .best_score = best_score,
@@ -1016,8 +1040,8 @@ fn finalizeSurfaceResult(
 
     const subpixel_lower_bound = 2 + templ_half;
     const subpixel_upper_bound = 2 * swidth + 1 - 2 - templ_half;
-    const has_neighbor_x = surface.best_x > 0 and surface.best_x + 1 < @as(i32, @intCast(surface.width));
-    const has_neighbor_y = surface.best_y > 0 and surface.best_y + 1 < @as(i32, @intCast(surface.height));
+    const has_neighbor_x = surface.best_x > surface.valid_x_start and surface.best_x + 1 < surface.valid_x_end;
+    const has_neighbor_y = surface.best_y > surface.valid_y_start and surface.best_y + 1 < surface.valid_y_end;
     if (surface.best_x > subpixel_lower_bound and surface.best_x < subpixel_upper_bound and
         surface.best_y > subpixel_lower_bound and surface.best_y < subpixel_upper_bound and
         has_neighbor_x and has_neighbor_y)

@@ -6,6 +6,8 @@ const c = @cImport({
     @cInclude("pffft.h");
 });
 
+const max_safe_tail_trim_pixels: u32 = 8;
+
 pub const Backend = enum {
     cpu_pffft,
     gpu_vkfft,
@@ -132,6 +134,10 @@ pub fn largestSmoothLengthAtMost(k: u32) u32 {
 pub fn largestUsableTruncatedComplexLength(requested: u32) u32 {
     if (requested == 0) return 0;
 
+    // The vendored selector finds a generally "smooth" candidate, but PFFFT's
+    // valid complex sizes are stricter than generic n-smooth numbers. Per
+    // pffft.h, complex transforms require N = 2^a * 3^b * 5^c with a >= 5,
+    // so values like 125 (5^3) are smooth but still unusable for this backend.
     const trimmed = largestSmoothLengthAtMost(requested);
     if (c.pffft_is_valid_size(@as(c_int, @intCast(trimmed)), c.PFFFT_COMPLEX) != 0) {
         return trimmed;
@@ -155,6 +161,14 @@ pub fn nearestValidComplexLength(requested: u32) u32 {
         return requested;
     }
     return @as(u32, @intCast(c.pffft_nearest_transform_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX, 1)));
+}
+
+pub fn preferredCorrelationComplexLength(requested: u32) u32 {
+    const truncated = largestUsableTruncatedComplexLength(requested);
+    if (truncated > 0 and truncated <= requested and requested - truncated <= max_safe_tail_trim_pixels) {
+        return truncated;
+    }
+    return nearestValidComplexLength(requested);
 }
 
 fn allocAlignedFloatBuffer(len: usize) ![]f32 {
@@ -198,4 +212,10 @@ test "largest usable truncated complex length follows smooth truncation policy" 
 test "nearest valid complex length preserves current non-truncating matcher behavior" {
     try std.testing.expectEqual(@as(u32, 128), nearestValidComplexLength(105));
     try std.testing.expectEqual(@as(u32, 128), nearestValidComplexLength(128));
+}
+
+test "preferred correlation complex length only truncates by a few pixels" {
+    try std.testing.expectEqual(@as(u32, 128), preferredCorrelationComplexLength(105));
+    try std.testing.expectEqual(@as(u32, 128), preferredCorrelationComplexLength(128));
+    try std.testing.expectEqual(@as(u32, 128), preferredCorrelationComplexLength(132));
 }
