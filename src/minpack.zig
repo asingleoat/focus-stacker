@@ -414,16 +414,24 @@ fn qrfac(a: []f64, m: usize, n: usize, pivot: bool, ipvt: []usize, rdiag: []f64,
     const prof = profiler.scope("minpack.qrfac");
     defer prof.end();
 
-    for (0..n) |j| {
-        acnorm[j] = enormColumn(a, m, j, 0);
-        rdiag[j] = acnorm[j];
-        wa[j] = rdiag[j];
-        if (pivot) ipvt[j] = j;
+    {
+        const phase_prof = profiler.scope("minpack.qrfac.init_norms");
+        defer phase_prof.end();
+
+        for (0..n) |j| {
+            acnorm[j] = enormColumn(a, m, j, 0);
+            rdiag[j] = acnorm[j];
+            wa[j] = rdiag[j];
+            if (pivot) ipvt[j] = j;
+        }
     }
 
     const minmn = @min(m, n);
     for (0..minmn) |j| {
         if (pivot) {
+            const phase_prof = profiler.scope("minpack.qrfac.pivot");
+            defer phase_prof.end();
+
             var kmax = j;
             for (j..n) |k| {
                 if (rdiag[k] > rdiag[kmax]) kmax = k;
@@ -442,40 +450,45 @@ fn qrfac(a: []f64, m: usize, n: usize, pivot: bool, ipvt: []usize, rdiag: []f64,
             }
         }
 
-        const diag_index = index(m, j, j);
-        var ajnorm = enormColumn(a, m, j, j);
-        if (ajnorm == 0.0) {
-            rdiag[j] = -ajnorm;
-            continue;
-        }
-        if (a[diag_index] < 0.0) ajnorm = -ajnorm;
-        for (j..m) |i| a[index(m, i, j)] /= ajnorm;
-        a[diag_index] += 1.0;
+        {
+            const phase_prof = profiler.scope("minpack.qrfac.householder");
+            defer phase_prof.end();
 
-        const jp1 = j + 1;
-        if (jp1 < n) {
-            for (jp1..n) |k| {
-                var sum: f64 = 0.0;
-                for (j..m) |i| {
-                    sum += a[index(m, i, j)] * a[index(m, i, k)];
-                }
-                const temp = sum / a[diag_index];
-                for (j..m) |i| {
-                    a[index(m, i, k)] -= temp * a[index(m, i, j)];
-                }
-                if (pivot and rdiag[k] != 0.0) {
-                    var temp2 = a[index(m, j, k)] / rdiag[k];
-                    temp2 = @max(0.0, 1.0 - temp2 * temp2);
-                    rdiag[k] *= @sqrt(temp2);
-                    temp2 = rdiag[k] / wa[k];
-                    if (0.05 * temp2 * temp2 <= machep) {
-                        rdiag[k] = enormColumn(a, m, k, jp1);
-                        wa[k] = rdiag[k];
+            const diag_index = index(m, j, j);
+            var ajnorm = enormColumn(a, m, j, j);
+            if (ajnorm == 0.0) {
+                rdiag[j] = -ajnorm;
+                continue;
+            }
+            if (a[diag_index] < 0.0) ajnorm = -ajnorm;
+            for (j..m) |i| a[index(m, i, j)] /= ajnorm;
+            a[diag_index] += 1.0;
+
+            const jp1 = j + 1;
+            if (jp1 < n) {
+                for (jp1..n) |k| {
+                    var sum: f64 = 0.0;
+                    for (j..m) |i| {
+                        sum += a[index(m, i, j)] * a[index(m, i, k)];
+                    }
+                    const temp = sum / a[diag_index];
+                    for (j..m) |i| {
+                        a[index(m, i, k)] -= temp * a[index(m, i, j)];
+                    }
+                    if (pivot and rdiag[k] != 0.0) {
+                        var temp2 = a[index(m, j, k)] / rdiag[k];
+                        temp2 = @max(0.0, 1.0 - temp2 * temp2);
+                        rdiag[k] *= @sqrt(temp2);
+                        temp2 = rdiag[k] / wa[k];
+                        if (0.05 * temp2 * temp2 <= machep) {
+                            rdiag[k] = enormColumn(a, m, k, jp1);
+                            wa[k] = rdiag[k];
+                        }
                     }
                 }
             }
+            rdiag[j] = -ajnorm;
         }
-        rdiag[j] = -ajnorm;
     }
 }
 
@@ -839,50 +852,75 @@ fn solveAugmentedDampedLeastSquares(
     defer prof.end();
 
     const rows = m + n;
-    @memset(workspace.augmented_matrix, 0.0);
-    for (0..m) |row| workspace.augmented_rhs[row] = fvec[row];
-    @memset(workspace.augmented_rhs[m..rows], 0.0);
+    {
+        const phase_prof = profiler.scope("minpack.solve_augmented.zero_fill");
+        defer phase_prof.end();
 
-    for (0..n) |j| {
-        const original_col = ipvt[j];
-        for (0..m) |row| {
-            workspace.augmented_matrix[index(rows, row, j)] = jacobian[index(m, row, original_col)];
+        @memset(workspace.augmented_matrix, 0.0);
+        for (0..m) |row| workspace.augmented_rhs[row] = fvec[row];
+        @memset(workspace.augmented_rhs[m..rows], 0.0);
+    }
+
+    {
+        const phase_prof = profiler.scope("minpack.solve_augmented.pack_matrix");
+        defer phase_prof.end();
+
+        for (0..n) |j| {
+            const original_col = ipvt[j];
+            for (0..m) |row| {
+                workspace.augmented_matrix[index(rows, row, j)] = jacobian[index(m, row, original_col)];
+            }
+            workspace.augmented_matrix[index(rows, m + j, j)] = sqrt_par * diag[original_col];
         }
-        workspace.augmented_matrix[index(rows, m + j, j)] = sqrt_par * diag[original_col];
     }
 
-    qrfac(
-        workspace.augmented_matrix,
-        rows,
-        n,
-        false,
-        workspace.qr_ipvt,
-        workspace.qr_rdiag,
-        workspace.qr_acnorm,
-        workspace.qr_wa,
-    );
-    applyQTransposeInPlace(workspace.augmented_matrix, rows, n, workspace.augmented_rhs);
+    {
+        const phase_prof = profiler.scope("minpack.solve_augmented.qrfac");
+        defer phase_prof.end();
 
-    var nsing = n;
-    for (0..n) |j| {
-        workspace.x_permuted[j] = workspace.augmented_rhs[j];
-        if (workspace.augmented_matrix[index(rows, j, j)] == 0.0 and nsing == n) nsing = j;
-        if (nsing < n) workspace.x_permuted[j] = 0.0;
+        qrfac(
+            workspace.augmented_matrix,
+            rows,
+            n,
+            false,
+            workspace.qr_ipvt,
+            workspace.qr_rdiag,
+            workspace.qr_acnorm,
+            workspace.qr_wa,
+        );
     }
-    if (nsing >= 1) {
-        var k: usize = 0;
-        while (k < nsing) : (k += 1) {
-            const j = nsing - k - 1;
-            workspace.x_permuted[j] /= workspace.augmented_matrix[index(rows, j, j)];
-            const temp = workspace.x_permuted[j];
-            if (j > 0) {
-                for (0..j) |i| {
-                    workspace.x_permuted[i] -= workspace.augmented_matrix[index(rows, i, j)] * temp;
+
+    {
+        const phase_prof = profiler.scope("minpack.solve_augmented.apply_qt");
+        defer phase_prof.end();
+        applyQTransposeInPlace(workspace.augmented_matrix, rows, n, workspace.augmented_rhs);
+    }
+
+    {
+        const phase_prof = profiler.scope("minpack.solve_augmented.backsolve");
+        defer phase_prof.end();
+
+        var nsing = n;
+        for (0..n) |j| {
+            workspace.x_permuted[j] = workspace.augmented_rhs[j];
+            if (workspace.augmented_matrix[index(rows, j, j)] == 0.0 and nsing == n) nsing = j;
+            if (nsing < n) workspace.x_permuted[j] = 0.0;
+        }
+        if (nsing >= 1) {
+            var k: usize = 0;
+            while (k < nsing) : (k += 1) {
+                const j = nsing - k - 1;
+                workspace.x_permuted[j] /= workspace.augmented_matrix[index(rows, j, j)];
+                const temp = workspace.x_permuted[j];
+                if (j > 0) {
+                    for (0..j) |i| {
+                        workspace.x_permuted[i] -= workspace.augmented_matrix[index(rows, i, j)] * temp;
+                    }
                 }
             }
         }
+        for (0..n) |j| x[ipvt[j]] = workspace.x_permuted[j];
     }
-    for (0..n) |j| x[ipvt[j]] = workspace.x_permuted[j];
 }
 
 fn applyQTransposeInPlace(a: []f64, m: usize, n: usize, b: []f64) void {
