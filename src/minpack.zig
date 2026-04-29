@@ -492,6 +492,41 @@ fn qrfac(a: []f64, m: usize, n: usize, pivot: bool, ipvt: []usize, rdiag: []f64,
     }
 }
 
+fn qrfacNoPivot(a: []f64, m: usize, n: usize) void {
+    const prof = profiler.scope("minpack.qrfac_no_pivot");
+    defer prof.end();
+
+    const minmn = @min(m, n);
+    for (0..minmn) |j| {
+        const phase_prof = profiler.scope("minpack.qrfac_no_pivot.householder");
+        defer phase_prof.end();
+
+        const diag_index = index(m, j, j);
+        var ajnorm = enormColumn(a, m, j, j);
+        if (ajnorm == 0.0) continue;
+
+        if (a[diag_index] < 0.0) ajnorm = -ajnorm;
+        for (j..m) |i| {
+            a[index(m, i, j)] /= ajnorm;
+        }
+        a[diag_index] += 1.0;
+
+        const jp1 = j + 1;
+        if (jp1 >= n) continue;
+
+        for (jp1..n) |k| {
+            var sum: f64 = 0.0;
+            for (j..m) |i| {
+                sum += a[index(m, i, j)] * a[index(m, i, k)];
+            }
+            const temp = sum / a[diag_index];
+            for (j..m) |i| {
+                a[index(m, i, k)] -= temp * a[index(m, i, j)];
+            }
+        }
+    }
+}
+
 fn lmpar(
     allocator: std.mem.Allocator,
     r: []f64,
@@ -877,17 +912,7 @@ fn solveAugmentedDampedLeastSquares(
     {
         const phase_prof = profiler.scope("minpack.solve_augmented.qrfac");
         defer phase_prof.end();
-
-        qrfac(
-            workspace.augmented_matrix,
-            rows,
-            n,
-            false,
-            workspace.qr_ipvt,
-            workspace.qr_rdiag,
-            workspace.qr_acnorm,
-            workspace.qr_wa,
-        );
+        qrfacNoPivot(workspace.augmented_matrix, rows, n);
     }
 
     {
