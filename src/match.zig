@@ -153,13 +153,13 @@ pub fn analyzePair(
             try control_points.append(allocator, .{
                 .left_image = pair.left_index,
                 .right_image = pair.right_index,
-                .left_x = left_x,
-                .left_y = left_y,
-                .right_x = final_right_x,
-                .right_y = final_right_y,
+                .left_x = quantizeControlPointCoord(left_x),
+                .left_y = quantizeControlPointCoord(left_y),
+                .right_x = quantizeControlPointCoord(final_right_x),
+                .right_y = quantizeControlPointCoord(final_right_y),
                 .score = final_score,
-                .coarse_right_x = result.x * scale_factor,
-                .coarse_right_y = result.y * scale_factor,
+                .coarse_right_x = quantizeControlPointCoord(result.x * scale_factor),
+                .coarse_right_y = quantizeControlPointCoord(result.y * scale_factor),
                 .coarse_score = result.score,
                 .refined_score = final_score,
             });
@@ -215,6 +215,11 @@ pub fn refinePairMatches(
     _ = left_full;
     _ = right_full;
     return;
+}
+
+fn quantizeControlPointCoord(value: anytype) f64 {
+    const scaled = @round(@as(f64, value) * 1_000_000.0);
+    return scaled / 1_000_000.0;
 }
 
 pub fn renderSummary(
