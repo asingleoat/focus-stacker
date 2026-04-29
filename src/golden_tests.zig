@@ -40,7 +40,7 @@ test "golden pair -m PTO stays stable and near upstream" {
     try expectProjectsMatch(&golden, &actual, .{
         .pose_tolerance_degrees = 0.000_01,
         .hfov_tolerance_degrees = 0.000_2,
-        .cp_tolerance_pixels = 0.000_05,
+        .cp_tolerance_pixels = 0.000_1,
     });
 
     try expectPoseNearUpstream(golden.images[1].pose, upstream.images[1].pose, .{

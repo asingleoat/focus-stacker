@@ -1,4 +1,5 @@
 pub const config = @import("config.zig");
+pub const fft_backend = @import("fft_backend.zig");
 pub const features = @import("features.zig");
 pub const gray = @import("gray.zig");
 pub const image_io = @import("image_io.zig");

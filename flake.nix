@@ -3,9 +3,13 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    vkfft-src = {
+      url = "github:DTolm/VkFFT";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, vkfft-src }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
@@ -22,14 +26,21 @@
           pkgs.libgpiod
           pkgs.panotools
           pkgs.libexif
+          pkgs.pffft
           pkgs.libjpeg_turbo
           pkgs.libpng
           pkgs.libtiff
+          pkgs.vulkan-headers
+          pkgs.vulkan-loader
+          pkgs.glslang
           # Focus stack processing (desktop only)
           pkgs.hugin        # provides align_image_stack
           pkgs.enblend-enfuse  # provides enfuse
           pkgs.jq           # manifest parsing in scripts
         ];
+        shellHook = ''
+          export VKFFT_INCLUDE_DIR="${vkfft-src}"
+        '';
       };
     };
 }

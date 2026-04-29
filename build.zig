@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     });
     core.addOptions("build_options", build_options);
     configureImageDeps(core);
+    configureFftDeps(b, core);
 
     const exe = b.addExecutable(.{
         .name = "align_image_stack_zig",
@@ -25,6 +26,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addOptions("build_options", build_options);
     configureImageDeps(exe.root_module);
+    configureFftDeps(b, exe.root_module);
 
     b.installArtifact(exe);
 
@@ -41,6 +43,7 @@ pub fn build(b: *std.Build) void {
     });
     parity_probe.root_module.addOptions("build_options", build_options);
     configureImageDeps(parity_probe.root_module);
+    configureFftDeps(b, parity_probe.root_module);
 
     const upstream_probe = b.addExecutable(.{
         .name = "upstream_probe",
@@ -66,6 +69,7 @@ pub fn build(b: *std.Build) void {
     });
     match_probe.root_module.addOptions("build_options", build_options);
     configureImageDeps(match_probe.root_module);
+    configureFftDeps(b, match_probe.root_module);
 
     const live_probe = b.addExecutable(.{
         .name = "live_probe",
@@ -77,6 +81,7 @@ pub fn build(b: *std.Build) void {
     });
     live_probe.root_module.addOptions("build_options", build_options);
     configureImageDeps(live_probe.root_module);
+    configureFftDeps(b, live_probe.root_module);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {
@@ -144,4 +149,16 @@ fn configurePano13Deps(b: *std.Build, module: *std.Build.Module) void {
         .search_strategy = .paths_first,
     });
     module.addIncludePath(b.path("upstream/libpano13-2.9.23/libpano13-2.9.23"));
+}
+
+fn configureFftDeps(b: *std.Build, module: *std.Build.Module) void {
+    module.link_libc = true;
+    module.linkSystemLibrary("pffft", .{
+        .use_pkg_config = .no,
+        .search_strategy = .paths_first,
+    });
+
+    if (b.graph.env_map.get("VKFFT_INCLUDE_DIR")) |vkfft_include| {
+        module.addIncludePath(.{ .cwd_relative = vkfft_include });
+    }
 }

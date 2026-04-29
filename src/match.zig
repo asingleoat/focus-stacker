@@ -1,5 +1,6 @@
 const std = @import("std");
 const features = @import("features.zig");
+const fft_backend = @import("fft_backend.zig");
 const gray = @import("gray.zig");
 const profiler = @import("profiler.zig");
 const sequence = @import("sequence.zig");
@@ -921,16 +922,16 @@ fn computeCorrelationSurfaceLikeHugin(
         };
     }
 
-    const fft_w = if (use_exact_dft) search_w else nextPowerOfTwo(search_w);
-    const fft_h = if (use_exact_dft) search_h else nextPowerOfTwo(search_h);
+    const fft_w = fft_backend.nearestValidComplexLength(search_w);
+    const fft_h = fft_backend.nearestValidComplexLength(search_h);
     const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
 
-    var search_freq = try allocator.alloc(Complex, fft_count);
+    var search_freq = try allocator.alloc(fft_backend.Complex, fft_count);
     defer allocator.free(search_freq);
-    var kernel_freq = try allocator.alloc(Complex, fft_count);
+    var kernel_freq = try allocator.alloc(fft_backend.Complex, fft_count);
     defer allocator.free(kernel_freq);
-    const row_buffer = try allocator.alloc(Complex, 2 * @max(fft_w, fft_h));
-    defer allocator.free(row_buffer);
+    var plan = try fft_backend.ComplexPlan2D.init(allocator, fft_w, fft_h);
+    defer plan.deinit();
 
     for (search_freq) |*value| value.* = .{};
     for (kernel_freq) |*value| value.* = .{};
@@ -939,11 +940,11 @@ fn computeCorrelationSurfaceLikeHugin(
     while (y < search_h) : (y += 1) {
         var x: u32 = 0;
         while (x < search_w) : (x += 1) {
-            search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = matchPixel(
+            search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = @as(f32, @floatCast(matchPixel(
                 @as(u32, @intCast(search_ul_x)) + x,
                 @as(u32, @intCast(search_ul_y)) + y,
                 right,
-            );
+            )));
         }
     }
 
@@ -956,13 +957,13 @@ fn computeCorrelationSurfaceLikeHugin(
         }
     }
 
-    fft2d(search_freq, fft_w, fft_h, false, row_buffer);
-    fft2d(kernel_freq, fft_w, fft_h, false, row_buffer);
+    plan.transformInPlace(search_freq, false);
+    plan.transformInPlace(kernel_freq, false);
 
     for (search_freq, kernel_freq) |*lhs, rhs| {
-        lhs.* = lhs.mul(rhs.conj());
+        lhs.* = lhs.mulConj(rhs);
     }
-    fft2d(search_freq, fft_w, fft_h, true, row_buffer);
+    plan.transformInPlace(search_freq, true);
 
     var center_y: i32 = ystart;
     while (center_y < yend) : (center_y += 1) {
@@ -976,7 +977,7 @@ fn computeCorrelationSurfaceLikeHugin(
             if (denominator == 0) continue;
 
             const corr_idx = @as(usize, @intCast(top_y)) * @as(usize, fft_w) + @as(usize, @intCast(top_x));
-            const score = @as(f32, @floatCast(search_freq[corr_idx].re / normalization / denominator));
+            const score = @as(f32, @floatCast(@as(f64, search_freq[corr_idx].re) / normalization / denominator));
             pixels[@as(usize, @intCast(center_y)) * @as(usize, search_w) + @as(usize, @intCast(center_x))] = score;
             if (score > best_score) {
                 best_score = score;
@@ -1036,30 +1037,6 @@ fn finalizeSurfaceResult(
 
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
 }
-
-const Complex = struct {
-    re: f64 = 0,
-    im: f64 = 0,
-
-    fn add(self: Complex, other: Complex) Complex {
-        return .{ .re = self.re + other.re, .im = self.im + other.im };
-    }
-
-    fn sub(self: Complex, other: Complex) Complex {
-        return .{ .re = self.re - other.re, .im = self.im - other.im };
-    }
-
-    fn mul(self: Complex, other: Complex) Complex {
-        return .{
-            .re = self.re * other.re - self.im * other.im,
-            .im = self.re * other.im + self.im * other.re,
-        };
-    }
-
-    fn conj(self: Complex) Complex {
-        return .{ .re = self.re, .im = -self.im };
-    }
-};
 
 fn buildIntegralImages(
     right: *const gray.GrayImage,
@@ -1156,120 +1133,6 @@ fn directNumerator(
         }
     }
     return numerator;
-}
-
-fn nextPowerOfTwo(value: u32) u32 {
-    var power: u32 = 1;
-    while (power < value) : (power <<= 1) {}
-    return power;
-}
-
-fn dft2d(data: []Complex, width: u32, height: u32, inverse: bool, scratch: []Complex) void {
-    var y: u32 = 0;
-    while (y < height) : (y += 1) {
-        dft1d(data[@as(usize, y) * @as(usize, width) ..][0..@as(usize, width)], inverse, scratch);
-    }
-
-    var x: u32 = 0;
-    while (x < width) : (x += 1) {
-        var row: u32 = 0;
-        while (row < height) : (row += 1) {
-            scratch[@as(usize, row)] = data[@as(usize, row) * @as(usize, width) + @as(usize, x)];
-        }
-        dft1d(scratch[0..@as(usize, height)], inverse, scratch[@as(usize, height)..]);
-        row = 0;
-        while (row < height) : (row += 1) {
-            data[@as(usize, row) * @as(usize, width) + @as(usize, x)] = scratch[@as(usize, row)];
-        }
-    }
-}
-
-fn dft1d(data: []Complex, inverse: bool, scratch: []Complex) void {
-    const n = data.len;
-    std.debug.assert(scratch.len >= n);
-
-    const sign: f64 = if (inverse) 2.0 else -2.0;
-    const scale: f64 = if (inverse) @as(f64, @floatFromInt(n)) else 1.0;
-
-    for (0..n) |k| {
-        var sum = Complex{};
-        for (0..n) |t| {
-            const angle = sign * 2.0 * std.math.pi * @as(f64, @floatFromInt(k * t)) / @as(f64, @floatFromInt(n));
-            const twiddle = Complex{ .re = @cos(angle), .im = @sin(angle) };
-            sum = sum.add(data[t].mul(twiddle));
-        }
-        scratch[k] = .{ .re = sum.re / scale, .im = sum.im / scale };
-    }
-
-    @memcpy(data, scratch[0..n]);
-}
-
-fn fft2d(data: []Complex, width: u32, height: u32, inverse: bool, scratch: []Complex) void {
-    var y: u32 = 0;
-    while (y < height) : (y += 1) {
-        fft1d(data[@as(usize, y) * @as(usize, width) ..][0..@as(usize, width)], inverse);
-    }
-
-    var x: u32 = 0;
-    while (x < width) : (x += 1) {
-        var row: u32 = 0;
-        while (row < height) : (row += 1) {
-            scratch[@as(usize, row)] = data[@as(usize, row) * @as(usize, width) + @as(usize, x)];
-        }
-        fft1d(scratch[0..@as(usize, height)], inverse);
-        row = 0;
-        while (row < height) : (row += 1) {
-            data[@as(usize, row) * @as(usize, width) + @as(usize, x)] = scratch[@as(usize, row)];
-        }
-    }
-}
-
-fn fft1d(data: []Complex, inverse: bool) void {
-    const n = data.len;
-    if (n <= 1) return;
-
-    var j: usize = 0;
-    var i: usize = 1;
-    while (i < n) : (i += 1) {
-        var bit = n >> 1;
-        while (j & bit != 0) {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
-        if (i < j) {
-            const tmp = data[i];
-            data[i] = data[j];
-            data[j] = tmp;
-        }
-    }
-
-    var len: usize = 2;
-    while (len <= n) : (len <<= 1) {
-        const direction: f64 = if (inverse) 2.0 else -2.0;
-        const angle = direction * std.math.pi / @as(f64, @floatFromInt(len));
-        const wlen = Complex{ .re = @cos(angle), .im = @sin(angle) };
-        var start: usize = 0;
-        while (start < n) : (start += len) {
-            var w = Complex{ .re = 1, .im = 0 };
-            var k: usize = 0;
-            while (k < len / 2) : (k += 1) {
-                const u = data[start + k];
-                const v = data[start + k + len / 2].mul(w);
-                data[start + k] = u.add(v);
-                data[start + k + len / 2] = u.sub(v);
-                w = w.mul(wlen);
-            }
-        }
-    }
-
-    if (inverse) {
-        const scale = @as(f64, @floatFromInt(n));
-        for (data) |*value| {
-            value.re /= scale;
-            value.im /= scale;
-        }
-    }
 }
 
 fn evaluateCorrelationWindow(
