@@ -16,6 +16,7 @@ pub const PairOptions = struct {
 };
 
 const corr_threshold_slack: f32 = 0.00025;
+const clipped_template_score_bias: f32 = 0.00075;
 
 pub const ControlPoint = struct {
     left_image: usize,
@@ -270,6 +271,26 @@ pub const MatchResult = struct {
     y: f64 = 0,
 };
 
+pub const ProbeMatchDebug = struct {
+    result: MatchResult,
+    best_x: i32 = 0,
+    best_y: i32 = 0,
+    template_mean: ?f64 = null,
+    template_variance: ?f64 = null,
+    denominator: ?f64 = null,
+    numerator: ?f64 = null,
+    surface_center: ?f32 = null,
+    surface_left: ?f32 = null,
+    surface_right: ?f32 = null,
+    surface_up: ?f32 = null,
+    surface_down: ?f32 = null,
+    direct_center: ?f32 = null,
+    direct_left: ?f32 = null,
+    direct_right: ?f32 = null,
+    direct_up: ?f32 = null,
+    direct_down: ?f32 = null,
+};
+
 pub fn probeMatchAroundCenter(
     left: *const gray.GrayImage,
     right: *const gray.GrayImage,
@@ -290,6 +311,231 @@ pub fn probeMatchAroundCenter(
         template_size,
         search_width,
     );
+}
+
+pub fn probeMatchAroundCenterDebug(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    left_x: u32,
+    left_y: u32,
+    right_center_x: u32,
+    right_center_y: u32,
+    template_size: u32,
+    search_width: u32,
+) ProbeMatchDebug {
+    const templ_half = @as(i32, @intCast(template_size / 2));
+    const templ_pos_x = @as(i32, @intCast(left_x));
+    const templ_pos_y = @as(i32, @intCast(left_y));
+
+    var tmpl_ul_x = templ_pos_x - templ_half;
+    var tmpl_ul_y = templ_pos_y - templ_half;
+    var tmpl_lr_x = templ_pos_x + templ_half + 1;
+    var tmpl_lr_y = templ_pos_y + templ_half + 1;
+    clipBounds(&tmpl_ul_x, &tmpl_lr_x, @as(i32, @intCast(left.width)));
+    clipBounds(&tmpl_ul_y, &tmpl_lr_y, @as(i32, @intCast(left.height)));
+    if (tmpl_ul_x >= tmpl_lr_x or tmpl_ul_y >= tmpl_lr_y) {
+        return .{ .result = .{} };
+    }
+
+    const patch_w = @as(u32, @intCast(tmpl_lr_x - tmpl_ul_x));
+    const patch_h = @as(u32, @intCast(tmpl_lr_y - tmpl_ul_y));
+
+    var template_storage: [1024]f32 = undefined;
+    const template = buildTemplateStats(
+        left,
+        tmpl_ul_x,
+        tmpl_ul_y,
+        patch_w,
+        patch_h,
+        &template_storage,
+    ) orelse return .{ .result = .{} };
+
+    const kul_x = tmpl_ul_x - templ_pos_x;
+    const kul_y = tmpl_ul_y - templ_pos_y;
+    const klr_x = tmpl_lr_x - templ_pos_x - 1;
+    const klr_y = tmpl_lr_y - templ_pos_y - 1;
+
+    const swidth = @as(i32, @intCast(search_width / 2)) + (2 + templ_half);
+    const search_pos_x = clipCoord(@as(i32, @intCast(right_center_x)), @as(i32, @intCast(right.width)));
+    const search_pos_y = clipCoord(@as(i32, @intCast(right_center_y)), @as(i32, @intCast(right.height)));
+
+    var search_ul_x = search_pos_x - swidth;
+    var search_ul_y = search_pos_y - swidth;
+    var search_lr_x = search_pos_x + swidth + 1;
+    var search_lr_y = search_pos_y + swidth + 1;
+    clipBounds(&search_ul_x, &search_lr_x, @as(i32, @intCast(right.width)));
+    clipBounds(&search_ul_y, &search_lr_y, @as(i32, @intCast(right.height)));
+
+    const search_w = search_lr_x - search_ul_x;
+    const search_h = search_lr_y - search_ul_y;
+    if (search_w <= 0 or search_h <= 0) {
+        return .{ .result = .{} };
+    }
+
+    const xstart = -kul_x;
+    const xend = search_w - klr_x;
+    const ystart = -kul_y;
+    const yend = search_h - klr_y;
+    if (xstart >= xend or ystart >= yend) {
+        return .{ .result = .{} };
+    }
+
+    const allocator = std.heap.page_allocator;
+    const integral = allocator.alloc(f64, @as(usize, @intCast(search_w + 1)) * @as(usize, @intCast(search_h + 1))) catch return .{ .result = .{} };
+    defer allocator.free(integral);
+    const integral_sq = allocator.alloc(f64, @as(usize, @intCast(search_w + 1)) * @as(usize, @intCast(search_h + 1))) catch return .{ .result = .{} };
+    defer allocator.free(integral_sq);
+    buildIntegralImages(
+        right,
+        search_ul_x,
+        search_ul_y,
+        @as(u32, @intCast(search_w)),
+        @as(u32, @intCast(search_h)),
+        integral,
+        integral_sq,
+    );
+
+    if (computeCorrelationSurfaceLikeHugin(
+        right,
+        search_ul_x,
+        search_ul_y,
+        @as(u32, @intCast(search_w)),
+        @as(u32, @intCast(search_h)),
+        kul_x,
+        kul_y,
+        xstart,
+        ystart,
+        xend,
+        yend,
+        template,
+        search_ul_x == 0 or search_ul_y == 0 or
+            search_lr_x == @as(i32, @intCast(right.width)) or
+            search_lr_y == @as(i32, @intCast(right.height)) or
+            tmpl_ul_x == 0 or tmpl_ul_y == 0 or
+            tmpl_lr_x == @as(i32, @intCast(left.width)) or
+            tmpl_lr_y == @as(i32, @intCast(left.height)),
+    ) catch null) |surface| {
+        defer surface.deinit();
+
+        const direct_center = evaluateCorrelationWindow(right, .{
+            .kul_x = kul_x,
+            .kul_y = kul_y,
+            .search_ul_x = search_ul_x,
+            .search_ul_y = search_ul_y,
+            .center_local_x = surface.best_x,
+            .center_local_y = surface.best_y,
+        }, template);
+        const direct_left = if (surface.best_x > xstart)
+            evaluateCorrelationWindow(right, .{
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = surface.best_x - 1,
+                .center_local_y = surface.best_y,
+            }, template)
+        else
+            null;
+        const direct_right = if (surface.best_x + 1 < xend)
+            evaluateCorrelationWindow(right, .{
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = surface.best_x + 1,
+                .center_local_y = surface.best_y,
+            }, template)
+        else
+            null;
+        const direct_up = if (surface.best_y > ystart)
+            evaluateCorrelationWindow(right, .{
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = surface.best_x,
+                .center_local_y = surface.best_y - 1,
+            }, template)
+        else
+            null;
+        const direct_down = if (surface.best_y + 1 < yend)
+            evaluateCorrelationWindow(right, .{
+                .kul_x = kul_x,
+                .kul_y = kul_y,
+                .search_ul_x = search_ul_x,
+                .search_ul_y = search_ul_y,
+                .center_local_x = surface.best_x,
+                .center_local_y = surface.best_y + 1,
+            }, template)
+        else
+            null;
+        const top_x = @as(u32, @intCast(surface.best_x + kul_x));
+        const top_y = @as(u32, @intCast(surface.best_y + kul_y));
+        const numerator = directNumerator(
+            right,
+            search_ul_x,
+            search_ul_y,
+            top_x,
+            top_y,
+            template,
+        );
+        const sum = sumRect(integral, @as(u32, @intCast(search_w)) + 1, top_x, top_y, template.width, template.height);
+        const sum_sq = sumRect(integral_sq, @as(u32, @intCast(search_w)) + 1, top_x, top_y, template.width, template.height);
+        const denominator = @sqrt(@as(f64, @floatFromInt(template.width * template.height)) * sum_sq - sum * sum) * @sqrt(template.variance);
+
+        return .{
+            .result = blk: {
+                var result = finalizeSurfaceResult(surface, search_ul_x, search_ul_y, templ_half, swidth);
+                if (patch_w != template_size + 1 or patch_h != template_size + 1) {
+                    result.score -= clipped_template_score_bias;
+                }
+                break :blk result;
+            },
+            .best_x = surface.best_x,
+            .best_y = surface.best_y,
+            .template_mean = template.mean,
+            .template_variance = template.variance,
+            .denominator = denominator,
+            .numerator = numerator,
+            .surface_center = surface.best_score,
+            .surface_left = if (surface.best_x > 0)
+                surface.pixels[@as(usize, @intCast(surface.best_y)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x - 1))]
+            else
+                null,
+            .surface_right = if (surface.best_x + 1 < @as(i32, @intCast(surface.width)))
+                surface.pixels[@as(usize, @intCast(surface.best_y)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x + 1))]
+            else
+                null,
+            .surface_up = if (surface.best_y > 0)
+                surface.pixels[@as(usize, @intCast(surface.best_y - 1)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x))]
+            else
+                null,
+            .surface_down = if (surface.best_y + 1 < @as(i32, @intCast(surface.height)))
+                surface.pixels[@as(usize, @intCast(surface.best_y + 1)) * @as(usize, surface.width) + @as(usize, @intCast(surface.best_x))]
+            else
+                null,
+            .direct_center = direct_center,
+            .direct_left = direct_left,
+            .direct_right = direct_right,
+            .direct_up = direct_up,
+            .direct_down = direct_down,
+        };
+    }
+
+    return .{
+        .result = matchAroundCenter(
+            left,
+            right,
+            left_x,
+            left_y,
+            right_center_x,
+            right_center_y,
+            template_size,
+            search_width,
+        ),
+        .best_x = 0,
+        .best_y = 0,
+    };
 }
 
 fn matchCandidate(
@@ -344,7 +590,7 @@ fn matchAroundCenter(
     const patch_w = @as(u32, @intCast(tmpl_lr_x - tmpl_ul_x));
     const patch_h = @as(u32, @intCast(tmpl_lr_y - tmpl_ul_y));
 
-    var template_storage: [1024]f64 = undefined;
+    var template_storage: [1024]f32 = undefined;
     const template = buildTemplateStats(
         left,
         tmpl_ul_x,
@@ -397,9 +643,19 @@ fn matchAroundCenter(
         xend,
         yend,
         template,
+        search_ul_x == 0 or search_ul_y == 0 or
+            search_lr_x == @as(i32, @intCast(right.width)) or
+            search_lr_y == @as(i32, @intCast(right.height)) or
+            tmpl_ul_x == 0 or tmpl_ul_y == 0 or
+            tmpl_lr_x == @as(i32, @intCast(left.width)) or
+            tmpl_lr_y == @as(i32, @intCast(left.height)),
     ) catch null) |surface| {
         defer surface.deinit();
-        return finalizeSurfaceResult(surface, search_ul_x, search_ul_y, templ_half, swidth);
+        var result = finalizeSurfaceResult(surface, search_ul_x, search_ul_y, templ_half, swidth);
+        if (patch_w != template_size + 1 or patch_h != template_size + 1) {
+            result.score -= clipped_template_score_bias;
+        }
+        return result;
     }
 
     var best_x = xstart;
@@ -517,8 +773,9 @@ const CorrelationSurface = struct {
 const TemplateStats = struct {
     width: u32,
     height: u32,
+    mean: f64,
     variance: f64,
-    zero_mean_pixels: []const f64,
+    zero_mean_pixels: []const f32,
 };
 
 fn buildTemplateStats(
@@ -527,7 +784,7 @@ fn buildTemplateStats(
     tmpl_ul_y: i32,
     patch_w: u32,
     patch_h: u32,
-    storage: []f64,
+    storage: []f32,
 ) ?TemplateStats {
     const prof = profiler.scope("match.buildTemplateStats");
     defer prof.end();
@@ -536,30 +793,37 @@ fn buildTemplateStats(
     if (count_usize == 0 or count_usize > storage.len) return null;
 
     var mean: f64 = 0;
+    var count: f64 = 0;
+    var variance_sum: f64 = 0;
     var dy: u32 = 0;
     while (dy < patch_h) : (dy += 1) {
         var dx: u32 = 0;
         while (dx < patch_w) : (dx += 1) {
-            mean += left.pixel(
+            const value = matchPixel(
                 @as(u32, @intCast(tmpl_ul_x)) + dx,
                 @as(u32, @intCast(tmpl_ul_y)) + dy,
+                left,
             );
+            count += 1.0;
+            const t1 = value - mean;
+            const t2 = t1 / count;
+            mean += t2;
+            variance_sum += (count - 1.0) * t1 * t2;
         }
     }
-    mean /= @as(f64, @floatFromInt(count_usize));
 
-    var variance_sum: f64 = 0;
     dy = 0;
     while (dy < patch_h) : (dy += 1) {
         var dx: u32 = 0;
         while (dx < patch_w) : (dx += 1) {
             const idx = @as(usize, dy) * @as(usize, patch_w) + @as(usize, dx);
-            const value = @as(f64, left.pixel(
+            const value = matchPixel(
                 @as(u32, @intCast(tmpl_ul_x)) + dx,
                 @as(u32, @intCast(tmpl_ul_y)) + dy,
-            )) - mean;
-            storage[idx] = value;
-            variance_sum += value * value;
+                left,
+            ) - mean;
+            const stored = @as(f32, @floatCast(value));
+            storage[idx] = stored;
         }
     }
 
@@ -568,7 +832,8 @@ fn buildTemplateStats(
     return .{
         .width = patch_w,
         .height = patch_h,
-        .variance = variance_sum / @as(f64, @floatFromInt(count_usize)),
+        .mean = mean,
+        .variance = variance_sum / count,
         .zero_mean_pixels = storage[0..count_usize],
     };
 }
@@ -586,26 +851,13 @@ fn computeCorrelationSurfaceLikeHugin(
     xend: i32,
     yend: i32,
     template: TemplateStats,
+    use_exact_dft: bool,
 ) !?CorrelationSurface {
     const prof = profiler.scope("match.computeCorrelationSurfaceLikeHugin");
     defer prof.end();
 
-    const enable_frequency_correlation = false;
-    if (!enable_frequency_correlation) return null;
-    if (search_w > 64 or search_h > 64) return null;
-
     const allocator = std.heap.page_allocator;
-    const fft_w = search_w;
-    const fft_h = search_h;
-    const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
     const patch_count = @as(f64, @floatFromInt(template.width * template.height));
-
-    var search_freq = try allocator.alloc(Complex, fft_count);
-    defer allocator.free(search_freq);
-    var kernel_freq = try allocator.alloc(Complex, fft_count);
-    defer allocator.free(kernel_freq);
-    const row_buffer = try allocator.alloc(Complex, 2 * @max(fft_w, fft_h));
-    defer allocator.free(row_buffer);
     const integral = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
     defer allocator.free(integral);
     const integral_sq = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
@@ -614,6 +866,72 @@ fn computeCorrelationSurfaceLikeHugin(
     @memset(pixels, -1);
     errdefer allocator.free(pixels);
 
+    buildIntegralImages(right, search_ul_x, search_ul_y, search_w, search_h, integral, integral_sq);
+
+    const normalization = @sqrt(template.variance);
+    var best_score: f32 = -1;
+    var best_x: i32 = 0;
+    var best_y: i32 = 0;
+
+    if (use_exact_dft) {
+        var center_y: i32 = ystart;
+        while (center_y < yend) : (center_y += 1) {
+            var center_x: i32 = xstart;
+            while (center_x < xend) : (center_x += 1) {
+                const top_x = center_x + kul_x;
+                const top_y = center_y + kul_y;
+                const sum = sumRect(integral, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+                const sum_sq = sumRect(integral_sq, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+                const denominator = @sqrt(patch_count * sum_sq - sum * sum);
+                if (denominator == 0) continue;
+
+                const numerator = circularCorrelationValue(
+                    right,
+                    search_ul_x,
+                    search_ul_y,
+                    search_w,
+                    search_h,
+                    @as(u32, @intCast(top_x)),
+                    @as(u32, @intCast(top_y)),
+                    template,
+                );
+                const score = @as(f32, @floatCast(numerator / normalization / denominator));
+                pixels[@as(usize, @intCast(center_y)) * @as(usize, search_w) + @as(usize, @intCast(center_x))] = score;
+                if (score > best_score) {
+                    best_score = score;
+                    best_x = center_x;
+                    best_y = center_y;
+                }
+            }
+        }
+
+        if (best_score < 0) {
+            allocator.free(pixels);
+            return null;
+        }
+
+        return .{
+            .allocator = allocator,
+            .width = search_w,
+            .height = search_h,
+            .best_x = best_x,
+            .best_y = best_y,
+            .best_score = best_score,
+            .pixels = pixels,
+        };
+    }
+
+    const fft_w = if (use_exact_dft) search_w else nextPowerOfTwo(search_w);
+    const fft_h = if (use_exact_dft) search_h else nextPowerOfTwo(search_h);
+    const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
+
+    var search_freq = try allocator.alloc(Complex, fft_count);
+    defer allocator.free(search_freq);
+    var kernel_freq = try allocator.alloc(Complex, fft_count);
+    defer allocator.free(kernel_freq);
+    const row_buffer = try allocator.alloc(Complex, 2 * @max(fft_w, fft_h));
+    defer allocator.free(row_buffer);
+
     for (search_freq) |*value| value.* = .{};
     for (kernel_freq) |*value| value.* = .{};
 
@@ -621,10 +939,11 @@ fn computeCorrelationSurfaceLikeHugin(
     while (y < search_h) : (y += 1) {
         var x: u32 = 0;
         while (x < search_w) : (x += 1) {
-            search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = @as(f64, right.pixel(
+            search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = matchPixel(
                 @as(u32, @intCast(search_ul_x)) + x,
                 @as(u32, @intCast(search_ul_y)) + y,
-            ));
+                right,
+            );
         }
     }
 
@@ -637,20 +956,13 @@ fn computeCorrelationSurfaceLikeHugin(
         }
     }
 
-    dft2d(search_freq, fft_w, fft_h, false, row_buffer);
-    dft2d(kernel_freq, fft_w, fft_h, false, row_buffer);
+    fft2d(search_freq, fft_w, fft_h, false, row_buffer);
+    fft2d(kernel_freq, fft_w, fft_h, false, row_buffer);
 
     for (search_freq, kernel_freq) |*lhs, rhs| {
         lhs.* = lhs.mul(rhs.conj());
     }
-    dft2d(search_freq, fft_w, fft_h, true, row_buffer);
-
-    buildIntegralImages(right, search_ul_x, search_ul_y, search_w, search_h, integral, integral_sq);
-
-    const normalization = @sqrt(template.variance);
-    var best_score: f32 = -1;
-    var best_x: i32 = 0;
-    var best_y: i32 = 0;
+    fft2d(search_freq, fft_w, fft_h, true, row_buffer);
 
     var center_y: i32 = ystart;
     while (center_y < yend) : (center_y += 1) {
@@ -768,10 +1080,11 @@ fn buildIntegralImages(
         var row_sum_sq: f64 = 0;
         var x: u32 = 0;
         while (x < search_w) : (x += 1) {
-            const value = @as(f64, right.pixel(
+            const value = matchPixel(
                 @as(u32, @intCast(search_ul_x)) + x,
                 @as(u32, @intCast(search_ul_y)) + y,
-            ));
+                right,
+            );
             row_sum += value;
             row_sum_sq += value * value;
             const idx = @as(usize, y + 1) * stride + @as(usize, x + 1);
@@ -789,6 +1102,60 @@ fn sumRect(integral: []const f64, stride_u32: u32, x0: u32, y0: u32, width: u32,
         integral[@as(usize, y0) * stride + @as(usize, x1)] -
         integral[@as(usize, y1) * stride + @as(usize, x0)] +
         integral[@as(usize, y0) * stride + @as(usize, x0)];
+}
+
+fn circularCorrelationValue(
+    right: *const gray.GrayImage,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    search_w: u32,
+    search_h: u32,
+    top_x: u32,
+    top_y: u32,
+    template: TemplateStats,
+) f64 {
+    var numerator: f64 = 0;
+    var dy: u32 = 0;
+    while (dy < template.height) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < template.width) : (dx += 1) {
+            const template_idx = @as(usize, dy) * @as(usize, template.width) + @as(usize, dx);
+            const sample_x = (top_x + dx) % search_w;
+            const sample_y = (top_y + dy) % search_h;
+            const right_value = matchPixel(
+                @as(u32, @intCast(search_ul_x)) + sample_x,
+                @as(u32, @intCast(search_ul_y)) + sample_y,
+                right,
+            );
+            numerator += @as(f64, template.zero_mean_pixels[template_idx]) * right_value;
+        }
+    }
+    return numerator;
+}
+
+fn directNumerator(
+    right: *const gray.GrayImage,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    top_x: u32,
+    top_y: u32,
+    template: TemplateStats,
+) f64 {
+    var numerator: f64 = 0;
+    var dy: u32 = 0;
+    while (dy < template.height) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < template.width) : (dx += 1) {
+            const template_idx = @as(usize, dy) * @as(usize, template.width) + @as(usize, dx);
+            const right_value = matchPixel(
+                @as(u32, @intCast(search_ul_x)) + top_x + dx,
+                @as(u32, @intCast(search_ul_y)) + top_y + dy,
+                right,
+            );
+            numerator += @as(f64, template.zero_mean_pixels[template_idx]) * right_value;
+        }
+    }
+    return numerator;
 }
 
 fn nextPowerOfTwo(value: u32) u32 {
@@ -930,10 +1297,11 @@ fn evaluateCorrelationWindow(
         var dx: u32 = 0;
         while (dx < patch_w) : (dx += 1) {
             const template_idx = @as(usize, dy) * @as(usize, patch_w) + @as(usize, dx);
-            const right_value = @as(f64, right.pixel(
+            const right_value = matchPixel(
                 @as(u32, @intCast(right_x0)) + dx,
                 @as(u32, @intCast(right_y0)) + dy,
-            ));
+                right,
+            );
             numerator += template.zero_mean_pixels[template_idx] * right_value;
             sum_right += right_value;
             sum_right_sq += right_value * right_value;
@@ -946,6 +1314,14 @@ fn evaluateCorrelationWindow(
         return -1;
     }
     return @as(f32, @floatCast(numerator / denominator));
+}
+
+fn matchPixel(x: u32, y: u32, image: *const gray.GrayImage) f64 {
+    const value = @as(f64, image.pixel(x, y));
+    if (image.sample_scale <= 1.0) {
+        return value;
+    }
+    return @round(value * @as(f64, image.sample_scale));
 }
 
 fn clipBounds(start: *i32, stop: *i32, limit: i32) void {

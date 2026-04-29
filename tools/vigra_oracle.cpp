@@ -109,6 +109,7 @@ void usage()
         << "  vigra_oracle dump-import-ppm <image> <output.ppm>\n"
         << "  vigra_oracle dump-interest <image.pgm> <grid_size> <rect_index> <scale> <max_points>\n"
         << "  vigra_oracle match-point <left.pgm> <right.pgm> <left_x> <left_y> <right_x> <right_y> <template_size> <search_width>\n"
+        << "  vigra_oracle debug-point-pgm <left.pgm> <right.pgm> <left_x> <left_y> <right_x> <right_y> <template_size> <search_width>\n"
         << "  vigra_oracle match-rect <left_pyr.pgm> <right_pyr.pgm> <left_full.pgm> <right_full.pgm> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n"
         << "  vigra_oracle trace-rect <left_pyr.pgm> <right_pyr.pgm> <left_full.pgm> <right_full.pgm> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n"
         << "  vigra_oracle trace-rect-image <left_image> <right_image> <grid_size> <rect_index> <points_per_grid> <pyr_level> <corr_threshold>\n";
@@ -465,6 +466,150 @@ int main(int argc, char **argv)
                 searchWidth);
             std::cout << std::fixed << std::setprecision(9)
                       << res.maxi << ' ' << res.maxpos.x << ' ' << res.maxpos.y << '\n';
+            return 0;
+        }
+
+        if(command == "debug-point-pgm")
+        {
+            if(argc != 10)
+            {
+                usage();
+                return 1;
+            }
+
+            const std::string leftPath = argv[2];
+            const std::string rightPath = argv[3];
+            const int leftX = std::stoi(argv[4]);
+            const int leftY = std::stoi(argv[5]);
+            const int rightX = std::stoi(argv[6]);
+            const int rightY = std::stoi(argv[7]);
+            const int templSize = std::stoi(argv[8]);
+            const int sWidth = std::stoi(argv[9]);
+
+            vigra::BImage templImg = loadPgm(leftPath);
+            vigra::BImage searchImg = loadPgm(rightPath);
+
+            int templWidth = templSize / 2;
+            vigra::Diff2D templPos(leftX, leftY);
+            vigra::Diff2D tmplUL(templPos.x - templWidth, templPos.y - templWidth);
+            vigra::Diff2D tmplLR(templPos.x + templWidth + 1, templPos.y + templWidth + 1);
+            vigra::Diff2D tmplImgSize(templImg.size());
+            tmplUL = hugin_utils::simpleClipPoint(tmplUL, vigra::Diff2D(0,0), tmplImgSize);
+            tmplLR = hugin_utils::simpleClipPoint(tmplLR, vigra::Diff2D(0,0), tmplImgSize);
+            vigra::Diff2D tmplSize = tmplLR - tmplUL;
+
+            int swidth = sWidth / 2 + (2 + templWidth);
+            vigra::Diff2D searchPos(rightX, rightY);
+            if(searchPos.x < 0) searchPos.x = 0;
+            if(searchPos.x > searchImg.width()) searchPos.x = searchImg.width() - 1;
+            if(searchPos.y < 0) searchPos.y = 0;
+            if(searchPos.y > searchImg.height()) searchPos.y = searchImg.height() - 1;
+
+            vigra::Diff2D searchUL(searchPos.x - swidth, searchPos.y - swidth);
+            vigra::Diff2D searchLR(searchPos.x + swidth + 1, searchPos.y + swidth + 1);
+            vigra::Diff2D srcImgSize(searchImg.size());
+            searchUL = hugin_utils::simpleClipPoint(searchUL, vigra::Diff2D(0,0), srcImgSize);
+            searchLR = hugin_utils::simpleClipPoint(searchLR, vigra::Diff2D(0,0), srcImgSize);
+            vigra::Diff2D searchSize = searchLR - searchUL;
+
+            vigra::FImage srcImage(searchSize);
+            vigra::copyImage(vigra::make_triple(searchImg.upperLeft() + searchUL,
+                                                searchImg.upperLeft() + searchLR,
+                                                searchImg.accessor()),
+                             destImage(srcImage));
+
+            vigra::FImage templateImage(tmplSize);
+            vigra::copyImage(vigra::make_triple(templImg.upperLeft() + tmplUL,
+                                                templImg.upperLeft() + tmplLR,
+                                                templImg.accessor()),
+                             destImage(templateImage));
+
+            vigra::FImage dest(searchSize);
+            dest.init(-1);
+
+            vigra::FindAverageAndVariance<float> kMean;
+            vigra::inspectImage(srcImageRange(templateImage), kMean);
+            const double templateMean = kMean.average();
+            const double templateVariance = kMean.variance(false);
+
+            vigra_ext::CorrelationResult corr;
+#ifdef HAVE_FFTW
+            corr = vigra_ext::correlateImageFastFFT(srcImage, dest, templateImage,
+                tmplUL - templPos, tmplLR - templPos - vigra::Diff2D(1, 1));
+#elif defined VIGRA_EXT_USE_FAST_CORR
+            corr = vigra_ext::correlateImageFast(srcImage, dest, templateImage,
+                tmplUL - templPos, tmplLR - templPos - vigra::Diff2D(1, 1), -1);
+#else
+            corr = vigra_ext::correlateImage(srcImage.upperLeft(),
+                srcImage.lowerRight(),
+                srcImage.accessor(),
+                dest.upperLeft(),
+                dest.accessor(),
+                templateImage.upperLeft() + templPos,
+                templateImage.accessor(),
+                tmplUL, tmplLR, -1);
+#endif
+
+            vigra_ext::CorrelationResult refined = corr;
+            if (corr.maxpos.x > 2 + templWidth && corr.maxpos.x < 2*swidth+1-2-templWidth
+                && corr.maxpos.y > 2+templWidth && corr.maxpos.y < 2*swidth+1-2-templWidth)
+            {
+                refined = vigra_ext::subpixelMaxima(vigra::srcImageRange(dest), corr.maxpos.toDiff2D());
+            }
+            else
+            {
+                refined.maxpos = corr.maxpos;
+                refined.maxi = corr.maxi;
+            }
+
+            const int bx = corr.maxpos.x;
+            const int by = corr.maxpos.y;
+            const int topx = bx + (tmplUL.x - templPos.x);
+            const int topy = by + (tmplUL.y - templPos.y);
+            double exactSum = 0.0;
+            double exactSumSqDiff = 0.0;
+            const int count = tmplSize.x * tmplSize.y;
+            for(int dy = 0; dy < tmplSize.y; ++dy)
+            {
+                for(int dx = 0; dx < tmplSize.x; ++dx)
+                {
+                    exactSum += templImg(tmplUL.x + dx, tmplUL.y + dy);
+                }
+            }
+            const double exactMean = exactSum / count;
+            double numerator = 0.0;
+            double exactNumerator = 0.0;
+            double sumF = 0.0;
+            double sumF2 = 0.0;
+            for(int dy = 0; dy < tmplSize.y; ++dy)
+            {
+                for(int dx = 0; dx < tmplSize.x; ++dx)
+                {
+                    const double leftValue = templImg(tmplUL.x + dx, tmplUL.y + dy);
+                    const double rightValue = srcImage(topx + dx, topy + dy);
+                    numerator += (leftValue - templateMean) * rightValue;
+                    exactNumerator += (leftValue - exactMean) * rightValue;
+                    exactSumSqDiff += (leftValue - exactMean) * (leftValue - exactMean);
+                    sumF += rightValue;
+                    sumF2 += rightValue * rightValue;
+                }
+            }
+            const double denominator = std::sqrt(templateVariance) * std::sqrt(tmplSize.x * tmplSize.y * sumF2 - sumF * sumF);
+            const double exactDenominator = std::sqrt(exactSumSqDiff / count) * std::sqrt(tmplSize.x * tmplSize.y * sumF2 - sumF * sumF);
+            std::cout << std::fixed << std::setprecision(9)
+                      << "corr=" << corr.maxi << " " << bx << " " << by << "\n"
+                      << "template mean=" << templateMean
+                      << " variance=" << templateVariance
+                      << " exact_mean=" << exactMean
+                      << " numerator=" << numerator
+                      << " denominator=" << denominator
+                      << " exact_score=" << (exactNumerator / exactDenominator) << "\n"
+                      << "surface center=" << dest(bx, by)
+                      << " left=" << dest(bx - 1, by)
+                      << " right=" << dest(bx + 1, by)
+                      << " up=" << dest(bx, by - 1)
+                      << " down=" << dest(bx, by + 1) << "\n"
+                      << "refined=" << refined.maxi << " " << refined.maxpos.x + searchUL.x << " " << refined.maxpos.y + searchUL.y << "\n";
             return 0;
         }
 

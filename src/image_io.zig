@@ -110,7 +110,8 @@ pub fn writeTiff(path: []const u8, image: *const Image) SaveError!void {
     const tiff = c.TIFFOpen(path_z.ptr, "w") orelse return error.OpenFailed;
     defer c.TIFFClose(tiff);
 
-    const samples_per_pixel: u16 = image.info.color_channels;
+    const extra_channels: u16 = 1;
+    const samples_per_pixel: u16 = image.info.color_channels + extra_channels;
     const bits_per_sample: u16 = switch (image.info.sample_type) {
         .u8 => 8,
         .u16 => 16,
@@ -119,32 +120,62 @@ pub fn writeTiff(path: []const u8, image: *const Image) SaveError!void {
         .grayscale => c.PHOTOMETRIC_MINISBLACK,
         .rgb => c.PHOTOMETRIC_RGB,
     };
+    const sample_format: u16 = c.SAMPLEFORMAT_UINT;
+    const x_resolution: f32 = 150.0;
+    const y_resolution: f32 = 150.0;
+    var extra_sample_kind: c.uint16 = c.EXTRASAMPLE_UNASSALPHA;
 
     _ = c.TIFFSetField(tiff, c.TIFFTAG_IMAGEWIDTH, @as(c.uint32, @intCast(image.info.width)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_IMAGELENGTH, @as(c.uint32, @intCast(image.info.height)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLESPERPIXEL, @as(c.uint16, @intCast(samples_per_pixel)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_BITSPERSAMPLE, @as(c.uint16, @intCast(bits_per_sample)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_PLANARCONFIG, c.PLANARCONFIG_CONTIG);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLEFORMAT, @as(c.uint16, @intCast(sample_format)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_PHOTOMETRIC, @as(c.uint16, @intCast(photometric)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_COMPRESSION, c.COMPRESSION_LZW);
     _ = c.TIFFSetField(tiff, c.TIFFTAG_ORIENTATION, c.ORIENTATION_TOPLEFT);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_ROWSPERSTRIP, c.TIFFDefaultStripSize(tiff, 0));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_ROWSPERSTRIP, @as(c.uint32, 1));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_RESOLUTIONUNIT, c.RESUNIT_INCH);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_XRESOLUTION, x_resolution);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_YRESOLUTION, y_resolution);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLWIDTH, @as(c.uint32, @intCast(image.info.width)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLLENGTH, @as(c.uint32, @intCast(image.info.height)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_EXTRASAMPLES, @as(c.uint16, 1), &extra_sample_kind);
 
     const channels = @as(usize, image.info.color_channels);
+    const out_channels = channels + @as(usize, extra_channels);
     const width = @as(usize, image.info.width);
     switch (image.pixels) {
         .u8 => |pixels| {
-            for (0..image.info.height) |row| {
-                const row_bytes = pixels[row * width * channels ..][0 .. width * channels];
-                if (c.TIFFWriteScanline(tiff, @ptrCast(@constCast(row_bytes.ptr)), @as(c.uint32, @intCast(row)), 0) == -1) {
+            const alpha: u8 = std.math.maxInt(u8);
+            const scanline = std.heap.c_allocator.alloc(u8, width * out_channels) catch return error.EncodeFailed;
+            defer std.heap.c_allocator.free(scanline);
+            for (0..image.info.height) |row_index| {
+                const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
+                for (0..width) |x| {
+                    const src = src_row[x * channels ..][0..channels];
+                    const dst = scanline[x * out_channels ..][0..out_channels];
+                    @memcpy(dst[0..channels], src);
+                    dst[channels] = alpha;
+                }
+                if (c.TIFFWriteScanline(tiff, @ptrCast(@constCast(scanline.ptr)), @as(c.uint32, @intCast(row_index)), 0) == -1) {
                     return error.EncodeFailed;
                 }
             }
         },
         .u16 => |pixels| {
-            for (0..image.info.height) |row| {
-                const row_words = pixels[row * width * channels ..][0 .. width * channels];
-                if (c.TIFFWriteScanline(tiff, @ptrCast(@constCast(row_words.ptr)), @as(c.uint32, @intCast(row)), 0) == -1) {
+            const alpha: u16 = std.math.maxInt(u16);
+            const scanline = std.heap.c_allocator.alloc(u16, width * out_channels) catch return error.EncodeFailed;
+            defer std.heap.c_allocator.free(scanline);
+            for (0..image.info.height) |row_index| {
+                const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
+                for (0..width) |x| {
+                    const src = src_row[x * channels ..][0..channels];
+                    const dst = scanline[x * out_channels ..][0..out_channels];
+                    @memcpy(dst[0..channels], src);
+                    dst[channels] = alpha;
+                }
+                if (c.TIFFWriteScanline(tiff, @ptrCast(@constCast(scanline.ptr)), @as(c.uint32, @intCast(row_index)), 0) == -1) {
                     return error.EncodeFailed;
                 }
             }

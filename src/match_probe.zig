@@ -114,6 +114,69 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "debug-point")) {
+        const left_path = args.next() orelse return error.InvalidArguments;
+        const right_path = args.next() orelse return error.InvalidArguments;
+        const pyr_level = try parseU8(args.next() orelse return error.InvalidArguments);
+        const left_x = try parseU32(args.next() orelse return error.InvalidArguments);
+        const left_y = try parseU32(args.next() orelse return error.InvalidArguments);
+        const right_center_x = try parseU32(args.next() orelse return error.InvalidArguments);
+        const right_center_y = try parseU32(args.next() orelse return error.InvalidArguments);
+        const template_size = try parseU32(args.next() orelse return error.InvalidArguments);
+        const search_width = try parseU32(args.next() orelse return error.InvalidArguments);
+        if (args.next() != null) return error.InvalidArguments;
+
+        var left = try loadReducedGrayImage(arena, left_path, pyr_level);
+        defer left.deinit(arena);
+        var right = try loadReducedGrayImage(arena, right_path, pyr_level);
+        defer right.deinit(arena);
+
+        const debug = match_mod.probeMatchAroundCenterDebug(
+            &left,
+            &right,
+            left_x,
+            left_y,
+            right_center_x,
+            right_center_y,
+            template_size,
+            search_width,
+        );
+
+        var stdout_buffer: [2048]u8 = undefined;
+        var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+        const stdout = &stdout_writer.interface;
+        try stdout.print(
+            "result={d:.9} {d:.9} {d:.9}\n" ++
+                "best={d} {d}\n" ++
+                "template mean={?d:.9} variance={?d:.9} numerator={?d:.9} denominator={?d:.9}\n" ++
+                "surface center={?d:.9} left={?d:.9} right={?d:.9} up={?d:.9} down={?d:.9}\n" ++
+                "direct center={?d:.9} left={?d:.9} right={?d:.9} up={?d:.9} down={?d:.9}\n",
+            .{
+                debug.result.score,
+                debug.result.x,
+                debug.result.y,
+                debug.best_x,
+                debug.best_y,
+                debug.template_mean,
+                debug.template_variance,
+                debug.numerator,
+                debug.denominator,
+                debug.surface_center,
+                debug.surface_left,
+                debug.surface_right,
+                debug.surface_up,
+                debug.surface_down,
+                debug.direct_center,
+                debug.direct_left,
+                debug.direct_right,
+                debug.direct_up,
+                debug.direct_down,
+            },
+        );
+        try stdout.flush();
+        return;
+    }
+
     if (std.mem.eql(u8, command, "match-rect")) {
         const left_path = args.next() orelse return error.InvalidArguments;
         const right_path = args.next() orelse return error.InvalidArguments;
@@ -359,6 +422,7 @@ fn usage() !void {
         \\  match_probe dump-import-ppm <image> <output.ppm>
         \\  match_probe dump-interest <image> <pyr_level> <grid_size> <rect_index> <max_points>
         \\  match_probe match-point <left> <right> <pyr_level> <left_x> <left_y> <right_center_x> <right_center_y> <template_size> <search_width>
+        \\  match_probe debug-point <left> <right> <pyr_level> <left_x> <left_y> <right_center_x> <right_center_y> <template_size> <search_width>
         \\  match_probe match-rect <left> <right> <pyr_level> <grid_size> <rect_index> <points_per_grid> <corr_threshold>
         \\  match_probe trace-rect <left> <right> <pyr_level> <grid_size> <rect_index> <points_per_grid> <corr_threshold>
         \\  match_probe count-grid <left> <right> <pyr_level> <grid_size> <points_per_grid> <corr_threshold>

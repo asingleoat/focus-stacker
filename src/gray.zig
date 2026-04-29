@@ -6,6 +6,7 @@ pub const GrayImage = struct {
     width: u32,
     height: u32,
     pixels: []f32,
+    sample_scale: f32 = 1.0,
 
     pub fn pixel(self: *const GrayImage, x: u32, y: u32) f32 {
         return self.pixels[@as(usize, y) * @as(usize, self.width) + @as(usize, x)];
@@ -21,6 +22,7 @@ pub const GrayImage = struct {
             .width = self.width,
             .height = self.height,
             .pixels = pixels,
+            .sample_scale = self.sample_scale,
         };
     }
 };
@@ -54,6 +56,7 @@ pub fn fromLoaded(allocator: std.mem.Allocator, image: *const image_io.Image) st
         .width = image.info.width,
         .height = image.info.height,
         .pixels = pixels,
+        .sample_scale = sampleScaleForType(image.info.sample_type),
     };
 }
 
@@ -64,10 +67,6 @@ pub fn fromLoadedReducedLikeHugin(
 ) std.mem.Allocator.Error!GrayImage {
     const prof = profiler.scope("gray.fromLoadedReducedLikeHugin");
     defer prof.end();
-
-    if (levels == 0) {
-        return fromLoaded(allocator, image);
-    }
 
     return switch (image.pixels) {
         .u8 => |src| reduceAndConvert(u8, allocator, image.info, src, levels),
@@ -118,6 +117,7 @@ pub fn reduceByHalf(allocator: std.mem.Allocator, src: *const GrayImage) std.mem
         .width = dst_width,
         .height = dst_height,
         .pixels = dst_pixels,
+        .sample_scale = src.sample_scale,
     };
 }
 
@@ -221,6 +221,14 @@ fn reduceAndConvert(
         .width = width,
         .height = height,
         .pixels = out_pixels,
+        .sample_scale = sampleScaleForType(info.sample_type),
+    };
+}
+
+fn sampleScaleForType(sample_type: image_io.SampleType) f32 {
+    return switch (sample_type) {
+        .u8 => 255.0,
+        .u16 => 65535.0,
     };
 }
 
