@@ -154,7 +154,7 @@ pub fn renderUsage(
         \\  --align-to-first  Align all images to the first one
         \\  --dont-remap-ref  Don't output the remapped reference image
         \\  --gpu             Use GPU for remapping
-        \\  --threads num     Use up to num pair-analysis worker threads
+        \\  --threads num     Use up to num worker threads for pair analysis and remap
         \\  -h, --help        Display this help text
         \\
         \\Status: sequence planning, matching, full-resolution refinement, an optimize-vector-aware iterative camera/lens solve, PTO output, and aligned TIFF remap are ported; HDR output is not yet implemented.

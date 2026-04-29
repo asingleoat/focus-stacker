@@ -2790,7 +2790,101 @@ pub fn transformPoint(pose: ImagePose, x: anytype, y: anytype, width: u32, heigh
     };
 }
 
+pub const InverseTransformCache = struct {
+    basic_rectilinear: bool,
+    has_translation: bool,
+    src_center_x: f64,
+    src_center_y: f64,
+    dest_center_x: f64,
+    dest_center_y: f64,
+    pano_distance: f64,
+    resize_scale: f64,
+    dest_focal: f64,
+    image_focal: f64,
+    pitch_roll: Matrix3,
+    yaw_turn: f64,
+    yaw: f64,
+    radial_a: f64,
+    radial_b: f64,
+    radial_c: f64,
+    center_shift_x: f64,
+    center_shift_y: f64,
+    radial_inv_norm: f64,
+    trans_x: f64,
+    trans_y: f64,
+    trans_z: f64,
+    translation_plane_normal: Vec3,
+};
+
+pub fn initInverseTransformCache(pose: ImagePose, width: u32, height: u32) InverseTransformCache {
+    const src_center = distortionCenter(pose, width, height);
+    const dest_center = panoramaCenter(width, height);
+    const pano_distance = panoramaFocalLengthPixels(width, pose);
+    return .{
+        .basic_rectilinear = hasBasicRectilinearPose(pose),
+        .has_translation = hasTranslation(pose),
+        .src_center_x = src_center.x,
+        .src_center_y = src_center.y,
+        .dest_center_x = dest_center.x,
+        .dest_center_y = dest_center.y,
+        .pano_distance = pano_distance,
+        .resize_scale = focalLengthPixels(width, effectiveHfovDegrees(pose)) / pano_distance,
+        .dest_focal = pano_distance,
+        .image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose)),
+        .pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true),
+        .yaw_turn = -pose.yaw * pano_distance,
+        .yaw = pose.yaw,
+        .radial_a = pose.radial_a,
+        .radial_b = pose.radial_b,
+        .radial_c = pose.radial_c,
+        .center_shift_x = pose.center_shift_x,
+        .center_shift_y = pose.center_shift_y,
+        .radial_inv_norm = radialNormalizer(width, height),
+        .trans_x = pose.trans_x,
+        .trans_y = pose.trans_y,
+        .trans_z = pose.trans_z,
+        .translation_plane_normal = translationPlaneNormal(pose),
+    };
+}
+
 pub fn inverseTransformPoint(pose: ImagePose, out_x: f64, out_y: f64, width: u32, height: u32) Point2 {
+    const cache = initInverseTransformCache(pose, width, height);
+    return inverseTransformPointCached(cache, out_x, out_y);
+}
+
+pub fn inverseTransformPointCached(cache: InverseTransformCache, out_x: f64, out_y: f64) Point2 {
+    if (cache.basic_rectilinear) {
+        var p = Point2{
+            .x = out_x - cache.dest_center_x,
+            .y = out_y - cache.dest_center_y,
+        };
+        p = erectRectPoint(p, cache.pano_distance);
+        p = rotateErectPoint(p, cache.pano_distance * std.math.pi, cache.yaw_turn);
+        p = sphereTpErectPoint(p, cache.pano_distance);
+        p = perspSpherePoint(p, cache.pitch_roll, cache.pano_distance);
+        p = rectSphereTpPoint(p, cache.pano_distance);
+        p.x *= cache.resize_scale;
+        p.y *= cache.resize_scale;
+        return .{
+            .x = cache.src_center_x + p.x,
+            .y = cache.src_center_y + p.y,
+        };
+    }
+
+    const pano_ray = rectilinearRay(out_x - cache.dest_center_x, out_y - cache.dest_center_y, cache.dest_focal);
+    const camera_ray = if (cache.has_translation)
+        rayFromTranslationPlaneCached(cache, pano_ray) orelse return .{ .x = -1.0, .y = -1.0 }
+    else
+        pano_ray;
+    const radial = imagePlaneFromWorldRayCached(cache, camera_ray);
+    const undistorted = invertRadialDistortionCached(cache, radial.x, radial.y);
+    return .{
+        .x = cache.src_center_x + undistorted.x,
+        .y = cache.src_center_y + undistorted.y,
+    };
+}
+
+pub fn inverseTransformPointSlow(pose: ImagePose, out_x: f64, out_y: f64, width: u32, height: u32) Point2 {
     if (hasBasicRectilinearPose(pose)) {
         return basicRectilinearInverseTransformPoint(pose, out_x, out_y, width, height);
     }
@@ -3012,6 +3106,17 @@ fn imagePlaneFromWorldRay(pose: ImagePose, world_ray: Vec3, width: u32) Point2 {
     };
 }
 
+fn imagePlaneFromWorldRayCached(cache: InverseTransformCache, world_ray: Vec3) Point2 {
+    const unyawed = rotateYaw(world_ray, -cache.yaw);
+    const local_ray = matrixMul(cache.pitch_roll, unyawed);
+    const denom = -local_ray.z;
+    if (@abs(denom) < 1e-12) return .{ .x = -1.0, .y = -1.0 };
+    return .{
+        .x = cache.image_focal * (local_ray.x / denom) + cache.center_shift_x,
+        .y = cache.image_focal * (local_ray.y / denom) + cache.center_shift_y,
+    };
+}
+
 fn rectilinearRay(x: f64, y: f64, focal: f64) Vec3 {
     return normalize3(.{
         .x = x,
@@ -3122,6 +3227,19 @@ fn rayFromTranslationPlane(pose: ImagePose, pano_ray: Vec3) ?Vec3 {
         .x = plane_hit.x - pose.trans_x,
         .y = plane_hit.y - pose.trans_y,
         .z = plane_hit.z - pose.trans_z,
+    });
+}
+
+fn rayFromTranslationPlaneCached(cache: InverseTransformCache, pano_ray: Vec3) ?Vec3 {
+    const plane_hit = linePlaneIntersection(
+        cache.translation_plane_normal,
+        .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+        pano_ray,
+    ) orelse return null;
+    return normalize3(.{
+        .x = plane_hit.x - cache.trans_x,
+        .y = plane_hit.y - cache.trans_y,
+        .z = plane_hit.z - cache.trans_z,
     });
 }
 
@@ -3288,6 +3406,35 @@ fn invertRadialDistortion(pose: ImagePose, dx: f64, dy: f64, width: u32, height:
             3.0 * pose.radial_c * normalized_r4;
         const f = radius * factor - q_radius;
         const df = factor + 2.0 * radius * radius * inv_norm * factor_derivative;
+        if (@abs(df) < 1e-12) break;
+        radius -= f / df;
+        radius = @max(radius, 0.0);
+    }
+
+    const scale = radius / q_radius;
+    return .{
+        .x = dx * scale,
+        .y = dy * scale,
+    };
+}
+
+fn invertRadialDistortionCached(cache: InverseTransformCache, dx: f64, dy: f64) Point2 {
+    const q_radius = @sqrt(dx * dx + dy * dy);
+    if (q_radius < 1e-12) {
+        return .{ .x = dx, .y = dy };
+    }
+
+    var radius = q_radius;
+    for (0..6) |_| {
+        const normalized_r2 = radius * radius * cache.radial_inv_norm;
+        const normalized_r4 = normalized_r2 * normalized_r2;
+        const factor = 1.0 + cache.radial_a * normalized_r2 + cache.radial_b * normalized_r4 + cache.radial_c * normalized_r4 * normalized_r2;
+        const factor_derivative =
+            cache.radial_a +
+            2.0 * cache.radial_b * normalized_r2 +
+            3.0 * cache.radial_c * normalized_r4;
+        const f = radius * factor - q_radius;
+        const df = factor + 2.0 * radius * radius * cache.radial_inv_norm * factor_derivative;
         if (@abs(df) < 1e-12) break;
         radius -= f / df;
         radius = @max(radius, 0.0);

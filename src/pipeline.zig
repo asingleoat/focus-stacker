@@ -135,6 +135,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
             images,
             final_solve.poses,
             roi,
+            effectiveWorkJobs(cfg, countActiveRemapImages(plan.remap_active.items)),
         );
         if (cfg.verbose > 0) {
             const message = try std.fmt.allocPrint(allocator, "written aligned TIFF output with prefix {s}\n", .{aligned_prefix});
@@ -413,17 +414,29 @@ fn cleanupWorkerResults(allocator: std.mem.Allocator, worker_results: []PairWork
 }
 
 fn effectivePairJobs(cfg: *const config_mod.Config, pair_count: usize) usize {
-    if (pair_count == 0) return 1;
+    return effectiveWorkJobs(cfg, pair_count);
+}
+
+fn effectiveWorkJobs(cfg: *const config_mod.Config, work_count: usize) usize {
+    if (work_count == 0) return 1;
     const requested = if (cfg.pair_jobs) |jobs|
         @as(usize, jobs)
     else
         defaultPairJobs();
-    return @max(@as(usize, 1), @min(requested, pair_count));
+    return @max(@as(usize, 1), @min(requested, work_count));
 }
 
 fn defaultPairJobs() usize {
     const cpu_count = std.Thread.getCpuCount() catch 1;
     return if (cpu_count > 2) cpu_count - 2 else 1;
+}
+
+fn countActiveRemapImages(remap_active: []const bool) usize {
+    var count: usize = 0;
+    for (remap_active) |is_active| {
+        if (is_active) count += 1;
+    }
+    return count;
 }
 
 fn nextPairIndex(state: *PairWorkerState) ?usize {

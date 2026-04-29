@@ -73,6 +73,74 @@ pub const SaveError = error{
     UnsupportedPixelFormat,
 };
 
+pub const TiffWriter = struct {
+    tiff: *c.TIFF,
+
+    pub fn deinit(self: *TiffWriter) void {
+        c.TIFFClose(self.tiff);
+    }
+
+    pub fn writeScanlineU8(self: *TiffWriter, row_index: u32, scanline: []const u8) SaveError!void {
+        const prof = profiler.scope("image_io.tiffWriter.writeScanlineU8");
+        defer prof.end();
+        if (c.TIFFWriteScanline(self.tiff, @ptrCast(@constCast(scanline.ptr)), @as(c.uint32, @intCast(row_index)), 0) == -1) {
+            return error.EncodeFailed;
+        }
+    }
+
+    pub fn writeScanlineU16(self: *TiffWriter, row_index: u32, scanline: []const u16) SaveError!void {
+        const prof = profiler.scope("image_io.tiffWriter.writeScanlineU16");
+        defer prof.end();
+        if (c.TIFFWriteScanline(self.tiff, @ptrCast(@constCast(scanline.ptr)), @as(c.uint32, @intCast(row_index)), 0) == -1) {
+            return error.EncodeFailed;
+        }
+    }
+};
+
+pub fn openTiffWriter(path: []const u8, info: ImageInfo) SaveError!TiffWriter {
+    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return error.OpenFailed;
+    defer std.heap.c_allocator.free(path_z);
+
+    const tiff = c.TIFFOpen(path_z.ptr, "w") orelse return error.OpenFailed;
+    errdefer c.TIFFClose(tiff);
+
+    const extra_channels: u16 = 1;
+    const samples_per_pixel: u16 = info.color_channels + extra_channels;
+    const bits_per_sample: u16 = switch (info.sample_type) {
+        .u8 => 8,
+        .u16 => 16,
+    };
+    const photometric: u16 = switch (info.color_model) {
+        .grayscale => c.PHOTOMETRIC_MINISBLACK,
+        .rgb => c.PHOTOMETRIC_RGB,
+    };
+    const sample_format: u16 = c.SAMPLEFORMAT_UINT;
+    const x_resolution: f32 = 150.0;
+    const y_resolution: f32 = 150.0;
+    var extra_sample_kind: c.uint16 = c.EXTRASAMPLE_UNASSALPHA;
+    const bytes_per_sample = bits_per_sample / 8;
+    const row_bytes = @as(c.uint32, @intCast(@as(usize, info.width) * @as(usize, samples_per_pixel) * @as(usize, bytes_per_sample)));
+
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_IMAGEWIDTH, @as(c.uint32, @intCast(info.width)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_IMAGELENGTH, @as(c.uint32, @intCast(info.height)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLESPERPIXEL, @as(c.uint16, @intCast(samples_per_pixel)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_BITSPERSAMPLE, @as(c.uint16, @intCast(bits_per_sample)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_PLANARCONFIG, c.PLANARCONFIG_CONTIG);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLEFORMAT, @as(c.uint16, @intCast(sample_format)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_PHOTOMETRIC, @as(c.uint16, @intCast(photometric)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_COMPRESSION, c.COMPRESSION_LZW);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_ORIENTATION, c.ORIENTATION_TOPLEFT);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_ROWSPERSTRIP, c.TIFFDefaultStripSize(tiff, row_bytes));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_RESOLUTIONUNIT, c.RESUNIT_INCH);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_XRESOLUTION, x_resolution);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_YRESOLUTION, y_resolution);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLWIDTH, @as(c.uint32, @intCast(info.width)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLLENGTH, @as(c.uint32, @intCast(info.height)));
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_EXTRASAMPLES, @as(c.uint16, 1), &extra_sample_kind);
+
+    return .{ .tiff = tiff };
+}
+
 pub fn loadInfo(allocator: std.mem.Allocator, path: []const u8) (LoadError || std.mem.Allocator.Error)!ImageInfo {
     const prof = profiler.scope("image_io.loadInfo");
     defer prof.end();
@@ -104,46 +172,14 @@ pub fn loadImage(allocator: std.mem.Allocator, path: []const u8) (LoadError || s
 }
 
 pub fn writeTiff(path: []const u8, image: *const Image) SaveError!void {
-    const path_z = std.heap.c_allocator.dupeZ(u8, path) catch return error.OpenFailed;
-    defer std.heap.c_allocator.free(path_z);
+    const prof = profiler.scope("image_io.writeTiff");
+    defer prof.end();
 
-    const tiff = c.TIFFOpen(path_z.ptr, "w") orelse return error.OpenFailed;
-    defer c.TIFFClose(tiff);
-
-    const extra_channels: u16 = 1;
-    const samples_per_pixel: u16 = image.info.color_channels + extra_channels;
-    const bits_per_sample: u16 = switch (image.info.sample_type) {
-        .u8 => 8,
-        .u16 => 16,
-    };
-    const photometric: u16 = switch (image.info.color_model) {
-        .grayscale => c.PHOTOMETRIC_MINISBLACK,
-        .rgb => c.PHOTOMETRIC_RGB,
-    };
-    const sample_format: u16 = c.SAMPLEFORMAT_UINT;
-    const x_resolution: f32 = 150.0;
-    const y_resolution: f32 = 150.0;
-    var extra_sample_kind: c.uint16 = c.EXTRASAMPLE_UNASSALPHA;
-
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_IMAGEWIDTH, @as(c.uint32, @intCast(image.info.width)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_IMAGELENGTH, @as(c.uint32, @intCast(image.info.height)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLESPERPIXEL, @as(c.uint16, @intCast(samples_per_pixel)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_BITSPERSAMPLE, @as(c.uint16, @intCast(bits_per_sample)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_PLANARCONFIG, c.PLANARCONFIG_CONTIG);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLEFORMAT, @as(c.uint16, @intCast(sample_format)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_PHOTOMETRIC, @as(c.uint16, @intCast(photometric)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_COMPRESSION, c.COMPRESSION_LZW);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_ORIENTATION, c.ORIENTATION_TOPLEFT);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_ROWSPERSTRIP, @as(c.uint32, 1));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_RESOLUTIONUNIT, c.RESUNIT_INCH);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_XRESOLUTION, x_resolution);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_YRESOLUTION, y_resolution);
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLWIDTH, @as(c.uint32, @intCast(image.info.width)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLLENGTH, @as(c.uint32, @intCast(image.info.height)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_EXTRASAMPLES, @as(c.uint16, 1), &extra_sample_kind);
+    var writer = try openTiffWriter(path, image.info);
+    defer writer.deinit();
 
     const channels = @as(usize, image.info.color_channels);
-    const out_channels = channels + @as(usize, extra_channels);
+    const out_channels = channels + 1;
     const width = @as(usize, image.info.width);
     switch (image.pixels) {
         .u8 => |pixels| {
@@ -151,15 +187,21 @@ pub fn writeTiff(path: []const u8, image: *const Image) SaveError!void {
             const scanline = std.heap.c_allocator.alloc(u8, width * out_channels) catch return error.EncodeFailed;
             defer std.heap.c_allocator.free(scanline);
             for (0..image.info.height) |row_index| {
-                const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
-                for (0..width) |x| {
-                    const src = src_row[x * channels ..][0..channels];
-                    const dst = scanline[x * out_channels ..][0..out_channels];
-                    @memcpy(dst[0..channels], src);
-                    dst[channels] = alpha;
+                {
+                    const pack_prof = profiler.scope("image_io.writeTiff.packRowU8");
+                    defer pack_prof.end();
+                    const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
+                    for (0..width) |x| {
+                        const src = src_row[x * channels ..][0..channels];
+                        const dst = scanline[x * out_channels ..][0..out_channels];
+                        @memcpy(dst[0..channels], src);
+                        dst[channels] = alpha;
+                    }
                 }
-                if (c.TIFFWriteScanline(tiff, @ptrCast(@constCast(scanline.ptr)), @as(c.uint32, @intCast(row_index)), 0) == -1) {
-                    return error.EncodeFailed;
+                {
+                    const write_prof = profiler.scope("image_io.writeTiff.writeScanlineU8");
+                    defer write_prof.end();
+                    try writer.writeScanlineU8(@intCast(row_index), scanline);
                 }
             }
         },
@@ -168,15 +210,21 @@ pub fn writeTiff(path: []const u8, image: *const Image) SaveError!void {
             const scanline = std.heap.c_allocator.alloc(u16, width * out_channels) catch return error.EncodeFailed;
             defer std.heap.c_allocator.free(scanline);
             for (0..image.info.height) |row_index| {
-                const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
-                for (0..width) |x| {
-                    const src = src_row[x * channels ..][0..channels];
-                    const dst = scanline[x * out_channels ..][0..out_channels];
-                    @memcpy(dst[0..channels], src);
-                    dst[channels] = alpha;
+                {
+                    const pack_prof = profiler.scope("image_io.writeTiff.packRowU16");
+                    defer pack_prof.end();
+                    const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
+                    for (0..width) |x| {
+                        const src = src_row[x * channels ..][0..channels];
+                        const dst = scanline[x * out_channels ..][0..out_channels];
+                        @memcpy(dst[0..channels], src);
+                        dst[channels] = alpha;
+                    }
                 }
-                if (c.TIFFWriteScanline(tiff, @ptrCast(@constCast(scanline.ptr)), @as(c.uint32, @intCast(row_index)), 0) == -1) {
-                    return error.EncodeFailed;
+                {
+                    const write_prof = profiler.scope("image_io.writeTiff.writeScanlineU16");
+                    defer write_prof.end();
+                    try writer.writeScanlineU16(@intCast(row_index), scanline);
                 }
             }
         },
