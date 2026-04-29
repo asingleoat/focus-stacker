@@ -134,25 +134,7 @@ pub fn largestSmoothLengthAtMost(k: u32) u32 {
 pub fn largestUsableTruncatedComplexLength(requested: u32) u32 {
     if (requested == 0) return 0;
 
-    // The vendored selector finds a generally "smooth" candidate, but PFFFT's
-    // valid complex sizes are stricter than generic n-smooth numbers. Per
-    // pffft.h, complex transforms require N = 2^a * 3^b * 5^c with a >= 5,
-    // so values like 125 (5^3) are smooth but still unusable for this backend.
-    const trimmed = largestSmoothLengthAtMost(requested);
-    if (c.pffft_is_valid_size(@as(c_int, @intCast(trimmed)), c.PFFFT_COMPLEX) != 0) {
-        return trimmed;
-    }
-
-    const lower = c.pffft_nearest_transform_size(@as(c_int, @intCast(trimmed)), c.PFFFT_COMPLEX, 0);
-    if (lower > 0 and lower <= @as(c_int, @intCast(requested))) {
-        return @as(u32, @intCast(lower));
-    }
-
-    if (c.pffft_is_valid_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX) != 0) {
-        return requested;
-    }
-
-    return @as(u32, @intCast(c.pffft_nearest_transform_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX, 1)));
+    return @as(u32, @intCast(smooth_numbers.largestPffftLengthLessThanK(std.heap.page_allocator, requested) catch requested));
 }
 
 pub fn nearestValidComplexLength(requested: u32) u32 {
@@ -200,13 +182,14 @@ fn storeComplexRow(src: []const f32, dst: []Complex) void {
 }
 
 test "largestSmoothLengthAtMost uses vendored 11-smooth selector" {
-    try std.testing.expectEqual(@as(u32, 100), largestSmoothLengthAtMost(105));
-    try std.testing.expectEqual(@as(u32, 126), largestSmoothLengthAtMost(128));
+    try std.testing.expectEqual(@as(u32, 105), largestSmoothLengthAtMost(105));
+    try std.testing.expectEqual(@as(u32, 128), largestSmoothLengthAtMost(128));
 }
 
 test "largest usable truncated complex length follows smooth truncation policy" {
     try std.testing.expectEqual(@as(u32, 96), largestUsableTruncatedComplexLength(105));
-    try std.testing.expectEqual(@as(u32, 96), largestUsableTruncatedComplexLength(128));
+    try std.testing.expectEqual(@as(u32, 128), largestUsableTruncatedComplexLength(128));
+    try std.testing.expectEqual(@as(u32, 96), largestUsableTruncatedComplexLength(125));
 }
 
 test "nearest valid complex length preserves current non-truncating matcher behavior" {
