@@ -6,9 +6,9 @@
 # all-in-focus composite using align_image_stack_zig and enfuse.
 #
 # Usage:
-#   ./scripts/stack_zig.sh image1.jpg image2.jpg ...
-#   ./scripts/stack_zig.sh S001_manifest.json
-#   ./scripts/stack_zig.sh S001_manifest.json S002_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] image1.jpg image2.jpg ...
+#   ./scripts/stack_zig.sh [--threads N] S001_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] S001_manifest.json S002_manifest.json
 #
 # Accepts any mix of image files and manifest JSON files.
 #
@@ -22,6 +22,7 @@
 ALIGN_CONTROL_POINTS="${ALIGN_CONTROL_POINTS:-200}"
 ALIGN_GRID_SIZE="${ALIGN_GRID_SIZE:-7}"
 ALIGN_ERROR_THRESHOLD="${ALIGN_ERROR_THRESHOLD:-5}"
+ALIGN_THREADS="${ALIGN_THREADS:-}"
 
 CONTRAST_WINDOW_SIZE="${CONTRAST_WINDOW_SIZE:-5}"
 HARD_MASK="${HARD_MASK:-true}"
@@ -79,13 +80,66 @@ derive_name() {
 main() {
     check_deps
 
-    [[ $# -gt 0 ]] || die "usage: $0 <images or manifests...>"
+    local threads="$ALIGN_THREADS"
+    local -a positional=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --threads)
+                [[ $# -ge 2 ]] || die "missing value for --threads"
+                threads="$2"
+                shift 2
+                ;;
+            --threads=*)
+                threads="${1#--threads=}"
+                shift
+                ;;
+            --help|-h)
+                cat <<EOF
+usage: $0 [--threads N] <images or manifests...>
+
+Options:
+  --threads N   Limit align_image_stack_zig pair-analysis worker threads
+
+Environment overrides:
+  ALIGN_THREADS
+  ALIGN_CONTROL_POINTS
+  ALIGN_GRID_SIZE
+  ALIGN_ERROR_THRESHOLD
+  OUTPUT_DIR
+  JPEG_QUALITY
+  ALIGN_OPTIMIZE_MODE
+EOF
+                return 0
+                ;;
+            --)
+                shift
+                while [[ $# -gt 0 ]]; do
+                    positional+=("$1")
+                    shift
+                done
+                break
+                ;;
+            -*)
+                die "unknown option: $1"
+                ;;
+            *)
+                positional+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    if [[ -n "$threads" ]]; then
+        [[ "$threads" =~ ^[1-9][0-9]*$ ]] || die "--threads must be a positive integer"
+    fi
+
+    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] <images or manifests...>"
 
     local name
-    name="$(derive_name "$1")"
+    name="$(derive_name "${positional[0]}")"
 
     local -a images=()
-    for arg in "$@"; do
+    for arg in "${positional[@]}"; do
         if [[ "$arg" == *.json ]]; then
             [[ -f "$arg" ]] || die "manifest not found: $arg"
             while IFS= read -r img; do
@@ -101,9 +155,10 @@ main() {
     local count=${#images[@]}
     [[ $count -ge 2 ]] || die "need at least 2 images, got $count"
 
-    if [[ $# -gt 1 && "$1" == *.json ]]; then
+    if [[ ${#positional[@]} -gt 1 && "${positional[0]}" == *.json ]]; then
+        local last_index=$(( ${#positional[@]} - 1 ))
         local last_name
-        last_name="$(derive_name "${!#}")"
+        last_name="$(derive_name "${positional[$last_index]}")"
         name="${name}-${last_name}"
     fi
 
@@ -112,6 +167,11 @@ main() {
     echo "=== Focus Stack (Zig): $name ==="
     echo "  Images: $count"
     echo "  Aligner: $aligner_bin"
+    if [[ -n "$threads" ]]; then
+        echo "  Threads: $threads"
+    else
+        echo "  Threads: auto"
+    fi
     echo "  Output: $OUTPUT_DIR/${name}_stacked.tif"
     echo ""
 
@@ -126,7 +186,13 @@ main() {
     echo "  Control points: ${ALIGN_CONTROL_POINTS} per cell, ${ALIGN_GRID_SIZE}x${ALIGN_GRID_SIZE} grid"
     echo ""
 
+    local -a aligner_opts=()
+    if [[ -n "$threads" ]]; then
+        aligner_opts+=(--threads "$threads")
+    fi
+
     "$aligner_bin" \
+        "${aligner_opts[@]}" \
         -m \
         -i \
         -d \
