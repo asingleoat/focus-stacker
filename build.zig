@@ -163,6 +163,12 @@ fn configurePano13Deps(b: *std.Build, module: *std.Build.Module) void {
 
 fn configureFftDeps(b: *std.Build, module: *std.Build.Module) void {
     module.link_libc = true;
+    if (b.graph.env_map.get("PFFFT_INCLUDE_DIR")) |pffft_include| {
+        module.addIncludePath(.{ .cwd_relative = pffft_include });
+    }
+    if (b.graph.env_map.get("PFFFT_LIB_DIR")) |pffft_lib| {
+        module.addLibraryPath(.{ .cwd_relative = pffft_lib });
+    }
     module.linkSystemLibrary("pffft", .{
         .use_pkg_config = .no,
         .search_strategy = .paths_first,

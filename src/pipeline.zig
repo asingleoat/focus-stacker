@@ -224,60 +224,222 @@ pub fn analyzePairs(
         .verbose = cfg.verbose,
     };
 
-    if (cfg.align_to_first) {
-        var left = try loadReducedGrayImage(allocator, images[plan.pairs.items[0].left_index].path, cfg.pyr_level);
-        defer left.deinit(allocator);
-        var left_full = try loadReducedGrayImage(allocator, images[plan.pairs.items[0].left_index].path, 0);
-        defer left_full.deinit(allocator);
+    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len);
+    if (pair_jobs == 1) {
+        if (cfg.align_to_first) {
+            var left = try loadReducedGrayImage(allocator, images[plan.pairs.items[0].left_index].path, cfg.pyr_level);
+            defer left.deinit(allocator);
+            var left_full = try loadReducedGrayImage(allocator, images[plan.pairs.items[0].left_index].path, 0);
+            defer left_full.deinit(allocator);
 
-        for (plan.pairs.items) |pair| {
-            var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
-            defer right.deinit(allocator);
-            var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
-            defer right_full.deinit(allocator);
+            for (plan.pairs.items) |pair| {
+                var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
+                defer right.deinit(allocator);
+                var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
+                defer right_full.deinit(allocator);
 
-            var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
-            match.refinePairMatches(options, &pair_result, &left_full, &right_full);
-            try results.append(allocator, pair_result);
-        }
-    } else {
-        var left_index = plan.pairs.items[0].left_index;
-        var left = try loadReducedGrayImage(allocator, images[left_index].path, cfg.pyr_level);
-        defer left.deinit(allocator);
-        var left_full = try loadReducedGrayImage(allocator, images[left_index].path, 0);
-        defer left_full.deinit(allocator);
-
-        for (plan.pairs.items, 0..) |pair, pair_idx| {
-            if (pair.left_index != left_index) {
-                left.deinit(allocator);
-                left = try loadReducedGrayImage(allocator, images[pair.left_index].path, cfg.pyr_level);
-                left_full.deinit(allocator);
-                left_full = try loadReducedGrayImage(allocator, images[pair.left_index].path, 0);
-                left_index = pair.left_index;
+                var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
+                match.refinePairMatches(options, &pair_result, &left_full, &right_full);
+                try results.append(allocator, pair_result);
             }
+        } else {
+            var left_index = plan.pairs.items[0].left_index;
+            var left = try loadReducedGrayImage(allocator, images[left_index].path, cfg.pyr_level);
+            defer left.deinit(allocator);
+            var left_full = try loadReducedGrayImage(allocator, images[left_index].path, 0);
+            defer left_full.deinit(allocator);
 
-            var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
-            var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
-            var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
-            match.refinePairMatches(options, &pair_result, &left_full, &right_full);
-            try results.append(allocator, pair_result);
+            for (plan.pairs.items, 0..) |pair, pair_idx| {
+                if (pair.left_index != left_index) {
+                    left.deinit(allocator);
+                    left = try loadReducedGrayImage(allocator, images[pair.left_index].path, cfg.pyr_level);
+                    left_full.deinit(allocator);
+                    left_full = try loadReducedGrayImage(allocator, images[pair.left_index].path, 0);
+                    left_index = pair.left_index;
+                }
 
-            const should_reuse_right = pair_idx + 1 < plan.pairs.items.len and
-                plan.pairs.items[pair_idx + 1].left_index == pair.right_index;
-            if (should_reuse_right) {
-                left.deinit(allocator);
-                left = right;
-                left_full.deinit(allocator);
-                left_full = right_full;
-                left_index = pair.right_index;
-            } else {
-                right.deinit(allocator);
-                right_full.deinit(allocator);
+                var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
+                var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
+                var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
+                match.refinePairMatches(options, &pair_result, &left_full, &right_full);
+                try results.append(allocator, pair_result);
+
+                const should_reuse_right = pair_idx + 1 < plan.pairs.items.len and
+                    plan.pairs.items[pair_idx + 1].left_index == pair.right_index;
+                if (should_reuse_right) {
+                    left.deinit(allocator);
+                    left = right;
+                    left_full.deinit(allocator);
+                    left_full = right_full;
+                    left_index = pair.right_index;
+                } else {
+                    right.deinit(allocator);
+                    right_full.deinit(allocator);
+                }
             }
         }
+
+        return results.toOwnedSlice(allocator);
     }
 
+    const parallel_results = try analyzePairsParallel(allocator, cfg, images, plan.pairs.items, options, pair_jobs);
+    defer allocator.free(parallel_results);
+    try results.ensureTotalCapacityPrecise(allocator, parallel_results.len);
+    for (parallel_results) |pair_result| {
+        results.appendAssumeCapacity(pair_result);
+    }
     return results.toOwnedSlice(allocator);
+}
+
+const PairWorkerResult = struct {
+    value: ?match.PairMatches = null,
+};
+
+const PairWorkerState = struct {
+    allocator: std.mem.Allocator,
+    images: []const sequence.InputImage,
+    pairs: []const sequence.MatchPair,
+    options: match.PairOptions,
+    pyr_level: u8,
+    next_index: usize = 0,
+    first_error: ?RunError = null,
+    mutex: std.Thread.Mutex = .{},
+    results: []PairWorkerResult,
+};
+
+fn analyzePairsParallel(
+    allocator: std.mem.Allocator,
+    cfg: *const config_mod.Config,
+    images: []const sequence.InputImage,
+    pairs: []const sequence.MatchPair,
+    options: match.PairOptions,
+    pair_jobs: usize,
+) RunError![]match.PairMatches {
+    var thread_safe_allocator: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
+    const worker_results = try allocator.alloc(PairWorkerResult, pairs.len);
+    errdefer allocator.free(worker_results);
+    for (worker_results) |*entry| entry.* = .{};
+
+    var state = PairWorkerState{
+        .allocator = thread_safe_allocator.allocator(),
+        .images = images,
+        .pairs = pairs,
+        .options = options,
+        .pyr_level = cfg.pyr_level,
+        .results = worker_results,
+    };
+
+    const spawned_count = pair_jobs - 1;
+    var threads = try allocator.alloc(std.Thread, spawned_count);
+    defer allocator.free(threads);
+
+    var started_threads: usize = 0;
+    errdefer {
+        for (threads[0..started_threads]) |thread| {
+            thread.join();
+        }
+        cleanupWorkerResults(allocator, worker_results);
+    }
+
+    for (threads) |*thread| {
+        thread.* = try std.Thread.spawn(.{}, pairWorkerMain, .{&state});
+        started_threads += 1;
+    }
+
+    pairWorkerMain(&state);
+
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    if (state.first_error) |err| {
+        cleanupWorkerResults(allocator, worker_results);
+        return err;
+    }
+
+    var ordered = try allocator.alloc(match.PairMatches, pairs.len);
+    errdefer allocator.free(ordered);
+    for (worker_results, 0..) |entry, pair_index| {
+        ordered[pair_index] = entry.value orelse return error.InternalInvariantViolation;
+    }
+    allocator.free(worker_results);
+    return ordered;
+}
+
+fn pairWorkerMain(state: *PairWorkerState) void {
+    while (true) {
+        const pair_index = nextPairIndex(state) orelse return;
+        const pair = state.pairs[pair_index];
+        const result = analyzePairDecodedOnDemand(state.allocator, state.images, state.options, state.pyr_level, pair) catch |err| {
+            recordError(state, err);
+            return;
+        };
+        state.results[pair_index].value = result;
+    }
+}
+
+fn analyzePairDecodedOnDemand(
+    allocator: std.mem.Allocator,
+    images: []const sequence.InputImage,
+    options: match.PairOptions,
+    pyr_level: u8,
+    pair: sequence.MatchPair,
+) RunError!match.PairMatches {
+    var left = try loadReducedGrayImage(allocator, images[pair.left_index].path, pyr_level);
+    defer left.deinit(allocator);
+    var left_full = try loadReducedGrayImage(allocator, images[pair.left_index].path, 0);
+    defer left_full.deinit(allocator);
+    var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, pyr_level);
+    defer right.deinit(allocator);
+    var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
+    defer right_full.deinit(allocator);
+
+    var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
+    match.refinePairMatches(options, &pair_result, &left_full, &right_full);
+    return pair_result;
+}
+
+fn cleanupWorkerResults(allocator: std.mem.Allocator, worker_results: []PairWorkerResult) void {
+    for (worker_results) |*entry| {
+        if (entry.value) |*value| {
+            value.deinit(allocator);
+            entry.value = null;
+        }
+    }
+}
+
+fn effectivePairJobs(cfg: *const config_mod.Config, pair_count: usize) usize {
+    if (pair_count == 0) return 1;
+    const requested = if (cfg.pair_jobs) |jobs|
+        @as(usize, jobs)
+    else
+        defaultPairJobs();
+    return @max(@as(usize, 1), @min(requested, pair_count));
+}
+
+fn defaultPairJobs() usize {
+    const cpu_count = std.Thread.getCpuCount() catch 1;
+    return if (cpu_count > 2) cpu_count - 2 else 1;
+}
+
+fn nextPairIndex(state: *PairWorkerState) ?usize {
+    state.mutex.lock();
+    defer state.mutex.unlock();
+
+    if (state.first_error != null) return null;
+    if (state.next_index >= state.pairs.len) return null;
+
+    const pair_index = state.next_index;
+    state.next_index += 1;
+    return pair_index;
+}
+
+fn recordError(state: *PairWorkerState, err: RunError) void {
+    state.mutex.lock();
+    defer state.mutex.unlock();
+    if (state.first_error == null) {
+        state.first_error = err;
+    }
 }
 
 fn loadReducedGrayImage(

@@ -40,6 +40,8 @@
         ];
         shellHook = ''
           export VKFFT_INCLUDE_DIR="${vkfft-src}"
+          export PFFFT_INCLUDE_DIR="${pkgs.pffft}/include"
+          export PFFFT_LIB_DIR="${pkgs.pffft}/lib"
         '';
       };
     };

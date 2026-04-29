@@ -19,6 +19,7 @@ pub const ParseError = error{
 pub const Config = struct {
     action: Action = .run,
     verbose: u8 = 0,
+    pair_jobs: ?u32 = null,
     cp_error_threshold: f64 = 3.0,
     corr_thresh: f64 = 0.9,
     points_per_grid: u32 = 8,
@@ -153,6 +154,7 @@ pub fn renderUsage(
         \\  --align-to-first  Align all images to the first one
         \\  --dont-remap-ref  Don't output the remapped reference image
         \\  --gpu             Use GPU for remapping
+        \\  --threads num     Use up to num pair-analysis worker threads
         \\  -h, --help        Display this help text
         \\
         \\Status: sequence planning, matching, full-resolution refinement, an optimize-vector-aware iterative camera/lens solve, PTO output, and aligned TIFF remap are ported; HDR output is not yet implemented.
@@ -166,11 +168,18 @@ pub fn renderSummary(
     allocator: std.mem.Allocator,
     cfg: *const Config,
 ) std.mem.Allocator.Error![]u8 {
+    var pair_jobs_buf: [32]u8 = undefined;
+    const pair_jobs = if (cfg.pair_jobs) |jobs|
+        std.fmt.bufPrint(&pair_jobs_buf, "{d}", .{jobs}) catch unreachable
+    else
+        "auto";
+
     return std.fmt.allocPrint(
         allocator,
         \\parsed configuration:
         \\  inputs: {d}
         \\  verbose: {d}
+        \\  pair jobs: {s}
         \\  pyramid level: {d}
         \\  grid: {d}x{d}
         \\  points per grid: {d}
@@ -183,6 +192,7 @@ pub fn renderSummary(
         .{
             cfg.input_files.items.len,
             cfg.verbose,
+            pair_jobs,
             cfg.pyr_level,
             cfg.grid_size,
             cfg.grid_size,
@@ -287,7 +297,7 @@ fn parseLongOption(
         return;
     }
     if (std.mem.eql(u8, name, "threads")) {
-        _ = try takeValue(args, index, attached_value);
+        cfg.pair_jobs = try parseBoundedInt(u32, try takeValue(args, index, attached_value), 1, null);
         return;
     }
     if (std.mem.eql(u8, name, "gpu")) {
@@ -392,6 +402,15 @@ test "parse clustered verbosity and value options" {
     try std.testing.expectEqual(@as(u8, 2), cfg.verbose);
     try std.testing.expectEqual(@as(u32, 7), cfg.grid_size);
     try std.testing.expectEqual(@as(u32, 12), cfg.points_per_grid);
+}
+
+test "parse threads option" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "--threads=6", "-p", "out.pto", "a.tif", "b.tif" };
+    var cfg = try parseArgs(allocator, &args);
+    defer cfg.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, 6), cfg.pair_jobs);
 }
 
 test "invalid correlation threshold is rejected" {
