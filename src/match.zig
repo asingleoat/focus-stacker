@@ -104,12 +104,22 @@ pub fn analyzePair(
     var coarse_best_score: ?f32 = null;
 
     if (opts.verbose > 0) {
-        std.debug.print("Trying to find {d} corners... \n", .{opts.points_per_grid});
+        std.debug.print(
+            "pair [{d}] -> [{d}]: matching {d} grid cells, target {d} control points per cell\n",
+            .{ pair.left_index, pair.right_index, rects.len, opts.points_per_grid },
+        );
     }
 
-    for (rects) |rect| {
+    for (rects, 0..) |rect, rect_index| {
         const candidates = try features.detectInterestPointsPartial(allocator, left, rect, 2.0, requested_candidates);
         defer allocator.free(candidates);
+
+        if (opts.verbose > 1) {
+            std.debug.print(
+                "pair [{d}] -> [{d}] rect {d}/{d}: trying to find {d} corners\n",
+                .{ pair.left_index, pair.right_index, rect_index + 1, rects.len, opts.points_per_grid },
+            );
+        }
 
         var accepted_in_rect: u32 = 0;
         for (candidates) |candidate| {
@@ -171,10 +181,17 @@ pub fn analyzePair(
             }
         }
 
-        if (opts.verbose > 0) {
+        if (opts.verbose > 1) {
             std.debug.print(
-                "Number of good matches: {d}, bad matches: {d}\n",
-                .{ accepted_in_rect, candidates.len - accepted_in_rect },
+                "pair [{d}] -> [{d}] rect {d}/{d}: accepted {d}, rejected {d}\n",
+                .{
+                    pair.left_index,
+                    pair.right_index,
+                    rect_index + 1,
+                    rects.len,
+                    accepted_in_rect,
+                    candidates.len - accepted_in_rect,
+                },
             );
         }
     }
@@ -184,6 +201,19 @@ pub fn analyzePair(
     else
         @as(f32, @floatCast(coarse_score_sum / @as(f64, @floatFromInt(coarse_control_point_count))));
     const owned = try control_points.toOwnedSlice(allocator);
+
+    if (opts.verbose > 0) {
+        std.debug.print(
+            "pair [{d}] -> [{d}]: coarse {d}, refined {d}, candidates considered {d}\n",
+            .{
+                pair.left_index,
+                pair.right_index,
+                coarse_control_point_count,
+                owned.len,
+                candidates_considered,
+            },
+        );
+    }
 
     return .{
         .pair = pair,
