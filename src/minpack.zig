@@ -513,17 +513,73 @@ fn qrfacNoPivot(a: []f64, m: usize, n: usize) void {
 
         const jp1 = j + 1;
         if (jp1 >= n) continue;
+        updateHouseholderColumns(a, m, j, jp1, n, a[diag_index]);
+    }
+}
 
-        for (jp1..n) |k| {
-            var sum: f64 = 0.0;
-            for (j..m) |i| {
-                sum += a[index(m, i, j)] * a[index(m, i, k)];
-            }
-            const temp = sum / a[diag_index];
-            for (j..m) |i| {
-                a[index(m, i, k)] -= temp * a[index(m, i, j)];
-            }
-        }
+fn updateHouseholderColumns(
+    a: []f64,
+    m: usize,
+    j: usize,
+    k_start: usize,
+    k_end: usize,
+    denom: f64,
+) void {
+    const v = a[index(m, j, j)..index(m, m, j)];
+    for (k_start..k_end) |k| {
+        const col = a[index(m, j, k)..index(m, m, k)];
+        const sum = dotProductF64(v, col);
+        const temp = sum / denom;
+        scaledSubtractInPlaceF64(col, v, temp);
+    }
+}
+
+fn dotProductF64(a: []const f64, b: []const f64) f64 {
+    std.debug.assert(a.len == b.len);
+
+    const lanes = comptime std.simd.suggestVectorLength(f64) orelse 1;
+    if (lanes <= 1) {
+        var sum: f64 = 0.0;
+        for (a, b) |lhs, rhs| sum += lhs * rhs;
+        return sum;
+    }
+
+    const Vec = @Vector(lanes, f64);
+    var sum_vec: Vec = @splat(0.0);
+    var i: usize = 0;
+    while (i + lanes <= a.len) : (i += lanes) {
+        const lhs: Vec = @bitCast(a[i..][0..lanes].*);
+        const rhs: Vec = @bitCast(b[i..][0..lanes].*);
+        sum_vec += lhs * rhs;
+    }
+
+    var sum = @reduce(.Add, sum_vec);
+    while (i < a.len) : (i += 1) {
+        sum += a[i] * b[i];
+    }
+    return sum;
+}
+
+fn scaledSubtractInPlaceF64(dst: []f64, src: []const f64, scale: f64) void {
+    std.debug.assert(dst.len == src.len);
+
+    const lanes = comptime std.simd.suggestVectorLength(f64) orelse 1;
+    if (lanes <= 1) {
+        for (dst, src) |*d, s| d.* -= scale * s;
+        return;
+    }
+
+    const Vec = @Vector(lanes, f64);
+    const scale_vec: Vec = @splat(scale);
+    var i: usize = 0;
+    while (i + lanes <= dst.len) : (i += lanes) {
+        const src_vec: Vec = @bitCast(src[i..][0..lanes].*);
+        const dst_vec: Vec = @bitCast(dst[i..][0..lanes].*);
+        dst[i..][0..lanes].* = @bitCast(dst_vec - scale_vec * src_vec);
+    }
+
+    while (i < dst.len) : (i += 1) {
+        dst[i] -= scale * src[i];
     }
 }
 
