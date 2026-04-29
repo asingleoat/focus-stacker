@@ -74,6 +74,24 @@ pub const SolveResult = struct {
     rms_error: f64,
     max_error: f64,
     control_point_count: usize,
+    distance_lm: minpack_mod.Result = .{
+        .info = 0,
+        .nfev = 0,
+        .outer_iterations = 0,
+        .trial_steps = 0,
+        .lmpar_iterations = 0,
+        .accepted_steps = 0,
+        .jacobian_evaluations = 0,
+    },
+    component_lm: minpack_mod.Result = .{
+        .info = 0,
+        .nfev = 0,
+        .outer_iterations = 0,
+        .trial_steps = 0,
+        .lmpar_iterations = 0,
+        .accepted_steps = 0,
+        .jacobian_evaluations = 0,
+    },
 
     pub fn deinit(self: *SolveResult, allocator: std.mem.Allocator) void {
         allocator.free(self.poses);
@@ -234,8 +252,8 @@ pub fn solvePosesFromInitial(
         try seedPosesLinear(allocator, layout, pair_matches, poses);
     }
     const initial_avg_hfov = currentAverageHfovDegrees(poses);
-    try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only);
-    try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise);
+    const distance_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .distance_only);
+    const component_lm = try refinePosesIteratively(allocator, layout, pair_matches, poses, initial_avg_hfov, .componentwise);
 
     const residuals = try allocator.alloc(ControlPointResidual, control_point_count);
     errdefer allocator.free(residuals);
@@ -265,6 +283,8 @@ pub fn solvePosesFromInitial(
         .rms_error = @sqrt(squared_error_sum / @as(f64, @floatFromInt(control_point_count))),
         .max_error = max_error,
         .control_point_count = control_point_count,
+        .distance_lm = distance_lm,
+        .component_lm = component_lm,
     };
 }
 
@@ -697,6 +717,54 @@ pub fn evaluateObjectiveResiduals(
     return evaluateObjectiveResidualsPadded(allocator, strategy, initial_avg_hfov, pair_matches, poses, null);
 }
 
+pub fn evaluateObjectiveResidualsPaddedUncached(
+    allocator: std.mem.Allocator,
+    strategy: ObjectiveStrategy,
+    initial_avg_hfov: f64,
+    pair_matches: []const match_mod.PairMatches,
+    poses: []const ImagePose,
+    min_count: ?usize,
+) ![]f64 {
+    const residual_count = switch (strategy) {
+        .distance_only => countControlPoints(pair_matches),
+        .componentwise => countControlPoints(pair_matches) * 2,
+    };
+    const output_count = @max(residual_count, min_count orelse 0);
+    const values = try allocator.alloc(f64, output_count);
+
+    var out_index: usize = 0;
+    var squared_sum: f64 = 0.0;
+    for (pair_matches) |pair_match| {
+        for (pair_match.control_points) |cp| {
+            switch (strategy) {
+                .distance_only => {
+                    const residual = objectiveDistanceResidual(initial_avg_hfov, poses, pair_match, cp);
+                    values[out_index] = residual;
+                    squared_sum += residual * residual;
+                    out_index += 1;
+                },
+                .componentwise => {
+                    const residual = objectiveResidualVector(initial_avg_hfov, poses, pair_match, cp);
+                    values[out_index] = residual.x;
+                    values[out_index + 1] = residual.y;
+                    squared_sum += residual.x * residual.x + residual.y * residual.y;
+                    out_index += 2;
+                },
+            }
+        }
+    }
+
+    const fill_value = if (residual_count > 0)
+        @sqrt(squared_sum / @as(f64, @floatFromInt(residual_count)))
+    else
+        0.0;
+    for (out_index..values.len) |i| {
+        values[i] = fill_value;
+    }
+
+    return values;
+}
+
 pub fn evaluateObjectiveJacobianSparse(
     allocator: std.mem.Allocator,
     strategy: ObjectiveStrategy,
@@ -848,13 +916,21 @@ fn refinePosesIteratively(
     poses: []ImagePose,
     initial_avg_hfov: f64,
     strategy: SolveStrategy,
-) SolveError!void {
+) SolveError!minpack_mod.Result {
     const prof = profiler.scope("optimize.refinePosesIteratively");
     defer prof.end();
 
     const variable_count = countLayoutVariables(layout);
     if (variable_count == 0) {
-        return;
+        return .{
+            .info = 0,
+            .nfev = 0,
+            .outer_iterations = 0,
+            .trial_steps = 0,
+            .lmpar_iterations = 0,
+            .accepted_steps = 0,
+            .jacobian_evaluations = 0,
+        };
     }
     const solve_x = try allocator.alloc(f64, variable_count);
     defer allocator.free(solve_x);
@@ -932,11 +1008,12 @@ fn refinePosesIteratively(
         )
     else
         minpack_mod.lmdif(SolveContext, allocator, &ctx, evaluateSolveVector, solve_x, residual_count, params);
-    _ = solve_result catch |err| switch (err) {
+    const lm_result = solve_result catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
     applySolveVector(layout, poses, solve_x);
+    return lm_result;
 }
 
 fn applyUpstreamZeroStartNudges(layout: []const SolveLayout, solve_x: []f64) void {

@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const core = b.addModule("align_stack_core", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
     });
     core.addOptions("build_options", build_options);
     configureImageDeps(core);
@@ -20,9 +21,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "align_stack_core", .module = core },
-            },
         }),
     });
     exe.root_module.addOptions("build_options", build_options);
@@ -75,9 +73,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/live_probe.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "align_stack_core", .module = core },
-            },
         }),
     });
     live_probe.root_module.addOptions("build_options", build_options);

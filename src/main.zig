@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("align_stack_core");
+const core = @import("root.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -122,5 +122,5 @@ fn fatalWithUsage(
 }
 
 test {
-    _ = @import("align_stack_core");
+    _ = @import("root.zig");
 }

@@ -13,6 +13,11 @@ pub const Params = struct {
 pub const Result = struct {
     info: i32,
     nfev: usize,
+    outer_iterations: usize,
+    trial_steps: usize,
+    lmpar_iterations: usize,
+    accepted_steps: usize,
+    jacobian_evaluations: usize,
 };
 
 pub fn JacobianFn(comptime Context: type) type {
@@ -61,7 +66,7 @@ fn lmdifAdvanced(
     defer prof.end();
 
     const n = x.len;
-    if (n == 0 or m < n) return .{ .info = 0, .nfev = 0 };
+    if (n == 0 or m < n) return makeResult(0, 0, 0, 0, 0, 0, 0);
 
     const fvec = try allocator.alloc(f64, m);
     defer allocator.free(fvec);
@@ -81,6 +86,11 @@ fn lmdifAdvanced(
     defer allocator.free(ipvt);
     const fjac = try allocator.alloc(f64, m * n);
     defer allocator.free(fjac);
+    var sparse_style_lm = if (jacobianFn != null)
+        try SparseStyleLmWorkspace.init(allocator, m, n)
+    else
+        null;
+    defer if (sparse_style_lm) |*workspace| workspace.deinit(allocator);
 
     @memset(diag, 0.0);
     @memset(qtf, 0.0);
@@ -93,6 +103,11 @@ fn lmdifAdvanced(
 
     try evalFn(ctx, x, fvec);
     var nfev: usize = 1;
+    var outer_iterations: usize = 0;
+    var trial_steps: usize = 0;
+    var lmpar_iterations: usize = 0;
+    var accepted_steps: usize = 0;
+    var jacobian_evaluations: usize = 0;
     var fnorm = enorm(fvec);
     var par: f64 = 0.0;
     var iter: usize = 1;
@@ -103,12 +118,19 @@ fn lmdifAdvanced(
         {
             const iter_prof = profiler.scope("minpack.lmdif.outer_iteration");
             defer iter_prof.end();
+            outer_iterations += 1;
 
             if (jacobianFn) |buildJacobian| {
-                nfev += try buildJacobian(ctx, x, fvec, fjac, m, n, params.epsfcn);
+                const added = try buildJacobian(ctx, x, fvec, fjac, m, n, params.epsfcn);
+                nfev += added;
+                jacobian_evaluations += added;
             } else {
                 try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
                 nfev += n;
+                jacobian_evaluations += n;
+            }
+            if (sparse_style_lm) |*workspace| {
+                @memcpy(workspace.jacobian, fjac);
             }
 
             qrfac(fjac, m, n, true, ipvt, wa1, wa2, wa3);
@@ -161,15 +183,33 @@ fn lmdifAdvanced(
                 }
             }
             if (gnorm <= params.gtol) {
-                return .{ .info = 4, .nfev = nfev };
+                return makeResult(4, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
             }
 
             while (true) {
                 {
                     const trial_prof = profiler.scope("minpack.lmdif.trial_step");
                     defer trial_prof.end();
+                    trial_steps += 1;
 
-                    try lmpar(allocator, fjac, m, n, ipvt, diag, qtf, delta, &par, wa1, wa2, wa3, wa4);
+                    lmpar_iterations += if (sparse_style_lm) |*workspace|
+                        try lmparSparseStyleDense(
+                            workspace,
+                            fjac,
+                            workspace.jacobian,
+                            fvec,
+                            m,
+                            n,
+                            ipvt,
+                            diag,
+                            qtf,
+                            delta,
+                            &par,
+                            wa1,
+                            wa2,
+                        )
+                    else
+                        try lmpar(allocator, fjac, m, n, ipvt, diag, qtf, delta, &par, wa1, wa2, wa3, wa4);
 
                     for (0..n) |j| {
                         wa1[j] = -wa1[j];
@@ -226,23 +266,79 @@ fn lmdifAdvanced(
                         for (0..n) |j| wa2[j] = diag[j] * x[j];
                         xnorm = enorm(wa2);
                         iter += 1;
+                        accepted_steps += 1;
                     }
 
                     const info1 = @abs(actred) <= params.ftol and prered <= params.ftol and 0.5 * ratio <= 1.0;
                     const info2 = delta <= params.xtol * xnorm;
-                    if (info1 and info2) return .{ .info = 3, .nfev = nfev };
-                    if (info1) return .{ .info = 1, .nfev = nfev };
-                    if (info2) return .{ .info = 2, .nfev = nfev };
-                    if (nfev >= params.maxfev) return .{ .info = 5, .nfev = nfev };
-                    if (@abs(actred) <= machep and prered <= machep and 0.5 * ratio <= 1.0) return .{ .info = 6, .nfev = nfev };
-                    if (delta <= machep * xnorm) return .{ .info = 7, .nfev = nfev };
-                    if (gnorm <= machep) return .{ .info = 8, .nfev = nfev };
+                    if (info1 and info2) return makeResult(3, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
+                    if (info1) return makeResult(1, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
+                    if (info2) return makeResult(2, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
+                    if (nfev >= params.maxfev) return makeResult(5, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
+                    if (@abs(actred) <= machep and prered <= machep and 0.5 * ratio <= 1.0) return makeResult(6, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
+                    if (delta <= machep * xnorm) return makeResult(7, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
+                    if (gnorm <= machep) return makeResult(8, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
                     if (ratio >= 1.0e-4) break;
                 }
             }
         }
     }
 }
+
+fn makeResult(
+    info: i32,
+    nfev: usize,
+    outer_iterations: usize,
+    trial_steps: usize,
+    lmpar_iterations: usize,
+    accepted_steps: usize,
+    jacobian_evaluations: usize,
+) Result {
+    return .{
+        .info = info,
+        .nfev = nfev,
+        .outer_iterations = outer_iterations,
+        .trial_steps = trial_steps,
+        .lmpar_iterations = lmpar_iterations,
+        .accepted_steps = accepted_steps,
+        .jacobian_evaluations = jacobian_evaluations,
+    };
+}
+
+const SparseStyleLmWorkspace = struct {
+    jacobian: []f64,
+    augmented_matrix: []f64,
+    augmented_rhs: []f64,
+    qr_ipvt: []usize,
+    qr_rdiag: []f64,
+    qr_acnorm: []f64,
+    qr_wa: []f64,
+    x_permuted: []f64,
+
+    fn init(allocator: std.mem.Allocator, m: usize, n: usize) !SparseStyleLmWorkspace {
+        return .{
+            .jacobian = try allocator.alloc(f64, m * n),
+            .augmented_matrix = try allocator.alloc(f64, (m + n) * n),
+            .augmented_rhs = try allocator.alloc(f64, m + n),
+            .qr_ipvt = try allocator.alloc(usize, n),
+            .qr_rdiag = try allocator.alloc(f64, n),
+            .qr_acnorm = try allocator.alloc(f64, n),
+            .qr_wa = try allocator.alloc(f64, n),
+            .x_permuted = try allocator.alloc(f64, n),
+        };
+    }
+
+    fn deinit(self: *SparseStyleLmWorkspace, allocator: std.mem.Allocator) void {
+        allocator.free(self.jacobian);
+        allocator.free(self.augmented_matrix);
+        allocator.free(self.augmented_rhs);
+        allocator.free(self.qr_ipvt);
+        allocator.free(self.qr_rdiag);
+        allocator.free(self.qr_acnorm);
+        allocator.free(self.qr_wa);
+        allocator.free(self.x_permuted);
+    }
+};
 
 fn fdjac2(
     comptime Context: type,
@@ -356,7 +452,7 @@ fn lmpar(
     sdiag: []f64,
     wa1: []f64,
     wa2: []f64,
-) !void {
+) !usize {
     const prof = profiler.scope("minpack.lmpar");
     defer prof.end();
 
@@ -393,7 +489,7 @@ fn lmpar(
     var fp = dxnorm - delta;
     if (fp <= 0.1 * delta) {
         par.* = 0.0;
-        return;
+        return 0;
     }
 
     var parl: f64 = 0.0;
@@ -453,7 +549,7 @@ fn lmpar(
             const prev_fp = fp;
             fp = dxnorm_iter - delta;
             if (@abs(fp) <= 0.1 * delta or (parl == 0.0 and fp <= prev_fp and prev_fp < 0.0) or iter == 10) {
-                return;
+                return iter;
             }
 
             const parc = blk: {
@@ -475,6 +571,125 @@ fn lmpar(
                 const temp3 = enorm(wa1);
                 break :blk ((fp / delta) / temp3) / temp3;
             };
+            if (fp > 0.0) parl = @max(parl, par.*);
+            if (fp < 0.0) paru = @min(paru, par.*);
+            par.* = @max(parl, par.* + parc);
+        }
+    }
+}
+
+fn lmparSparseStyleDense(
+    workspace: *SparseStyleLmWorkspace,
+    r: []const f64,
+    jacobian: []const f64,
+    fvec: []const f64,
+    ldr: usize,
+    n: usize,
+    ipvt: []const usize,
+    diag: []const f64,
+    qtb: []const f64,
+    delta: f64,
+    par: *f64,
+    x: []f64,
+    wa2: []f64,
+) !usize {
+    const prof = profiler.scope("minpack.lmpar_sparse_style_dense");
+    defer prof.end();
+
+    const m = ldr;
+    var nsing = n;
+    {
+        const phase_prof = profiler.scope("minpack.lmpar_sparse_style_dense.gauss_newton");
+        defer phase_prof.end();
+
+        for (0..n) |j| {
+            workspace.x_permuted[j] = qtb[j];
+            if (r[index(ldr, j, j)] == 0.0 and nsing == n) nsing = j;
+            if (nsing < n) workspace.x_permuted[j] = 0.0;
+        }
+
+        if (nsing >= 1) {
+            var k: usize = 0;
+            while (k < nsing) : (k += 1) {
+                const j = nsing - k - 1;
+                workspace.x_permuted[j] /= r[index(ldr, j, j)];
+                const temp = workspace.x_permuted[j];
+                if (j > 0) {
+                    for (0..j) |i| {
+                        workspace.x_permuted[i] -= r[index(ldr, i, j)] * temp;
+                    }
+                }
+            }
+        }
+    }
+    for (0..n) |j| x[ipvt[j]] = workspace.x_permuted[j];
+
+    for (0..n) |j| wa2[j] = diag[j] * x[j];
+    const dxnorm = enorm(wa2);
+    var fp = dxnorm - delta;
+    if (fp <= 0.1 * delta) {
+        par.* = 0.0;
+        return 0;
+    }
+
+    var parl: f64 = 0.0;
+    var gnorm: f64 = 0.0;
+    var paru: f64 = 0.0;
+    {
+        const phase_prof = profiler.scope("minpack.lmpar_sparse_style_dense.bounds");
+        defer phase_prof.end();
+
+        if (nsing >= n) {
+            for (0..n) |j| {
+                const l = ipvt[j];
+                workspace.qr_wa[j] = diag[l] * (wa2[l] / dxnorm);
+            }
+            solveUpperTranspose(r, ldr, n, workspace.qr_wa);
+            const temp = enorm(workspace.qr_wa);
+            parl = ((fp / delta) / temp) / temp;
+        }
+
+        for (0..n) |j| {
+            var sum: f64 = 0.0;
+            for (0..j + 1) |i| sum += r[index(ldr, i, j)] * qtb[i];
+            const l = ipvt[j];
+            workspace.qr_wa[j] = sum / diag[l];
+        }
+        gnorm = enorm(workspace.qr_wa);
+        paru = gnorm / delta;
+        if (paru == 0.0) paru = dwarf / @min(delta, 0.1);
+    }
+
+    par.* = @max(par.*, parl);
+    par.* = @min(par.*, paru);
+    if (par.* == 0.0) par.* = gnorm / dxnorm;
+
+    var iter: usize = 0;
+    while (true) {
+        {
+            const iter_prof = profiler.scope("minpack.lmpar_sparse_style_dense.iteration");
+            defer iter_prof.end();
+
+            iter += 1;
+            if (par.* == 0.0) par.* = @max(dwarf, 0.001 * paru);
+            const sqrt_par = @sqrt(par.*);
+            solveAugmentedDampedLeastSquares(workspace, jacobian, fvec, m, n, ipvt, diag, sqrt_par, x);
+
+            for (0..n) |j| wa2[j] = diag[j] * x[j];
+            const dxnorm_iter = enorm(wa2);
+            const prev_fp = fp;
+            fp = dxnorm_iter - delta;
+            if (@abs(fp) <= 0.1 * delta or (parl == 0.0 and fp <= prev_fp and prev_fp < 0.0) or iter == 10) {
+                return iter;
+            }
+
+            for (0..n) |j| {
+                const l = ipvt[j];
+                workspace.qr_wa[j] = diag[l] * (wa2[l] / dxnorm_iter);
+            }
+            solveUpperTranspose(workspace.augmented_matrix, m + n, n, workspace.qr_wa);
+            const temp = enorm(workspace.qr_wa);
+            const parc = ((fp / delta) / temp) / temp;
             if (fp > 0.0) parl = @max(parl, par.*);
             if (fp < 0.0) paru = @min(paru, par.*);
             par.* = @max(parl, par.* + parc);
@@ -565,6 +780,91 @@ fn qrsolv(r: []f64, ldr: usize, n: usize, ipvt: []const usize, diag: []const f64
             }
         }
         for (0..n) |j| x[ipvt[j]] = wa[j];
+    }
+}
+
+fn solveAugmentedDampedLeastSquares(
+    workspace: *SparseStyleLmWorkspace,
+    jacobian: []const f64,
+    fvec: []const f64,
+    m: usize,
+    n: usize,
+    ipvt: []const usize,
+    diag: []const f64,
+    sqrt_par: f64,
+    x: []f64,
+) void {
+    const prof = profiler.scope("minpack.solve_augmented_damped_least_squares");
+    defer prof.end();
+
+    const rows = m + n;
+    @memset(workspace.augmented_matrix, 0.0);
+    for (0..m) |row| workspace.augmented_rhs[row] = fvec[row];
+    @memset(workspace.augmented_rhs[m..rows], 0.0);
+
+    for (0..n) |j| {
+        const original_col = ipvt[j];
+        for (0..m) |row| {
+            workspace.augmented_matrix[index(rows, row, j)] = jacobian[index(m, row, original_col)];
+        }
+        workspace.augmented_matrix[index(rows, m + j, j)] = sqrt_par * diag[original_col];
+    }
+
+    qrfac(
+        workspace.augmented_matrix,
+        rows,
+        n,
+        false,
+        workspace.qr_ipvt,
+        workspace.qr_rdiag,
+        workspace.qr_acnorm,
+        workspace.qr_wa,
+    );
+    applyQTransposeInPlace(workspace.augmented_matrix, rows, n, workspace.augmented_rhs);
+
+    var nsing = n;
+    for (0..n) |j| {
+        workspace.x_permuted[j] = workspace.augmented_rhs[j];
+        if (workspace.augmented_matrix[index(rows, j, j)] == 0.0 and nsing == n) nsing = j;
+        if (nsing < n) workspace.x_permuted[j] = 0.0;
+    }
+    if (nsing >= 1) {
+        var k: usize = 0;
+        while (k < nsing) : (k += 1) {
+            const j = nsing - k - 1;
+            workspace.x_permuted[j] /= workspace.augmented_matrix[index(rows, j, j)];
+            const temp = workspace.x_permuted[j];
+            if (j > 0) {
+                for (0..j) |i| {
+                    workspace.x_permuted[i] -= workspace.augmented_matrix[index(rows, i, j)] * temp;
+                }
+            }
+        }
+    }
+    for (0..n) |j| x[ipvt[j]] = workspace.x_permuted[j];
+}
+
+fn applyQTransposeInPlace(a: []f64, m: usize, n: usize, b: []f64) void {
+    for (0..n) |j| {
+        const diag_idx = index(m, j, j);
+        if (a[diag_idx] == 0.0) continue;
+        const temp = a[diag_idx];
+        a[diag_idx] = 1.0;
+        var sum: f64 = 0.0;
+        for (j..m) |i| sum += a[index(m, i, j)] * b[i];
+        const factor = sum / temp;
+        for (j..m) |i| b[i] -= factor * a[index(m, i, j)];
+        a[diag_idx] = temp;
+    }
+}
+
+fn solveUpperTranspose(r: []const f64, ldr: usize, n: usize, rhs: []f64) void {
+    for (0..n) |j| {
+        var sum: f64 = 0.0;
+        for (0..j) |i| {
+            sum += r[index(ldr, i, j)] * rhs[i];
+        }
+        rhs[j] = (rhs[j] - sum) / r[index(ldr, j, j)];
     }
 }
 

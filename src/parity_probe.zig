@@ -1,4 +1,5 @@
 const std = @import("std");
+const minpack = @import("minpack.zig");
 const sparse_matrix = @import("sparse_matrix.zig");
 const optimize = @import("optimize.zig");
 const parity_pto = @import("parity_pto.zig");
@@ -43,6 +44,31 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "solve-stats-linear-seed")) {
+        const seed_poses = try optimize.buildLinearSeedPoses(
+            allocator,
+            project.images.len,
+            base_poses[0].base_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+        );
+        defer allocator.free(seed_poses);
+        const result = try optimize.solvePosesFromInitial(
+            allocator,
+            project.images.len,
+            project.pano_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+            seed_poses,
+        );
+        defer allocator.free(result.poses);
+        defer allocator.free(result.residuals);
+        printLmStats("distance", result.distance_lm);
+        printLmStats("component", result.component_lm);
+        std.debug.print("rms={d:.12}\ncontrol_points={d}\n", .{ result.rms_error, result.control_point_count });
+        return;
+    }
+
     if (std.mem.eql(u8, command, "solve-lm-params")) {
         const decoded_initial_poses = if (args.len > 3)
             try decodeInitialPoses(allocator, project.optimize_vector, base_poses, args[3..])
@@ -66,12 +92,55 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "solve-stats")) {
+        const decoded_initial_poses = if (args.len > 3)
+            try decodeInitialPoses(allocator, project.optimize_vector, base_poses, args[3..])
+        else
+            null;
+        defer if (decoded_initial_poses) |poses| allocator.free(poses);
+        const initial_poses = decoded_initial_poses orelse base_poses;
+        const result = try optimize.solvePosesFromInitial(
+            allocator,
+            project.images.len,
+            project.pano_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+            initial_poses,
+        );
+        defer allocator.free(result.poses);
+        defer allocator.free(result.residuals);
+        printLmStats("distance", result.distance_lm);
+        printLmStats("component", result.component_lm);
+        std.debug.print("rms={d:.12}\ncontrol_points={d}\n", .{ result.rms_error, result.control_point_count });
+        return;
+    }
+
     if (std.mem.eql(u8, command, "image-vars")) {
         const solve_x = try collectSolveVector(allocator, args[3..], project.optimize_vector, base_poses);
         defer allocator.free(solve_x);
         const poses = try optimize.decodeSolveVector(allocator, project.optimize_vector, base_poses, solve_x);
         defer allocator.free(poses);
         try printImageVars(poses);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "equirect-point-linear-seed")) {
+        if (args.len != 6) usage();
+        const image_index = try std.fmt.parseInt(usize, args[3], 10);
+        const x = try std.fmt.parseFloat(f64, args[4]);
+        const y = try std.fmt.parseFloat(f64, args[5]);
+        if (image_index >= project.images.len) return error.ImageIndexOutOfRange;
+        const seed_poses = try optimize.buildLinearSeedPoses(
+            allocator,
+            project.images.len,
+            base_poses[0].base_hfov_degrees,
+            project.optimize_vector,
+            project.pair_matches,
+        );
+        defer allocator.free(seed_poses);
+        const image = project.images[image_index];
+        const point = optimize.imagePointToEquirectDegrees(seed_poses[image_index], x, y, image.width, image.height);
+        std.debug.print("lon={d:.12}\nlat={d:.12}\n", .{ point.x, point.y });
         return;
     }
 
@@ -100,6 +169,27 @@ pub fn main() !void {
         defer allocator.free(poses);
         const initial_avg_hfov = optimize.averageHfovDegrees(base_poses);
         const fvec = try optimize.evaluateObjectiveResidualsPadded(
+            allocator,
+            strategy,
+            initial_avg_hfov,
+            project.pair_matches,
+            poses,
+            optimize.countSolveParameters(project.optimize_vector),
+        );
+        defer allocator.free(fvec);
+        try printVector(fvec);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "fvec-uncached")) {
+        if (args.len < 4) usage();
+        const strategy = try parseStrategy(args[3]);
+        const solve_x = try collectSolveVector(allocator, args[4..], project.optimize_vector, base_poses);
+        defer allocator.free(solve_x);
+        const poses = try optimize.decodeSolveVector(allocator, project.optimize_vector, base_poses, solve_x);
+        defer allocator.free(poses);
+        const initial_avg_hfov = optimize.averageHfovDegrees(base_poses);
+        const fvec = try optimize.evaluateObjectiveResidualsPaddedUncached(
             allocator,
             strategy,
             initial_avg_hfov,
@@ -166,10 +256,14 @@ fn usage() noreturn {
         \\usage:
         \\  parity_probe lm-params <pto>
         \\  parity_probe linear-seed-lm-params <pto>
+        \\  parity_probe solve-stats-linear-seed <pto>
         \\  parity_probe solve-lm-params <pto>
+        \\  parity_probe solve-stats <pto> [x...]
         \\  parity_probe image-vars <pto> [x...]
+        \\  parity_probe equirect-point-linear-seed <pto> <image_index> <x> <y>
         \\  parity_probe equirect-point <pto> <image_index> <x> <y> [x...]
         \\  parity_probe fvec <pto> <distance_only|componentwise|1|2> [x...]
+        \\  parity_probe fvec-uncached <pto> <distance_only|componentwise|1|2> [x...]
         \\  parity_probe jac-pattern-stats <pto> <distance_only|componentwise|1|2>
         \\  parity_probe jac-column <pto> <distance_only|componentwise|1|2> <param_index> [x...]
         \\  parity_probe cp-error <pto> <cp_index> [x...]
@@ -308,6 +402,22 @@ fn printImageVars(poses: []const optimize.ImagePose) !void {
             },
         );
     }
+}
+
+fn printLmStats(label: []const u8, result: minpack.Result) void {
+    std.debug.print(
+        "{s}: info={d} nfev={d} outer={d} trial={d} accepted={d} lmpar_iter={d} jac_eval={d}\n",
+        .{
+            label,
+            result.info,
+            result.nfev,
+            result.outer_iterations,
+            result.trial_steps,
+            result.accepted_steps,
+            result.lmpar_iterations,
+            result.jacobian_evaluations,
+        },
+    );
 }
 
 fn radiansToDegrees(value: f64) f64 {
