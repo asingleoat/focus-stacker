@@ -1,5 +1,6 @@
 const std = @import("std");
 const profiler = @import("profiler.zig");
+const smooth_numbers = @import("smooth_numbers");
 
 const c = @cImport({
     @cInclude("pffft.h");
@@ -124,15 +125,36 @@ pub fn preferredBackend() Backend {
 }
 
 pub fn largestSmoothLengthAtMost(k: u32) u32 {
-    return k;
+    if (k <= 1) return k;
+    return @as(u32, @intCast(smooth_numbers.largestNSmoothLessThanK(std.heap.page_allocator, 11, k) catch return k));
 }
 
-pub fn nearestValidComplexLength(requested: u32) u32 {
+pub fn largestUsableTruncatedComplexLength(requested: u32) u32 {
+    if (requested == 0) return 0;
+
     const trimmed = largestSmoothLengthAtMost(requested);
     if (c.pffft_is_valid_size(@as(c_int, @intCast(trimmed)), c.PFFFT_COMPLEX) != 0) {
         return trimmed;
     }
-    return @as(u32, @intCast(c.pffft_nearest_transform_size(@as(c_int, @intCast(trimmed)), c.PFFFT_COMPLEX, 1)));
+
+    const lower = c.pffft_nearest_transform_size(@as(c_int, @intCast(trimmed)), c.PFFFT_COMPLEX, 0);
+    if (lower > 0 and lower <= @as(c_int, @intCast(requested))) {
+        return @as(u32, @intCast(lower));
+    }
+
+    if (c.pffft_is_valid_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX) != 0) {
+        return requested;
+    }
+
+    return @as(u32, @intCast(c.pffft_nearest_transform_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX, 1)));
+}
+
+pub fn nearestValidComplexLength(requested: u32) u32 {
+    if (requested == 0) return 0;
+    if (c.pffft_is_valid_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX) != 0) {
+        return requested;
+    }
+    return @as(u32, @intCast(c.pffft_nearest_transform_size(@as(c_int, @intCast(requested)), c.PFFFT_COMPLEX, 1)));
 }
 
 fn allocAlignedFloatBuffer(len: usize) ![]f32 {
@@ -163,11 +185,17 @@ fn storeComplexRow(src: []const f32, dst: []Complex) void {
     }
 }
 
-test "smooth-length oracle stub is identity" {
-    try std.testing.expectEqual(@as(u32, 105), largestSmoothLengthAtMost(105));
+test "largestSmoothLengthAtMost uses vendored 11-smooth selector" {
+    try std.testing.expectEqual(@as(u32, 100), largestSmoothLengthAtMost(105));
+    try std.testing.expectEqual(@as(u32, 126), largestSmoothLengthAtMost(128));
 }
 
-test "nearest valid complex length follows pffft constraints" {
+test "largest usable truncated complex length follows smooth truncation policy" {
+    try std.testing.expectEqual(@as(u32, 96), largestUsableTruncatedComplexLength(105));
+    try std.testing.expectEqual(@as(u32, 96), largestUsableTruncatedComplexLength(128));
+}
+
+test "nearest valid complex length preserves current non-truncating matcher behavior" {
     try std.testing.expectEqual(@as(u32, 128), nearestValidComplexLength(105));
     try std.testing.expectEqual(@as(u32, 128), nearestValidComplexLength(128));
 }

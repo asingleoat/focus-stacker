@@ -6,6 +6,11 @@ pub fn build(b: *std.Build) void {
     const function_timing = b.option(bool, "function-timing", "Enable comptime-gated function timing instrumentation") orelse false;
     const build_options = b.addOptions();
     build_options.addOption(bool, "function_timing", function_timing);
+    const smooth_numbers = b.addModule("smooth_numbers", .{
+        .root_source_file = b.path("vendor/smooth-numbers/src/largest_n_smooth.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const core = b.addModule("align_stack_core", .{
         .root_source_file = b.path("src/root.zig"),
@@ -13,6 +18,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     core.addOptions("build_options", build_options);
+    core.addImport("smooth_numbers", smooth_numbers);
     configureImageDeps(core);
     configureFftDeps(b, core);
 
@@ -25,6 +31,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addOptions("build_options", build_options);
+    exe.root_module.addImport("smooth_numbers", smooth_numbers);
     configureImageDeps(exe.root_module);
     configureFftDeps(b, exe.root_module);
 
@@ -42,6 +49,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     parity_probe.root_module.addOptions("build_options", build_options);
+    parity_probe.root_module.addImport("smooth_numbers", smooth_numbers);
     configureImageDeps(parity_probe.root_module);
     configureFftDeps(b, parity_probe.root_module);
 
@@ -68,6 +76,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     match_probe.root_module.addOptions("build_options", build_options);
+    match_probe.root_module.addImport("smooth_numbers", smooth_numbers);
     configureImageDeps(match_probe.root_module);
     configureFftDeps(b, match_probe.root_module);
 
@@ -80,6 +89,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     live_probe.root_module.addOptions("build_options", build_options);
+    live_probe.root_module.addImport("smooth_numbers", smooth_numbers);
     configureImageDeps(live_probe.root_module);
     configureFftDeps(b, live_probe.root_module);
 
