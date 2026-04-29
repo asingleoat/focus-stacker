@@ -960,7 +960,8 @@ fn refinePosesIteratively(
         .distance_only => .distance_only,
         .componentwise => .componentwise,
     };
-    var grouped_jacobian = if (actual_residual_count == residual_count)
+    const use_grouped_jacobian = actual_residual_count == residual_count and !layoutRequiresDenseJacobian(layout);
+    var grouped_jacobian = if (use_grouped_jacobian)
         try GroupedJacobianWorkspace.init(allocator, layout, pair_matches, objective_strategy, variable_count, residual_count)
     else
         null;
@@ -982,6 +983,7 @@ fn refinePosesIteratively(
         .strategy = strategy,
         .actual_residual_count = actual_residual_count,
         .grouped_jacobian = if (grouped_jacobian) |*workspace| workspace else null,
+        .force_full_state_rebuild = layoutRequiresDenseJacobian(layout),
     };
 
     const params = minpack_mod.Params{
@@ -1014,6 +1016,25 @@ fn refinePosesIteratively(
     };
     applySolveVector(layout, poses, solve_x);
     return lm_result;
+}
+
+fn layoutRequiresDenseJacobian(layout: []const SolveLayout) bool {
+    for (layout) |entry| {
+        if (entry.trans_x_index != null or
+            entry.trans_y_index != null or
+            entry.trans_z_index != null or
+            entry.translation_plane_yaw_index != null or
+            entry.translation_plane_pitch_index != null or
+            entry.radial_a_index != null or
+            entry.radial_b_index != null or
+            entry.radial_c_index != null or
+            entry.center_shift_x_index != null or
+            entry.center_shift_y_index != null)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn applyUpstreamZeroStartNudges(layout: []const SolveLayout, solve_x: []f64) void {
@@ -1053,6 +1074,7 @@ const SolveContext = struct {
     strategy: SolveStrategy,
     actual_residual_count: usize,
     grouped_jacobian: ?*GroupedJacobianWorkspace,
+    force_full_state_rebuild: bool,
 };
 
 const GroupedJacobianWorkspace = struct {
@@ -1218,6 +1240,14 @@ fn updateSolveContextState(ctx: *SolveContext, x: []const f64) void {
     }
 
     if (changed_parameter_count == 0) {
+        return;
+    }
+
+    if (ctx.force_full_state_rebuild) {
+        @memcpy(ctx.work_poses, ctx.seed_poses);
+        applySolveVector(ctx.layout, ctx.work_poses, x);
+        populateBasicRectEquirectCaches(ctx.work_poses, ctx.image_width, ctx.image_height, ctx.basic_rect_caches);
+        @memcpy(ctx.last_solve_x, x);
         return;
     }
 
@@ -1883,7 +1913,7 @@ fn controlPointResidualVectorWithPoseOverride(
 
     const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
     const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
-    if (hasBasicRectilinearPose(left_pose) and hasBasicRectilinearPose(right_pose)) {
+    if (!hasTranslation(left_pose) and !hasTranslation(right_pose)) {
         return exactDistSphereResidualVector(left_pose, right_pose, pair_match, cp);
     }
 
@@ -1921,7 +1951,7 @@ fn controlPointDistanceResidualWithPoseOverride(
 
     const left_pose = if (override_image_index != null and override_image_index.? == cp.left_image) override_pose else poses[cp.left_image];
     const right_pose = if (override_image_index != null and override_image_index.? == cp.right_image) override_pose else poses[cp.right_image];
-    if (hasBasicRectilinearPose(left_pose) and hasBasicRectilinearPose(right_pose)) {
+    if (!hasTranslation(left_pose) and !hasTranslation(right_pose)) {
         return exactDistSphereDistance(left_pose, right_pose, pair_match, cp);
     }
 
@@ -2134,6 +2164,10 @@ fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u
     const prof = profiler.scope("optimize.imageToEquirectDegrees");
     defer prof.end();
 
+    if (!hasTranslation(pose) and hasPano13LensTerms(pose)) {
+        return imageToEquirectDegreesPano13Lens(pose, x, y, width, height);
+    }
+
     const center = distortionCenter(pose, width, height);
     const pano_distance = 180.0 / std.math.pi;
     const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
@@ -2143,6 +2177,26 @@ fn imageToEquirectDegrees(pose: ImagePose, x: f64, y: f64, width: u32, height: u
         .x = (x - center.x) * scale,
         .y = (y - center.y) * scale,
     };
+    p = sphereTpRectPoint(p, pano_distance);
+    p = perspSpherePoint(p, setMatrix(pose.pitch, 0.0, pose.roll, true), pano_distance);
+    p = erectSphereTpPoint(p, pano_distance);
+    return rotateErectPoint(p, pano_distance * std.math.pi, pose.yaw / degrees_to_radians);
+}
+
+fn imageToEquirectDegreesPano13Lens(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
+    var p = Point2{
+        .x = x - ((@as(f64, @floatFromInt(width)) * 0.5) - 0.5),
+        .y = y - ((@as(f64, @floatFromInt(height)) * 0.5) - 0.5),
+    };
+    p.x -= pose.center_shift_x;
+    p.y -= pose.center_shift_y;
+    p = pano13InverseRadial(pose, p.x, p.y, width, height);
+
+    const pano_distance = 180.0 / std.math.pi;
+    const image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose));
+    const scale = pano_distance / image_focal;
+    p.x *= scale;
+    p.y *= scale;
     p = sphereTpRectPoint(p, pano_distance);
     p = perspSpherePoint(p, setMatrix(pose.pitch, 0.0, pose.roll, true), pano_distance);
     p = erectSphereTpPoint(p, pano_distance);
@@ -2828,6 +2882,68 @@ fn distortionCenter(pose: ImagePose, width: u32, height: u32) Point2 {
     return .{
         .x = (@as(f64, @floatFromInt(width)) - 1.0) * 0.5,
         .y = (@as(f64, @floatFromInt(height)) - 1.0) * 0.5,
+    };
+}
+
+fn hasPano13LensTerms(pose: ImagePose) bool {
+    return @abs(pose.radial_a) > 1e-12 or
+        @abs(pose.radial_b) > 1e-12 or
+        @abs(pose.radial_c) > 1e-12 or
+        @abs(pose.center_shift_x) > 1e-12 or
+        @abs(pose.center_shift_y) > 1e-12;
+}
+
+fn pano13RadialBaseRadius(width: u32, height: u32) f64 {
+    return @min(@as(f64, @floatFromInt(width)), @as(f64, @floatFromInt(height))) * 0.5;
+}
+
+fn pano13RadialCoefficients(pose: ImagePose) [4]f64 {
+    const c3 = pose.radial_a;
+    const c2 = pose.radial_b;
+    const c1 = pose.radial_c;
+    const c0 = 1.0 - (c3 + c2 + c1);
+    return .{ c0, c1, c2, c3 };
+}
+
+fn pano13RadialPoly(coeffs: [4]f64, r: f64) f64 {
+    return ((((coeffs[3] * r) + coeffs[2]) * r + coeffs[1]) * r) + coeffs[0];
+}
+
+fn pano13RadialPolyDerivative(coeffs: [4]f64, r: f64) f64 {
+    return (((4.0 * coeffs[3] * r) + (3.0 * coeffs[2])) * r + (2.0 * coeffs[1])) * r + coeffs[0];
+}
+
+fn pano13InverseRadial(pose: ImagePose, x: f64, y: f64, width: u32, height: u32) Point2 {
+    if (@abs(pose.radial_a) <= 1e-12 and @abs(pose.radial_b) <= 1e-12 and @abs(pose.radial_c) <= 1e-12) {
+        return .{ .x = x, .y = y };
+    }
+
+    const base_radius = pano13RadialBaseRadius(width, height);
+    if (base_radius <= 1e-12) {
+        return .{ .x = x, .y = y };
+    }
+
+    const coeffs = pano13RadialCoefficients(pose);
+    const q_radius = @sqrt(x * x + y * y);
+    if (q_radius < 1e-12) {
+        return .{ .x = x, .y = y };
+    }
+
+    const rd = q_radius / base_radius;
+    var rs = rd;
+    var f = pano13RadialPoly(coeffs, rs) * rs;
+    var iter: usize = 0;
+    while (@abs(f - rd) > 1.0e-6 and iter < 100) : (iter += 1) {
+        const df = pano13RadialPolyDerivative(coeffs, rs);
+        if (@abs(df) < 1e-12) break;
+        rs -= (f - rd) / df;
+        f = pano13RadialPoly(coeffs, rs) * rs;
+    }
+
+    const scale = if (rd != 0.0) rs / rd else 1.0;
+    return .{
+        .x = x * scale,
+        .y = y * scale,
     };
 }
 
