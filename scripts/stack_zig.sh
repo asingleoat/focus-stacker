@@ -40,6 +40,7 @@ die() { echo "error: $*" >&2; exit 1; }
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 aligner_bin="${ALIGNER_BIN:-$repo_root/zig-out/bin/align_image_stack_zig}"
 fuser_bin="${FUSER_BIN:-$repo_root/zig-out/bin/focus_fuse_zig}"
+stacker_bin="${STACKER_BIN:-$repo_root/zig-out/bin/focus_stack_zig}"
 
 check_deps() {
     command -v zig >/dev/null || die "zig not found"
@@ -54,6 +55,9 @@ ensure_binaries() {
     if [[ ! -x "$fuser_bin" ]]; then
         need_build=true
     fi
+    if [[ ! -x "$stacker_bin" ]]; then
+        need_build=true
+    fi
 
     if [[ "$need_build" == false ]]; then
         return
@@ -66,6 +70,7 @@ ensure_binaries() {
     )
     [[ -x "$aligner_bin" ]] || die "build completed but aligner binary not found: $aligner_bin"
     [[ -x "$fuser_bin" ]] || die "build completed but fuser binary not found: $fuser_bin"
+    [[ -x "$stacker_bin" ]] || die "build completed but stacker binary not found: $stacker_bin"
 }
 
 images_from_manifest() {
@@ -211,6 +216,7 @@ EOF
     echo "  Images: $count"
     echo "  Aligner: $aligner_bin"
     echo "  Fuser: $fuser_bin"
+    echo "  Stacker: $stacker_bin"
     if [[ -n "$threads" ]]; then
         echo "  Threads: $threads"
     else
@@ -221,47 +227,47 @@ EOF
     echo "  Output: $OUTPUT_DIR/${name}_stacked.tif"
     echo ""
 
-    local workdir
-    workdir="$(mktemp -d -t focus-stack-zig-XXXXXX)"
-    trap 'rm -rf "${workdir:-}"' EXIT
-    echo "  Working directory: $workdir"
-    echo ""
-
-    echo "--- Aligning $count images ---"
-    echo "  Optimizing: magnification (-m), center shift (-i), radial distortion (-d), auto-crop (-C)"
-    echo "  Control points: ${ALIGN_CONTROL_POINTS} per cell, ${ALIGN_GRID_SIZE}x${ALIGN_GRID_SIZE} grid"
-    echo ""
-
-    local -a aligner_opts=()
-    if [[ -n "$threads" ]]; then
-        aligner_opts+=(--threads "$threads")
-    fi
-    aligner_opts+=(--pair-align "$pair_align_method")
-
-    "$aligner_bin" \
-        "${aligner_opts[@]}" \
-        -m \
-        -i \
-        -d \
-        -C \
-        -c "$ALIGN_CONTROL_POINTS" \
-        -g "$ALIGN_GRID_SIZE" \
-        -t "$ALIGN_ERROR_THRESHOLD" \
-        --use-given-order \
-        -v \
-        -a "$workdir/aligned_" \
-        "${images[@]}"
-
-    local aligned_count
-    aligned_count=$(find "$workdir" -maxdepth 1 -name 'aligned_*.tif' | wc -l)
-    [[ $aligned_count -gt 0 ]] || die "alignment produced no output files"
-    echo ""
-    echo "  Aligned $aligned_count images"
-    echo ""
-
     mkdir -p "$OUTPUT_DIR"
 
     if [[ "$fuse_method" == "enfuse" ]]; then
+        local workdir
+        workdir="$(mktemp -d -t focus-stack-zig-XXXXXX)"
+        trap 'rm -rf "${workdir:-}"' EXIT
+        echo "  Working directory: $workdir"
+        echo ""
+
+        echo "--- Aligning $count images ---"
+        echo "  Optimizing: magnification (-m), center shift (-i), radial distortion (-d), auto-crop (-C)"
+        echo "  Control points: ${ALIGN_CONTROL_POINTS} per cell, ${ALIGN_GRID_SIZE}x${ALIGN_GRID_SIZE} grid"
+        echo ""
+
+        local -a aligner_opts=()
+        if [[ -n "$threads" ]]; then
+            aligner_opts+=(--threads "$threads")
+        fi
+        aligner_opts+=(--pair-align "$pair_align_method")
+
+        "$aligner_bin" \
+            "${aligner_opts[@]}" \
+            -m \
+            -i \
+            -d \
+            -C \
+            -c "$ALIGN_CONTROL_POINTS" \
+            -g "$ALIGN_GRID_SIZE" \
+            -t "$ALIGN_ERROR_THRESHOLD" \
+            --use-given-order \
+            -v \
+            -a "$workdir/aligned_" \
+            "${images[@]}"
+
+        local aligned_count
+        aligned_count=$(find "$workdir" -maxdepth 1 -name 'aligned_*.tif' | wc -l)
+        [[ $aligned_count -gt 0 ]] || die "alignment produced no output files"
+        echo ""
+        echo "  Aligned $aligned_count images"
+        echo ""
+
         echo "--- Merging with enfuse ---"
 
         local -a enfuse_opts=(
@@ -279,21 +285,25 @@ EOF
             --output="$OUTPUT_DIR/${name}_stacked.tif" \
             "$workdir"/aligned_*.tif
     else
-        echo "--- Merging with focus_fuse_zig ---"
-        local -a fuser_opts=(
-            --method hardmask-contrast
+        echo "--- Aligning and merging in-process with focus_stack_zig ---"
+        local -a stacker_opts=(
+            --pair-align "$pair_align_method"
+            -c "$ALIGN_CONTROL_POINTS"
+            -g "$ALIGN_GRID_SIZE"
+            -t "$ALIGN_ERROR_THRESHOLD"
             --contrast-window-size "$CONTRAST_WINDOW_SIZE"
             --output "$OUTPUT_DIR/${name}_stacked.tif"
         )
         if [[ -n "$threads" ]]; then
-            fuser_opts+=(--threads "$threads")
+            stacker_opts+=(--threads "$threads")
         fi
         if [[ "$HARD_MASK" == true ]]; then
-            fuser_opts+=(--hard-mask)
+            stacker_opts+=(--hard-mask)
         fi
-        "$fuser_bin" \
-            "${fuser_opts[@]}" \
-            "$workdir"/aligned_*.tif
+        "$stacker_bin" \
+            -v \
+            "${stacker_opts[@]}" \
+            "${images[@]}"
     fi
 
     echo ""

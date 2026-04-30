@@ -8,6 +8,7 @@ pub const match = @import("match.zig");
 pub const minpack = @import("minpack.zig");
 pub const optimize = @import("optimize.zig");
 pub const parity_pto = @import("parity_pto.zig");
+pub const pair_align = @import("pair_align.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const profiler = @import("profiler.zig");
 pub const pto = @import("pto.zig");

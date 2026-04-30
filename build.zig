@@ -62,6 +62,21 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(fuse_exe);
 
+    const stack_exe = b.addExecutable(.{
+        .name = "focus_stack_zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/stack/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "align_stack_core", .module = core },
+                .{ .name = "focus_fuse_core", .module = fuse_core },
+            },
+        }),
+    });
+    stack_exe.root_module.addOptions("build_options", build_options);
+    b.installArtifact(stack_exe);
+
     const parity_probe = b.addExecutable(.{
         .name = "parity_probe",
         .root_module = b.createModule(.{
@@ -145,6 +160,13 @@ pub fn build(b: *std.Build) void {
     }
     const run_fuse_step = b.step("run-fuse", "Run the Zig focus-fuse tool");
     run_fuse_step.dependOn(&run_fuse_cmd.step);
+
+    const run_stack_cmd = b.addRunArtifact(stack_exe);
+    if (b.args) |args| {
+        run_stack_cmd.addArgs(args);
+    }
+    const run_stack_step = b.step("run-stack", "Run the in-process Zig focus stack tool");
+    run_stack_step.dependOn(&run_stack_cmd.step);
 
     const run_parity_probe = b.addRunArtifact(parity_probe);
     if (b.args) |args| {
