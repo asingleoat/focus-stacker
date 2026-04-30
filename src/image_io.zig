@@ -104,8 +104,7 @@ pub fn openTiffWriter(path: []const u8, info: ImageInfo) SaveError!TiffWriter {
     const tiff = c.TIFFOpen(path_z.ptr, "w") orelse return error.OpenFailed;
     errdefer c.TIFFClose(tiff);
 
-    const extra_channels: u16 = 1;
-    const samples_per_pixel: u16 = info.color_channels + extra_channels;
+    const samples_per_pixel: u16 = info.color_channels + info.extra_channels;
     const bits_per_sample: u16 = switch (info.sample_type) {
         .u8 => 8,
         .u16 => 16,
@@ -117,7 +116,6 @@ pub fn openTiffWriter(path: []const u8, info: ImageInfo) SaveError!TiffWriter {
     const sample_format: u16 = c.SAMPLEFORMAT_UINT;
     const x_resolution: f32 = 150.0;
     const y_resolution: f32 = 150.0;
-    var extra_sample_kind: c.uint16 = c.EXTRASAMPLE_UNASSALPHA;
     const bytes_per_sample = bits_per_sample / 8;
     const row_bytes = @as(c.uint32, @intCast(@as(usize, info.width) * @as(usize, samples_per_pixel) * @as(usize, bytes_per_sample)));
 
@@ -136,7 +134,10 @@ pub fn openTiffWriter(path: []const u8, info: ImageInfo) SaveError!TiffWriter {
     _ = c.TIFFSetField(tiff, c.TIFFTAG_YRESOLUTION, y_resolution);
     _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLWIDTH, @as(c.uint32, @intCast(info.width)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_PIXAR_IMAGEFULLLENGTH, @as(c.uint32, @intCast(info.height)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_EXTRASAMPLES, @as(c.uint16, 1), &extra_sample_kind);
+    if (info.extra_channels > 0) {
+        var extra_sample_kind: c.uint16 = c.EXTRASAMPLE_UNASSALPHA;
+        _ = c.TIFFSetField(tiff, c.TIFFTAG_EXTRASAMPLES, @as(c.uint16, @intCast(info.extra_channels)), &extra_sample_kind);
+    }
 
     return .{ .tiff = tiff };
 }
@@ -178,53 +179,26 @@ pub fn writeTiff(path: []const u8, image: *const Image) SaveError!void {
     var writer = try openTiffWriter(path, image.info);
     defer writer.deinit();
 
-    const channels = @as(usize, image.info.color_channels);
-    const out_channels = channels + 1;
+    const channels = @as(usize, image.info.color_channels + image.info.extra_channels);
     const width = @as(usize, image.info.width);
     switch (image.pixels) {
         .u8 => |pixels| {
-            const alpha: u8 = std.math.maxInt(u8);
-            const scanline = std.heap.c_allocator.alloc(u8, width * out_channels) catch return error.EncodeFailed;
-            defer std.heap.c_allocator.free(scanline);
             for (0..image.info.height) |row_index| {
-                {
-                    const pack_prof = profiler.scope("image_io.writeTiff.packRowU8");
-                    defer pack_prof.end();
-                    const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
-                    for (0..width) |x| {
-                        const src = src_row[x * channels ..][0..channels];
-                        const dst = scanline[x * out_channels ..][0..out_channels];
-                        @memcpy(dst[0..channels], src);
-                        dst[channels] = alpha;
-                    }
-                }
+                const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
                 {
                     const write_prof = profiler.scope("image_io.writeTiff.writeScanlineU8");
                     defer write_prof.end();
-                    try writer.writeScanlineU8(@intCast(row_index), scanline);
+                    try writer.writeScanlineU8(@intCast(row_index), src_row);
                 }
             }
         },
         .u16 => |pixels| {
-            const alpha: u16 = std.math.maxInt(u16);
-            const scanline = std.heap.c_allocator.alloc(u16, width * out_channels) catch return error.EncodeFailed;
-            defer std.heap.c_allocator.free(scanline);
             for (0..image.info.height) |row_index| {
-                {
-                    const pack_prof = profiler.scope("image_io.writeTiff.packRowU16");
-                    defer pack_prof.end();
-                    const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
-                    for (0..width) |x| {
-                        const src = src_row[x * channels ..][0..channels];
-                        const dst = scanline[x * out_channels ..][0..out_channels];
-                        @memcpy(dst[0..channels], src);
-                        dst[channels] = alpha;
-                    }
-                }
+                const src_row = pixels[row_index * width * channels ..][0 .. width * channels];
                 {
                     const write_prof = profiler.scope("image_io.writeTiff.writeScanlineU16");
                     defer write_prof.end();
-                    try writer.writeScanlineU16(@intCast(row_index), scanline);
+                    try writer.writeScanlineU16(@intCast(row_index), src_row);
                 }
             }
         },
