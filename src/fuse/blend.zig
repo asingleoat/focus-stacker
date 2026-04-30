@@ -21,6 +21,170 @@ pub fn allocateOutput(
     };
 }
 
+pub const SoftBlendState = struct {
+    weight_sums: []f32,
+    pixel_sums: []f32,
+    pixel_channels: usize,
+
+    pub fn init(allocator: std.mem.Allocator, info: image_io.ImageInfo) std.mem.Allocator.Error!SoftBlendState {
+        const count = @as(usize, info.width) * @as(usize, info.height);
+        const pixel_channels = @as(usize, info.color_channels);
+        const weight_sums = try allocator.alloc(f32, count);
+        errdefer allocator.free(weight_sums);
+        const pixel_sums = try allocator.alloc(f32, count * pixel_channels);
+        errdefer allocator.free(pixel_sums);
+        @memset(weight_sums, 0);
+        @memset(pixel_sums, 0);
+        return .{
+            .weight_sums = weight_sums,
+            .pixel_sums = pixel_sums,
+            .pixel_channels = pixel_channels,
+        };
+    }
+
+    pub fn deinit(self: *SoftBlendState, allocator: std.mem.Allocator) void {
+        allocator.free(self.weight_sums);
+        allocator.free(self.pixel_sums);
+    }
+};
+
+pub fn accumulateSoft(
+    allocator: std.mem.Allocator,
+    image: *const image_io.Image,
+    weights: []const f32,
+    state: *SoftBlendState,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const prof = profiler.scope("fuse.blend.accumulateSoft");
+    defer prof.end();
+
+    const worker_count = @min(@max(jobs, 1), @as(usize, @intCast(image.info.height)));
+    if (worker_count <= 1) {
+        accumulateRange(image, weights, state, 0, image.info.height);
+        return;
+    }
+
+    var threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+
+    const rows_per_worker = std.math.divCeil(usize, image.info.height, worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer {
+        for (threads[0..started_threads]) |thread| thread.join();
+    }
+
+    for (threads, 0..) |*thread, i| {
+        const start_row = @as(u32, @intCast((i + 1) * rows_per_worker));
+        const end_row = @as(u32, @intCast(@min((i + 2) * rows_per_worker, image.info.height)));
+        thread.* = try std.Thread.spawn(.{}, accumulateRangeThread, .{ image, weights, state, start_row, end_row });
+        started_threads += 1;
+    }
+
+    const main_end = @as(u32, @intCast(@min(rows_per_worker, image.info.height)));
+    accumulateRange(image, weights, state, 0, main_end);
+    for (threads) |thread| thread.join();
+}
+
+fn accumulateRangeThread(
+    image: *const image_io.Image,
+    weights: []const f32,
+    state: *SoftBlendState,
+    start_row: u32,
+    end_row: u32,
+) void {
+    accumulateRange(image, weights, state, start_row, end_row);
+}
+
+fn accumulateRange(
+    image: *const image_io.Image,
+    weights: []const f32,
+    state: *SoftBlendState,
+    start_row: u32,
+    end_row: u32,
+) void {
+    const prof = profiler.scope("fuse.blend.accumulateRange");
+    defer prof.end();
+
+    const src_pixel_channels = @as(usize, image.info.color_channels + image.info.extra_channels);
+    const width = @as(usize, image.info.width);
+    const dst_channels = state.pixel_channels;
+
+    switch (image.pixels) {
+        .u8 => |src| {
+            for (start_row..end_row) |row| {
+                const row_base = @as(usize, row) * width;
+                for (0..width) |x| {
+                    const pixel_index = row_base + x;
+                    const weight = weights[pixel_index];
+                    if (weight <= 0) continue;
+                    state.weight_sums[pixel_index] += weight;
+                    const src_base = pixel_index * src_pixel_channels;
+                    const dst_base = pixel_index * dst_channels;
+                    for (0..dst_channels) |channel| {
+                        state.pixel_sums[dst_base + channel] += weight * @as(f32, @floatFromInt(src[src_base + channel]));
+                    }
+                }
+            }
+        },
+        .u16 => |src| {
+            for (start_row..end_row) |row| {
+                const row_base = @as(usize, row) * width;
+                for (0..width) |x| {
+                    const pixel_index = row_base + x;
+                    const weight = weights[pixel_index];
+                    if (weight <= 0) continue;
+                    state.weight_sums[pixel_index] += weight;
+                    const src_base = pixel_index * src_pixel_channels;
+                    const dst_base = pixel_index * dst_channels;
+                    for (0..dst_channels) |channel| {
+                        state.pixel_sums[dst_base + channel] += weight * @as(f32, @floatFromInt(src[src_base + channel]));
+                    }
+                }
+            }
+        },
+    }
+}
+
+pub fn finalizeSoft(state: *const SoftBlendState, output: *image_io.Image) void {
+    const prof = profiler.scope("fuse.blend.finalizeSoft");
+    defer prof.end();
+
+    const pixel_count = @as(usize, output.info.width) * @as(usize, output.info.height);
+    const pixel_channels = state.pixel_channels;
+    switch (output.pixels) {
+        .u8 => |dst| {
+            for (0..pixel_count) |pixel_index| {
+                const dst_base = pixel_index * pixel_channels;
+                const weight = state.weight_sums[pixel_index];
+                if (weight <= 1e-12) {
+                    @memset(dst[dst_base .. dst_base + pixel_channels], 0);
+                    continue;
+                }
+                const inv = 1.0 / weight;
+                for (0..pixel_channels) |channel| {
+                    const value = state.pixel_sums[dst_base + channel] * inv;
+                    dst[dst_base + channel] = @intFromFloat(std.math.clamp(value + 0.5, 0.0, 255.0));
+                }
+            }
+        },
+        .u16 => |dst| {
+            for (0..pixel_count) |pixel_index| {
+                const dst_base = pixel_index * pixel_channels;
+                const weight = state.weight_sums[pixel_index];
+                if (weight <= 1e-12) {
+                    @memset(dst[dst_base .. dst_base + pixel_channels], 0);
+                    continue;
+                }
+                const inv = 1.0 / weight;
+                for (0..pixel_channels) |channel| {
+                    const value = state.pixel_sums[dst_base + channel] * inv;
+                    dst[dst_base + channel] = @intFromFloat(std.math.clamp(value + 0.5, 0.0, 65535.0));
+                }
+            }
+        },
+    }
+}
+
 pub fn updateWinners(
     allocator: std.mem.Allocator,
     image: *const image_io.Image,
@@ -234,4 +398,39 @@ test "winner update discounts low-support alpha" {
     weights.pixels[0] = 0.2;
     try updateWinners(allocator, &full_support, &weights, best, &output, 1);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 200, 10 }, output.pixels.u8);
+}
+
+test "soft blend averages weighted inputs" {
+    const allocator = std.testing.allocator;
+    var output = try allocateOutput(allocator, .{
+        .format = .tiff,
+        .width = 1,
+        .height = 1,
+        .color_model = .rgb,
+        .sample_type = .u8,
+        .color_channels = 3,
+        .extra_channels = 0,
+        .exposure_value = null,
+    });
+    defer output.deinit(allocator);
+
+    var state = try SoftBlendState.init(allocator, output.info);
+    defer state.deinit(allocator);
+
+    var image_a = image_io.Image{
+        .info = output.info,
+        .pixels = .{ .u8 = try allocator.dupe(u8, &[_]u8{ 10, 20, 30 }) },
+    };
+    defer image_a.deinit(allocator);
+    var image_b = image_io.Image{
+        .info = output.info,
+        .pixels = .{ .u8 = try allocator.dupe(u8, &[_]u8{ 110, 120, 130 }) },
+    };
+    defer image_b.deinit(allocator);
+
+    try accumulateSoft(allocator, &image_a, &[_]f32{1.0}, &state, 1);
+    try accumulateSoft(allocator, &image_b, &[_]f32{3.0}, &state, 1);
+    finalizeSoft(&state, &output);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 85, 95, 105 }, output.pixels.u8);
 }

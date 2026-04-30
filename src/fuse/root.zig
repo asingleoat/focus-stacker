@@ -8,9 +8,11 @@ pub const blend = @import("blend.zig");
 pub const config = @import("config.zig");
 pub const contrast = @import("contrast.zig");
 pub const io = @import("io.zig");
+pub const masks = @import("masks.zig");
 pub const pipeline = @import("pipeline.zig");
 
 test {
     _ = @import("contrast.zig");
     _ = @import("blend.zig");
+    _ = @import("masks.zig");
 }

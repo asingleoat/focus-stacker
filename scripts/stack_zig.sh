@@ -136,7 +136,7 @@ usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
   --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
-  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast
+  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast
 
 Environment overrides:
   ALIGN_THREADS
@@ -174,8 +174,8 @@ EOF
     fi
     [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded|phasecorr-locked)$ ]] || \
         die "--pair-align must be one of: hugin-ncc, phasecorr-seeded, phasecorr-locked"
-    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast)$ ]] || \
-        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast"
+    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast)$ ]] || \
+        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast, zig-softmask-contrast"
 
     [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or manifests...>"
 
@@ -288,6 +288,7 @@ EOF
         echo "--- Aligning and merging in-process with focus_stack_zig ---"
         local -a stacker_opts=(
             --pair-align "$pair_align_method"
+            --fuse-method "${fuse_method#zig-}"
             -c "$ALIGN_CONTROL_POINTS"
             -g "$ALIGN_GRID_SIZE"
             -t "$ALIGN_ERROR_THRESHOLD"
@@ -297,7 +298,7 @@ EOF
         if [[ -n "$threads" ]]; then
             stacker_opts+=(--threads "$threads")
         fi
-        if [[ "$HARD_MASK" == true ]]; then
+        if [[ "$HARD_MASK" == true && "$fuse_method" == "zig-hardmask-contrast" ]]; then
             stacker_opts+=(--hard-mask)
         fi
         "$stacker_bin" \

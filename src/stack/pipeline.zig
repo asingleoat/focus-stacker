@@ -104,6 +104,10 @@ fn fuseRemappedImages(
     defer gray_buffer.deinit(allocator);
     var weight_buffer = std.ArrayListUnmanaged(f32){};
     defer weight_buffer.deinit(allocator);
+    var smoothed_weight_buffer = std.ArrayListUnmanaged(f32){};
+    defer smoothed_weight_buffer.deinit(allocator);
+    var soft_blend: ?fuse.blend.SoftBlendState = null;
+    defer if (soft_blend) |*state| state.deinit(allocator);
 
     var output: ?align_core.image_io.Image = null;
     defer if (output) |*image| image.deinit(allocator);
@@ -130,10 +134,18 @@ fn fuseRemappedImages(
         if (output == null) {
             output = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
             const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
-            try best_weights.resize(allocator, count);
             try gray_buffer.resize(allocator, count);
             try weight_buffer.resize(allocator, count);
-            @memset(best_weights.items, -std.math.inf(f32));
+            switch (cfg.fuse_method) {
+                .hardmask_contrast => {
+                    try best_weights.resize(allocator, count);
+                    @memset(best_weights.items, -std.math.inf(f32));
+                },
+                .softmask_contrast => {
+                    try smoothed_weight_buffer.resize(allocator, count);
+                    soft_blend = try fuse.blend.SoftBlendState.init(allocator, output.?.info);
+                },
+            }
         }
 
         align_core.gray.fillFromLoaded(gray_buffer.items, &remapped);
@@ -152,7 +164,29 @@ fn fuseRemappedImages(
             .height = gray_image.height,
             .pixels = weight_buffer.items,
         };
-        try fuse.blend.updateWinners(allocator, &remapped, &weights, best_weights.items, &output.?, jobs);
+        switch (cfg.fuse_method) {
+            .hardmask_contrast => {
+                try fuse.blend.updateWinners(allocator, &remapped, &weights, best_weights.items, &output.?, jobs);
+            },
+            .softmask_contrast => {
+                fuse.masks.applySupportInto(&remapped, weight_buffer.items);
+                try fuse.masks.blurFiveTapInto(
+                    allocator,
+                    remapped.info.width,
+                    remapped.info.height,
+                    jobs,
+                    weight_buffer.items,
+                    smoothed_weight_buffer.items,
+                    weight_buffer.items,
+                );
+                try fuse.blend.accumulateSoft(allocator, &remapped, weight_buffer.items, &soft_blend.?, jobs);
+            },
+        }
+    }
+
+    switch (cfg.fuse_method) {
+        .hardmask_contrast => {},
+        .softmask_contrast => fuse.blend.finalizeSoft(&soft_blend.?, &output.?),
     }
 
     if (cfg.verbose > 0) {

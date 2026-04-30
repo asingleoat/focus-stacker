@@ -1,5 +1,6 @@
 const std = @import("std");
 const align_core = @import("align_stack_core");
+const fuse_core = @import("focus_fuse_core");
 
 pub const Action = enum {
     run,
@@ -24,6 +25,7 @@ pub const Config = struct {
     align_error_threshold: f64 = 5.0,
     contrast_window_size: u32 = 5,
     hard_mask: bool = true,
+    fuse_method: fuse_core.config.Method = .hardmask_contrast,
     output_path: ?[]const u8 = null,
     input_files: std.ArrayListUnmanaged([]const u8) = .{},
 
@@ -80,6 +82,16 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) (ParseE
         }
         if (std.mem.eql(u8, arg, "--hard-mask")) {
             cfg.hard_mask = true;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--fuse-method=")) {
+            cfg.fuse_method = try fuse_core.config.parseMethod(arg["--fuse-method=".len..]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--fuse-method")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.fuse_method = try fuse_core.config.parseMethod(args[i]);
             continue;
         }
         if (std.mem.eql(u8, arg, "-o")) {
@@ -183,6 +195,9 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\  -g num                     Grid size per image axis (default: 7)
         \\  -t num                     Control-point prune threshold in pixels (default: 5)
         \\  --contrast-window-size n   Local contrast window size (default: 5)
+        \\  --fuse-method method       Fusion method:
+        \\                               hardmask-contrast (default)
+        \\                               softmask-contrast
         \\  --hard-mask                Keep hard-mask winner selection
         \\  -h, --help                 Display this help text
         \\
@@ -215,6 +230,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
         \\  prune threshold: {d:.3}
         \\  contrast window size: {d}
         \\  hard mask: {}
+        \\  fuse method: {s}
         \\  output: {s}
         \\
     ,
@@ -228,6 +244,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
             cfg.align_error_threshold,
             cfg.contrast_window_size,
             cfg.hard_mask,
+            cfg.fuse_method.cliName(),
             cfg.output_path.?,
         },
     );

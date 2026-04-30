@@ -7,6 +7,7 @@ const blend = @import("blend.zig");
 const config = @import("config.zig");
 const contrast = @import("contrast.zig");
 const io = @import("io.zig");
+const masks = @import("masks.zig");
 
 pub const RunError = io.LoadError || image_io.SaveError || std.mem.Allocator.Error || std.Thread.SpawnError;
 
@@ -21,6 +22,10 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
     defer gray_buffer.deinit(allocator);
     var weight_buffer = std.ArrayListUnmanaged(f32){};
     defer weight_buffer.deinit(allocator);
+    var smoothed_weight_buffer = std.ArrayListUnmanaged(f32){};
+    defer smoothed_weight_buffer.deinit(allocator);
+    var soft_blend: ?blend.SoftBlendState = null;
+    defer if (soft_blend) |*state| state.deinit(allocator);
 
     var output: ?image_io.Image = null;
     defer if (output) |*image| image.deinit(allocator);
@@ -40,10 +45,18 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
             expected = io.stackInfoFromImage(&image);
             output = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
             const count = @as(usize, image.info.width) * @as(usize, image.info.height);
-            try best_weights.resize(allocator, count);
             try gray_buffer.resize(allocator, count);
             try weight_buffer.resize(allocator, count);
-            @memset(best_weights.items, -std.math.inf(f32));
+            switch (cfg.method) {
+                .hardmask_contrast => {
+                    try best_weights.resize(allocator, count);
+                    @memset(best_weights.items, -std.math.inf(f32));
+                },
+                .softmask_contrast => {
+                    try smoothed_weight_buffer.resize(allocator, count);
+                    soft_blend = try blend.SoftBlendState.init(allocator, output.?.info);
+                },
+            }
         }
 
         gray.fillFromLoaded(gray_buffer.items, &image);
@@ -68,7 +81,29 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
             std.debug.print("  local contrast: mean={d:.4} max={d:.4}\n", .{ stats.mean, stats.max });
         }
 
-        try blend.updateWinners(allocator, &image, &weights, best_weights.items, &output.?, jobs);
+        switch (cfg.method) {
+            .hardmask_contrast => {
+                try blend.updateWinners(allocator, &image, &weights, best_weights.items, &output.?, jobs);
+            },
+            .softmask_contrast => {
+                masks.applySupportInto(&image, weight_buffer.items);
+                try masks.blurFiveTapInto(
+                    allocator,
+                    image.info.width,
+                    image.info.height,
+                    jobs,
+                    weight_buffer.items,
+                    smoothed_weight_buffer.items,
+                    weight_buffer.items,
+                );
+                try blend.accumulateSoft(allocator, &image, weight_buffer.items, &soft_blend.?, jobs);
+            },
+        }
+    }
+
+    switch (cfg.method) {
+        .hardmask_contrast => {},
+        .softmask_contrast => blend.finalizeSoft(&soft_blend.?, &output.?),
     }
 
     if (cfg.verbose > 0) {

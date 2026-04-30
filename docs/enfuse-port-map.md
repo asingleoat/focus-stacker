@@ -26,10 +26,19 @@ Current Zig fusion method:
 - uses hard-mask winner selection
 - does not yet port the Gaussian/Laplacian pyramid path
 
+Current alternate Zig fusion method:
+- `softmask-contrast`
+- keeps the same local-contrast weighting
+- multiplies in the remap support mask
+- applies a separable 5-tap Burt-Adelson-style blur to the masks before blending
+- still stops short of a full Gaussian-mask / Laplacian-image pyramid port
+
 On the same clean aligned 10-frame full-resolution `S004_0020..0029` stack:
 - external `enfuse`: about `27849 ms`
 - `focus_fuse_zig --method hardmask-contrast --threads 32`: about `2611 ms`
 - normalized RMSE vs external `enfuse` output: about `0.02305`
+- `focus_fuse_zig --method softmask-contrast --threads 32`: about `3601 ms`
+- normalized RMSE vs external `enfuse` output: about `0.00589`
 
 **Upstream Snapshot**
 Vendored reference source:
@@ -190,4 +199,5 @@ The first goal was to reproduce the current focus-stack fusion recipe in-tree wi
 That first goal is now partially met:
 - there is a fast standalone Zig fusion binary
 - it is already wired into the practical stack script
-- the next fidelity target is the pyramid path, not more CLI work
+- the soft-mask checkpoint confirms that mask softness is a major part of the remaining visual delta
+- the next fidelity target is still the pyramid path, not more CLI work
