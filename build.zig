@@ -24,6 +24,15 @@ pub fn build(b: *std.Build) void {
     configureImageDeps(core);
     configureFftDeps(b, core);
 
+    const fuse_core = b.addModule("focus_fuse_core", .{
+        .root_source_file = b.path("src/fuse/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fuse_core.addOptions("build_options", build_options);
+    fuse_core.addImport("align_stack_core", core);
+    configureImageDeps(fuse_core);
+
     const exe = b.addExecutable(.{
         .name = "align_image_stack_zig",
         .root_module = b.createModule(.{
@@ -38,6 +47,20 @@ pub fn build(b: *std.Build) void {
     configureFftDeps(b, exe.root_module);
 
     b.installArtifact(exe);
+
+    const fuse_exe = b.addExecutable(.{
+        .name = "focus_fuse_zig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuse/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fuse_exe.root_module.addOptions("build_options", build_options);
+    fuse_exe.root_module.addImport("align_stack_core", core);
+    configureImageDeps(fuse_exe.root_module);
+
+    b.installArtifact(fuse_exe);
 
     const parity_probe = b.addExecutable(.{
         .name = "parity_probe",
@@ -116,6 +139,13 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the Zig align_image_stack port scaffold");
     run_step.dependOn(&run_cmd.step);
 
+    const run_fuse_cmd = b.addRunArtifact(fuse_exe);
+    if (b.args) |args| {
+        run_fuse_cmd.addArgs(args);
+    }
+    const run_fuse_step = b.step("run-fuse", "Run the Zig focus-fuse tool");
+    run_fuse_step.dependOn(&run_fuse_cmd.step);
+
     const run_parity_probe = b.addRunArtifact(parity_probe);
     if (b.args) |args| {
         run_parity_probe.addArgs(args);
@@ -161,9 +191,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const fuse_core_tests = b.addTest(.{
+        .root_module = fuse_core,
+    });
+    const run_fuse_core_tests = b.addRunArtifact(fuse_core_tests);
+
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_core_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_fuse_core_tests.step);
 }
 
 fn configureImageDeps(module: *std.Build.Module) void {

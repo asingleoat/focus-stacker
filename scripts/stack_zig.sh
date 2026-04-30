@@ -3,19 +3,19 @@
 # Focus stack processing script using the Zig align_image_stack port.
 #
 # Aligns and merges a set of focus-bracketed images into a single
-# all-in-focus composite using align_image_stack_zig and enfuse.
+# all-in-focus composite using align_image_stack_zig and a switchable fusion stage.
 #
 # Usage:
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] image1.jpg image2.jpg ...
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] S001_manifest.json
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] S001_manifest.json S002_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] image1.jpg image2.jpg ...
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] S001_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] S001_manifest.json S002_manifest.json
 #
 # Accepts any mix of image files and manifest JSON files.
 #
 # Output: <output_dir>/<name>_stacked.tif
 #         <output_dir>/<name>_stacked.jpg
 #
-# Dependencies: zig, enfuse, jq
+# Dependencies: zig, jq, and optionally enfuse
 #
 # Configuration — override with environment variables if desired.
 
@@ -24,6 +24,7 @@ ALIGN_GRID_SIZE="${ALIGN_GRID_SIZE:-7}"
 ALIGN_ERROR_THRESHOLD="${ALIGN_ERROR_THRESHOLD:-5}"
 ALIGN_THREADS="${ALIGN_THREADS:-}"
 ALIGN_PAIR_ALIGN_METHOD="${ALIGN_PAIR_ALIGN_METHOD:-hugin-ncc}"
+ALIGN_FUSE_METHOD="${ALIGN_FUSE_METHOD:-enfuse}"
 
 CONTRAST_WINDOW_SIZE="${CONTRAST_WINDOW_SIZE:-5}"
 HARD_MASK="${HARD_MASK:-true}"
@@ -38,24 +39,33 @@ die() { echo "error: $*" >&2; exit 1; }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 aligner_bin="${ALIGNER_BIN:-$repo_root/zig-out/bin/align_image_stack_zig}"
+fuser_bin="${FUSER_BIN:-$repo_root/zig-out/bin/focus_fuse_zig}"
 
 check_deps() {
     command -v zig >/dev/null || die "zig not found"
-    command -v enfuse >/dev/null || die "enfuse not found (install enblend-enfuse)"
     command -v jq >/dev/null || die "jq not found"
 }
 
-ensure_aligner() {
-    if [[ -x "$aligner_bin" ]]; then
+ensure_binaries() {
+    local need_build=false
+    if [[ ! -x "$aligner_bin" ]]; then
+        need_build=true
+    fi
+    if [[ ! -x "$fuser_bin" ]]; then
+        need_build=true
+    fi
+
+    if [[ "$need_build" == false ]]; then
         return
     fi
 
-    echo "--- Building align_image_stack_zig ---"
+    echo "--- Building Zig binaries ---"
     (
         cd "$repo_root"
         ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build -Doptimize="$ALIGN_OPTIMIZE_MODE"
     )
     [[ -x "$aligner_bin" ]] || die "build completed but aligner binary not found: $aligner_bin"
+    [[ -x "$fuser_bin" ]] || die "build completed but fuser binary not found: $fuser_bin"
 }
 
 images_from_manifest() {
@@ -83,6 +93,7 @@ main() {
 
     local threads="$ALIGN_THREADS"
     local pair_align_method="$ALIGN_PAIR_ALIGN_METHOD"
+    local fuse_method="$ALIGN_FUSE_METHOD"
     local -a positional=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -104,17 +115,28 @@ main() {
                 pair_align_method="${1#--pair-align=}"
                 shift
                 ;;
+            --fuse-method)
+                [[ $# -ge 2 ]] || die "missing value for --fuse-method"
+                fuse_method="$2"
+                shift 2
+                ;;
+            --fuse-method=*)
+                fuse_method="${1#--fuse-method=}"
+                shift
+                ;;
             --help|-h)
                 cat <<EOF
-usage: $0 [--threads N] [--pair-align METHOD] <images or manifests...>
+usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or manifests...>
 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
   --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
+  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast
 
 Environment overrides:
   ALIGN_THREADS
   ALIGN_PAIR_ALIGN_METHOD
+  ALIGN_FUSE_METHOD
   ALIGN_CONTROL_POINTS
   ALIGN_GRID_SIZE
   ALIGN_ERROR_THRESHOLD
@@ -147,8 +169,10 @@ EOF
     fi
     [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded|phasecorr-locked)$ ]] || \
         die "--pair-align must be one of: hugin-ncc, phasecorr-seeded, phasecorr-locked"
+    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast)$ ]] || \
+        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast"
 
-    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] <images or manifests...>"
+    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or manifests...>"
 
     local name
     name="$(derive_name "${positional[0]}")"
@@ -177,17 +201,23 @@ EOF
         name="${name}-${last_name}"
     fi
 
-    ensure_aligner
+    if [[ "$fuse_method" == "enfuse" ]]; then
+        command -v enfuse >/dev/null || die "enfuse not found (install enblend-enfuse)"
+    fi
+
+    ensure_binaries
 
     echo "=== Focus Stack (Zig): $name ==="
     echo "  Images: $count"
     echo "  Aligner: $aligner_bin"
+    echo "  Fuser: $fuser_bin"
     if [[ -n "$threads" ]]; then
         echo "  Threads: $threads"
     else
         echo "  Threads: auto"
     fi
     echo "  Pair align: $pair_align_method"
+    echo "  Fuse method: $fuse_method"
     echo "  Output: $OUTPUT_DIR/${name}_stacked.tif"
     echo ""
 
@@ -229,24 +259,42 @@ EOF
     echo "  Aligned $aligned_count images"
     echo ""
 
-    echo "--- Merging with enfuse ---"
-
-    local -a enfuse_opts=(
-        --exposure-weight=0
-        --saturation-weight=0
-        --contrast-weight=1
-        --contrast-window-size="$CONTRAST_WINDOW_SIZE"
-    )
-    if [[ "$HARD_MASK" == true ]]; then
-        enfuse_opts+=(--hard-mask)
-    fi
-
     mkdir -p "$OUTPUT_DIR"
 
-    enfuse \
-        "${enfuse_opts[@]}" \
-        --output="$OUTPUT_DIR/${name}_stacked.tif" \
-        "$workdir"/aligned_*.tif
+    if [[ "$fuse_method" == "enfuse" ]]; then
+        echo "--- Merging with enfuse ---"
+
+        local -a enfuse_opts=(
+            --exposure-weight=0
+            --saturation-weight=0
+            --contrast-weight=1
+            --contrast-window-size="$CONTRAST_WINDOW_SIZE"
+        )
+        if [[ "$HARD_MASK" == true ]]; then
+            enfuse_opts+=(--hard-mask)
+        fi
+
+        enfuse \
+            "${enfuse_opts[@]}" \
+            --output="$OUTPUT_DIR/${name}_stacked.tif" \
+            "$workdir"/aligned_*.tif
+    else
+        echo "--- Merging with focus_fuse_zig ---"
+        local -a fuser_opts=(
+            --method hardmask-contrast
+            --contrast-window-size "$CONTRAST_WINDOW_SIZE"
+            --output "$OUTPUT_DIR/${name}_stacked.tif"
+        )
+        if [[ -n "$threads" ]]; then
+            fuser_opts+=(--threads "$threads")
+        fi
+        if [[ "$HARD_MASK" == true ]]; then
+            fuser_opts+=(--hard-mask)
+        fi
+        "$fuser_bin" \
+            "${fuser_opts[@]}" \
+            "$workdir"/aligned_*.tif
+    fi
 
     echo ""
     echo "  Output: $OUTPUT_DIR/${name}_stacked.tif"

@@ -1,0 +1,143 @@
+%% This file is part of Enblend.
+%% Licence details can be found in the file COPYING.
+
+
+\chapter[Known Limitations]{\label{sec:known-limitations}%
+  \genidx[\rangebeginlocation]{known limitations}%
+  Known Limitations}
+
+\App{} has its limitations.  Some of them are inherent to the programs proper others are
+``imported'' by using libraries as for example \uref{\hciiwrvigra}{\acronym{VIGRA}}.  Here are
+some of the known ones.
+
+\begin{itemize}
+\item
+  The \genidx{BigTIFF@\acronym{BigTIFF}}\acronym{BigTIFF} image format is not automatically
+  selected. For TIFF images bigger 4 GB you have to add the 
+  option~\sample{--parameter=export-bigtiff} manually.
+
+\item
+  Total size of \emph{any} -- even intermediate -- image is limited to $2^{31}$~pixels, this is
+  two gigapixels.
+
+\ifenblend
+  \genidx{blending!sequential}%
+  \gensee{sequential blending}{blending, sequential}%
+\item
+  Each ``next'' image must overlap with the result of the blending of all previous images.  In
+  special occasions option~\sample{--pre-assemble} can circumvent this sequential-blending
+  restriction.
+
+\item
+  No pair of images must overlap too much.  In particular, no two images must be identical.
+
+  \begin{geeknote}
+    The overlap is exclusively defined by the masks of the overlapping images.  This is exactly
+    what the input masks are built for.  Let $A$ be the number of pixels that overlap in both
+    masks.  \App{} uses $A$ as a measure of the overlap area -- something 2\hyp dimensional;
+    technically a pixel count.
+
+    Construct the smallest circumscribed, par-axial rectangle of the overlap area.  The
+    rectangle has a circumference
+    \[
+    U = 2 (a + b),
+    \]
+    which is of course 1-dimensional.  Internally $U$ again is a number of pixels just as $A$.
+
+    The threshold for \App{} to consider a pair of images sufficiently different is if $A$ is
+    larger than \val{val:overlap-check-threshold}~times the number of pixels on the
+    circumference~$U$
+    \begin{equation}\label{equ:overlap-threshold}
+    A > \val{val:overlap-check-threshold} \times U.
+    \end{equation}
+    Avoiding the term ``fractal dimension'', \eqnref{equ:overlap-threshold} is a simple measure
+    of how 2\hyp dimensional the overlap area is.  This way \App{} steers clear of feeding later
+    processing stages with nearly 1\hyp dimensional overlap regions, something that wreaks havoc
+    on them.
+  \end{geeknote}
+
+  \optidx{--wrap}%
+\item
+  Option~\sample{--wrap=both} performs blending in $\symmgroup{E}(1) \times \symmgroup{E}(1)$,
+  which is only \emph{locally} isomorphic to $\symmgroup{S}(2)$.  This will cause artifacts
+  that do not appear in $\symmgroup{S}(2)$.  \App{} cannot blend within $\symmgroup{S}(2)$.
+\fi%enblend
+
+\genidx{artifacts!color}%
+\gensee{color artifacts}{artifacts, color}%
+\optidx{--blend-colorspace}%
+\item
+  High-contrast scenes stored with non-linear color profiles (or no profile at all) tend to
+  produce color artifacts in the deep shadows.  Typically artifacts are isolated, highly
+  saturated pixels.  Because of the different usage styles this problem occurs more often with
+  \application{Enfuse} than with \application{Enblend}.
+
+  Two simple workarounds are known:
+  \begin{enumerate}
+  \item
+    Choose a different blend-colorspace; see
+    option~\flexipageref{\option{--blend-colorspace}}{opt:blend-colorspace}.
+
+  \item
+    Use linear, this is $\mathrm{gamma} = 1$, color profiles in the input images.  Also see
+    \chapterName~\fullref{sec:color-spaces} on ``Color Spaces And Color Profiles''.
+  \end{enumerate}
+
+\genidx{images!non-overlapping}%
+\gensee{non-overlapping images}{images, non-overlapping}%
+\item
+  No image contributing: If at a particular pixel or set of pixels the input images do not
+  overlap at all, the output image will have a hole.  Such a non-overlapping area either occurs
+
+  \begin{compactitemize}
+  \item
+    naturally, this is, it is induced by the images' geometries and positions, or
+
+  \item
+    artificially by manually manipulating the masks of the input images for example to mask out
+    moving objects.
+  \end{compactitemize}
+
+  Neither \App{} nor \OtherApp{} will even try to fill the hole by ``dreaming up'' pixels.
+
+  For output image formats that support masks, the mask will have zero values at the hole.
+  Output formats without masks will set all pixels of the hole to pure black.  Note that in any
+  case an output mask reflecting the hole can be requested with
+  option~\flexipageref{\option{--output-mask}}{opt:output-mask}.
+
+\item
+  Just a single image contributing: If at a particular set of pixels the input images do not
+  overlap, but only a single image covers the region (for the same reasons as mentioned in the
+  previous item), \App{} and \OtherApp{} simply copy the pixels of this region to the output
+  image if they are away far enough from the overlap area.
+
+  \begin{geeknote}
+    If the \propername{Laplacian} pyramids do not contain ``interesting'' information, this is,
+    they have been built from only one image, only the \propername{Gaussian} pyramids are
+    totaled and scaled up until reaching the original image's scale.  That way the possibly
+    sharp seam between the images gets smoothed out pyramid level by pyramid level and thus the
+    transition between the images is softly feathered.
+
+    For a quantitative estimate of how far away of the overlap boundary the non-overlapping
+    parts are influenced look for the message
+
+    \begin{literal}
+      \app: info: using $N$ blending levels
+    \end{literal}
+
+    which is available at verbosity level~\val{val:verbosity-level-pyramid} and higher.  Here,
+    $N$ is the number of pyramid levels.  Non-overlapping parts more than approximately
+    $2^N$~pixels away from the image intersection bounding box will be unaffected by the blend
+    process and pixels within this distance are influenced by the overlap.
+
+    The location and size of the ``image intersection bounding box'' is available from verbosity
+    level~\val{val:verbosity-level-ibb} on.
+  \end{geeknote}
+\end{itemize}
+
+\genidx[\rangeendlocation]{known limitations}
+
+
+%%% Local Variables:
+%%% fill-column: 96
+%%% End:
