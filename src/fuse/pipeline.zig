@@ -12,6 +12,7 @@ const pyramid = @import("pyramid.zig");
 
 pub const RunError = io.LoadError || image_io.SaveError || std.mem.Allocator.Error || std.Thread.SpawnError;
 const max_cached_pyramid_bytes: usize = 2 * 1024 * 1024 * 1024;
+const max_cached_pyramid_total_bytes: usize = 4 * 1024 * 1024 * 1024;
 
 pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!void {
     const prof = profiler.scope("fuse.pipeline.run");
@@ -159,7 +160,13 @@ fn runPyramidPass(
         for (cached_images.items) |*image| image.deinit(allocator);
         cached_images.deinit(allocator);
     }
+    var cached_weights = std.ArrayListUnmanaged([]f32){};
+    defer {
+        for (cached_weights.items) |weights| allocator.free(weights);
+        cached_weights.deinit(allocator);
+    }
     var cache_images = false;
+    var cache_weights = false;
 
     for (cfg.input_files.items, 0..) |path, index| {
         if (cfg.verbose > 0) {
@@ -178,8 +185,12 @@ fn runPyramidPass(
             @memset(norm_weight_sums.items, 0);
             accumulator.* = try pyramid.Accumulator.init(allocator, image.info.width, image.info.height);
             cache_images = estimatedCacheBytes(image.info, input_count) <= max_cached_pyramid_bytes;
+            cache_weights = cache_images and estimatedCacheBytes(image.info, input_count) + estimatedWeightCacheBytes(image.info.width, image.info.height, input_count) <= max_cached_pyramid_total_bytes;
             if (cfg.verbose > 0 and cache_images) {
                 std.debug.print("focus fuse: caching aligned inputs in memory for pyramid blend\n", .{});
+                if (cache_weights) {
+                    std.debug.print("focus fuse: caching weight maps in memory for pyramid blend\n", .{});
+                }
             }
         }
         try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
@@ -187,6 +198,9 @@ fn runPyramidPass(
         for (norm_weight_sums.items, weight_buffer.items) |*sum, weight| sum.* += weight;
         if (cache_images) {
             try cached_images.append(allocator, image);
+            if (cache_weights) {
+                try cached_weights.append(allocator, try allocator.dupe(f32, weight_buffer.items));
+            }
             keep_image = true;
         }
     }
@@ -198,8 +212,12 @@ fn runPyramidPass(
             if (cfg.verbose > 0) {
                 std.debug.print("focus fuse: [{d}/{d}] pyramid blend from cached image\n", .{ index + 1, input_count });
             }
-            try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, weight_buffer.items);
-            masks.applySupportInto(image, weight_buffer.items);
+            if (cache_weights) {
+                @memcpy(weight_buffer.items, cached_weights.items[index]);
+            } else {
+                try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, weight_buffer.items);
+                masks.applySupportInto(image, weight_buffer.items);
+            }
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
             try pyramid.accumulateImage(allocator, image, gray_buffer.items, &accumulator.*.?);
         }
@@ -225,6 +243,10 @@ fn estimatedCacheBytes(info: image_io.ImageInfo, image_count: usize) usize {
     };
     const pixel_bytes = @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels + info.extra_channels) * sample_bytes;
     return pixel_bytes * image_count;
+}
+
+fn estimatedWeightCacheBytes(width: u32, height: u32, image_count: usize) usize {
+    return @as(usize, width) * @as(usize, height) * @sizeOf(f32) * image_count;
 }
 
 fn computeWeightMapForImage(

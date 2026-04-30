@@ -326,7 +326,7 @@ fn reduceScalar(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []con
         var needed_slots: [5]usize = undefined;
         for (0..5) |ky| {
             const y = clampCoord(center_y + @as(i32, @intCast(ky)) - 2, src_h);
-            needed_slots[ky] = ensureReducedScalarRow(src_w, src_h, src, dst_w, y, &cache_y, &cache_rows, &replace_index);
+            needed_slots[ky] = ensureReducedScalarRow(src_w, src, dst_w, y, &cache_y, &cache_rows, &replace_index);
         }
         const row0 = cache_rows[needed_slots[0]];
         const row1 = cache_rows[needed_slots[1]];
@@ -357,7 +357,7 @@ fn reduceRgb(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []const 
         var needed_slots: [5]usize = undefined;
         for (0..5) |ky| {
             const y = clampCoord(center_y + @as(i32, @intCast(ky)) - 2, src_h);
-            needed_slots[ky] = ensureReducedRgbRow(src_w, src_h, src, dst_w, y, &cache_y, &cache_rows, &replace_index);
+            needed_slots[ky] = ensureReducedRgbRow(src_w, src, dst_w, y, &cache_y, &cache_rows, &replace_index);
         }
         const row0 = cache_rows[needed_slots[0]];
         const row1 = cache_rows[needed_slots[1]];
@@ -392,11 +392,11 @@ fn expandRgb(allocator: std.mem.Allocator, dst_w: u32, dst_h: u32, src_w: u32, s
         const y0 = if (even_y) clampCoord(@as(i32, @intCast(base_y)) - 1, src_h) else clampCoord(@as(i32, @intCast(base_y)), src_h);
         const y1 = clampCoord(@as(i32, @intCast(base_y)), src_h);
         const y2 = if (even_y) clampCoord(@as(i32, @intCast(base_y)) + 1, src_h) else clampCoord(@as(i32, @intCast(base_y + 1)), src_h);
-        const slot0 = ensureExpandedRgbRow(src_w, src_h, src, dst_w, y0, &cache_y, &cache_rows, &replace_index);
-        const slot1 = ensureExpandedRgbRow(src_w, src_h, src, dst_w, y1, &cache_y, &cache_rows, &replace_index);
+        const slot0 = ensureExpandedRgbRow(src_w, src, dst_w, y0, &cache_y, &cache_rows, &replace_index);
+        const slot1 = ensureExpandedRgbRow(src_w, src, dst_w, y1, &cache_y, &cache_rows, &replace_index);
         const row0 = cache_rows[slot0];
         const row1 = cache_rows[slot1];
-        const row2 = if (even_y) cache_rows[ensureExpandedRgbRow(src_w, src_h, src, dst_w, y2, &cache_y, &cache_rows, &replace_index)] else row1;
+        const row2 = if (even_y) cache_rows[ensureExpandedRgbRow(src_w, src, dst_w, y2, &cache_y, &cache_rows, &replace_index)] else row1;
         for (0..dst_w) |dx| {
             const dst_base = (@as(usize, dy) * dst_width + @as(usize, dx)) * 3;
             const src_base = @as(usize, dx) * 3;
@@ -415,7 +415,6 @@ fn expandRgb(allocator: std.mem.Allocator, dst_w: u32, dst_h: u32, src_w: u32, s
 
 fn ensureReducedScalarRow(
     src_w: u32,
-    src_h: u32,
     src: []const f32,
     dst_w: u32,
     src_y: u32,
@@ -423,7 +422,6 @@ fn ensureReducedScalarRow(
     cache_rows: *[5][]f32,
     replace_index: *usize,
 ) usize {
-    _ = src_h;
     for (cache_y, 0..) |cached_y, i| {
         if (cached_y == src_y) return i;
     }
@@ -436,7 +434,6 @@ fn ensureReducedScalarRow(
 
 fn ensureReducedRgbRow(
     src_w: u32,
-    src_h: u32,
     src: []const f32,
     dst_w: u32,
     src_y: u32,
@@ -444,7 +441,6 @@ fn ensureReducedRgbRow(
     cache_rows: *[5][]f32,
     replace_index: *usize,
 ) usize {
-    _ = src_h;
     for (cache_y, 0..) |cached_y, i| {
         if (cached_y == src_y) return i;
     }
@@ -457,7 +453,6 @@ fn ensureReducedRgbRow(
 
 fn ensureExpandedRgbRow(
     src_w: u32,
-    src_h: u32,
     src: []const f32,
     dst_w: u32,
     src_y: u32,
@@ -465,7 +460,6 @@ fn ensureExpandedRgbRow(
     cache_rows: *[4][]f32,
     replace_index: *usize,
 ) usize {
-    _ = src_h;
     for (cache_y, 0..) |cached_y, i| {
         if (cached_y == src_y) return i;
     }
