@@ -5,6 +5,7 @@ const gray = @import("gray.zig");
 const image_io = @import("image_io.zig");
 const match = @import("match.zig");
 const optimize = @import("optimize.zig");
+const pair_align = @import("pair_align.zig");
 const profiler = @import("profiler.zig");
 const pto = @import("pto.zig");
 const remap = @import("remap.zig");
@@ -212,6 +213,21 @@ pub fn analyzePairs(
     plan: *const sequence.Plan,
 ) RunError![]match.PairMatches {
     const prof = profiler.scope("pipeline.analyzePairs");
+    defer prof.end();
+
+    return switch (cfg.pair_alignment_method) {
+        .hugin_ncc => analyzePairsHuginNcc(allocator, cfg, images, plan),
+        .phasecorr_seeded => error.NotImplemented,
+    };
+}
+
+fn analyzePairsHuginNcc(
+    allocator: std.mem.Allocator,
+    cfg: *const config_mod.Config,
+    images: []const sequence.InputImage,
+    plan: *const sequence.Plan,
+) RunError![]match.PairMatches {
+    const prof = profiler.scope("pipeline.analyzePairsHuginNcc");
     defer prof.end();
 
     if (plan.pairs.items.len == 0) {

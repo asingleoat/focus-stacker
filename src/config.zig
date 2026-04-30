@@ -1,4 +1,5 @@
 const std = @import("std");
+const pair_align = @import("pair_align.zig");
 
 pub const latest_upstream_version = "hugin-2025.0.1";
 pub const latest_upstream_release_date = "2025-12-13";
@@ -24,6 +25,7 @@ pub const Config = struct {
     corr_thresh: f64 = 0.9,
     points_per_grid: u32 = 8,
     grid_size: u32 = 5,
+    pair_alignment_method: pair_align.Method = .hugin_ncc,
     hfov: ?f64 = null,
     pyr_level: u8 = 1,
     linear: bool = false,
@@ -149,6 +151,9 @@ pub fn renderUsage(
         \\  -l        Assume linear input files
         \\  -s scale  Scale down image by 2^scale (default: 1)
         \\  -g gsize  Break image into a gsize x gsize grid (default: 5)
+        \\  --pair-align method
+        \\             Pair alignment implementation to use:
+        \\               hugin-ncc (default), phasecorr-seeded
         \\  --distortion      Try to load distortion data from the lens database
         \\  --use-given-order Use the image order as given on the command line
         \\  --align-to-first  Align all images to the first one
@@ -181,6 +186,7 @@ pub fn renderSummary(
         \\  verbose: {d}
         \\  pair jobs: {s}
         \\  pyramid level: {d}
+        \\  pair alignment: {s}
         \\  grid: {d}x{d}
         \\  points per grid: {d}
         \\  correlation threshold: {d}
@@ -194,6 +200,7 @@ pub fn renderSummary(
             cfg.verbose,
             pair_jobs,
             cfg.pyr_level,
+            cfg.pair_alignment_method.cliName(),
             cfg.grid_size,
             cfg.grid_size,
             cfg.points_per_grid,
@@ -298,6 +305,11 @@ fn parseLongOption(
     }
     if (std.mem.eql(u8, name, "threads")) {
         cfg.pair_jobs = try parseBoundedInt(u32, try takeValue(args, index, attached_value), 1, null);
+        return;
+    }
+    if (std.mem.eql(u8, name, "pair-align")) {
+        const value = try takeValue(args, index, attached_value);
+        cfg.pair_alignment_method = pair_align.parseMethod(value) orelse return error.InvalidValue;
         return;
     }
     if (std.mem.eql(u8, name, "gpu")) {
@@ -411,6 +423,15 @@ test "parse threads option" {
     defer cfg.deinit(allocator);
 
     try std.testing.expectEqual(@as(?u32, 6), cfg.pair_jobs);
+}
+
+test "parse pair-align option" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "--pair-align=phasecorr-seeded", "-p", "out.pto", "a.tif", "b.tif" };
+    var cfg = try parseArgs(allocator, &args);
+    defer cfg.deinit(allocator);
+
+    try std.testing.expectEqual(pair_align.Method.phasecorr_seeded, cfg.pair_alignment_method);
 }
 
 test "invalid correlation threshold is rejected" {
