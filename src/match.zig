@@ -78,6 +78,7 @@ pub const PairMatches = struct {
 
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
+    feature_workspace: features.Workspace,
     integral: []f64 = &.{},
     integral_sq: []f64 = &.{},
     search_freq: []fft_backend.Complex = &.{},
@@ -87,10 +88,14 @@ pub const Workspace = struct {
     fft_height: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) Workspace {
-        return .{ .allocator = allocator };
+        return .{
+            .allocator = allocator,
+            .feature_workspace = features.Workspace.init(allocator),
+        };
     }
 
     pub fn deinit(self: *Workspace) void {
+        self.feature_workspace.deinit();
         if (self.integral.len != 0) self.allocator.free(self.integral);
         if (self.integral_sq.len != 0) self.allocator.free(self.integral_sq);
         if (self.search_freq.len != 0) self.allocator.free(self.search_freq);
@@ -188,8 +193,7 @@ pub fn analyzePair(
     }
 
     for (rects, 0..) |rect, rect_index| {
-        const candidates = try features.detectInterestPointsPartial(allocator, left, rect, 2.0, requested_candidates);
-        defer allocator.free(candidates);
+        const candidates = try features.detectInterestPointsPartialBorrowed(&workspace.feature_workspace, left, rect, 2.0, requested_candidates);
 
         if (opts.verbose > 1) {
             std.debug.print(

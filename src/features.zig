@@ -31,6 +31,43 @@ const RankedInterestPoint = struct {
     serial: u32,
 };
 
+pub const Workspace = struct {
+    allocator: std.mem.Allocator,
+    local_pixels: []f32 = &.{},
+    response_pixels: []f32 = &.{},
+    ranked_points: []RankedInterestPoint = &.{},
+    output_points: []InterestPoint = &.{},
+    corner_workspace: vigra.CornerWorkspace,
+
+    pub fn init(allocator: std.mem.Allocator) Workspace {
+        return .{
+            .allocator = allocator,
+            .corner_workspace = vigra.CornerWorkspace.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Workspace) void {
+        if (self.local_pixels.len != 0) self.allocator.free(self.local_pixels);
+        if (self.response_pixels.len != 0) self.allocator.free(self.response_pixels);
+        if (self.ranked_points.len != 0) self.allocator.free(self.ranked_points);
+        if (self.output_points.len != 0) self.allocator.free(self.output_points);
+        self.corner_workspace.deinit();
+        self.* = undefined;
+    }
+
+    fn ensureImageCapacity(self: *Workspace, needed: usize) !void {
+        try ensureSliceCapacityF32(self.allocator, &self.local_pixels, needed);
+        try ensureSliceCapacityF32(self.allocator, &self.response_pixels, needed);
+    }
+
+    fn ensurePointCapacity(self: *Workspace, max_points: u32) !void {
+        const ranked_needed = @as(usize, max_points) + 1;
+        const output_needed = @as(usize, max_points);
+        try ensureSliceCapacityRanked(self.allocator, &self.ranked_points, ranked_needed);
+        try ensureSliceCapacityPoints(self.allocator, &self.output_points, output_needed);
+    }
+};
+
 pub fn buildGridRects(
     allocator: std.mem.Allocator,
     width: u32,
@@ -68,25 +105,45 @@ pub fn detectInterestPointsPartial(
     scale: f64,
     max_points: u32,
 ) std.mem.Allocator.Error![]InterestPoint {
+    var workspace = Workspace.init(allocator);
+    defer workspace.deinit();
+
+    const borrowed = try detectInterestPointsPartialBorrowed(&workspace, image, rect, scale, max_points);
+    return allocator.dupe(InterestPoint, borrowed);
+}
+
+pub fn detectInterestPointsPartialBorrowed(
+    workspace: *Workspace,
+    image: *const gray.GrayImage,
+    rect: Rect,
+    scale: f64,
+    max_points: u32,
+) std.mem.Allocator.Error![]const InterestPoint {
     const prof = profiler.scope("features.detectInterestPointsPartial");
     defer prof.end();
 
     if (rect.width() < 3 or rect.height() < 3 or max_points == 0) {
-        return allocator.alloc(InterestPoint, 0);
+        return workspace.output_points[0..0];
     }
 
-    var local = try extractRectImage(allocator, image, rect);
-    defer local.deinit(allocator);
+    const width = rect.width();
+    const height = rect.height();
+    const pixel_count = @as(usize, width) * @as(usize, height);
+    try workspace.ensureImageCapacity(pixel_count);
+    try workspace.ensurePointCapacity(max_points);
 
-    var response = try vigra.cornerResponse(allocator, &local, scale);
-    defer response.deinit(allocator);
+    var local = gray.GrayImage{
+        .width = width,
+        .height = height,
+        .pixels = workspace.local_pixels[0..pixel_count],
+    };
+    extractRectImageInto(&local, image, rect);
 
-    var points: std.ArrayList(RankedInterestPoint) = .empty;
-    defer points.deinit(allocator);
-    try points.ensureTotalCapacity(allocator, max_points + 1);
+    var response = try workspace.corner_workspace.cornerResponseInto(&local, scale, workspace.response_pixels[0..pixel_count]);
 
     var min_score: f32 = 0;
     var serial: u32 = 0;
+    var point_count: usize = 0;
 
     var y: u32 = 1;
     while (y + 1 < local.height) : (y += 1) {
@@ -96,18 +153,20 @@ pub fn detectInterestPointsPartial(
             if (score <= min_score or !vigra.isStrictLocalMaximum(&response, x, y, 0)) {
                 continue;
             }
-            points.appendAssumeCapacity(.{
+            workspace.ranked_points[point_count] = .{
                 .x = rect.x0 + x,
                 .y = rect.y0 + y,
                 .score = score,
                 .serial = serial,
-            });
+            };
+            point_count += 1;
             serial += 1;
 
-            if (points.items.len > max_points) {
-                const min_index = findWeakestPoint(points.items);
-                _ = points.swapRemove(min_index);
-                min_score = points.items[findWeakestPoint(points.items)].score;
+            if (point_count > max_points) {
+                const min_index = findWeakestPoint(workspace.ranked_points[0..point_count]);
+                workspace.ranked_points[min_index] = workspace.ranked_points[point_count - 1];
+                point_count -= 1;
+                min_score = workspace.ranked_points[findWeakestPoint(workspace.ranked_points[0..point_count])].score;
             }
         }
     }
@@ -120,50 +179,40 @@ pub fn detectInterestPointsPartial(
             return lhs.score > rhs.score;
         }
     };
-    std.sort.insertion(RankedInterestPoint, points.items, {}, SortContext.lessThan);
+    std.sort.insertion(RankedInterestPoint, workspace.ranked_points[0..point_count], {}, SortContext.lessThan);
 
-    if (points.items.len > max_points) {
-        points.items.len = max_points;
+    if (point_count > max_points) {
+        point_count = max_points;
     }
 
-    const owned_ranked = try points.toOwnedSlice(allocator);
-    defer allocator.free(owned_ranked);
-
-    const owned = try allocator.alloc(InterestPoint, owned_ranked.len);
-    for (owned, owned_ranked) |*dst, src_point| {
+    const out = workspace.output_points[0..point_count];
+    for (out, workspace.ranked_points[0..point_count]) |*dst, src_point| {
         dst.* = .{
             .x = src_point.x,
             .y = src_point.y,
             .score = src_point.score,
         };
     }
-    return owned;
+    return out;
 }
 
-fn extractRectImage(
-    allocator: std.mem.Allocator,
+fn extractRectImageInto(
+    dst: *gray.GrayImage,
     image: *const gray.GrayImage,
     rect: Rect,
-) std.mem.Allocator.Error!gray.GrayImage {
+) void {
     const prof = profiler.scope("features.extractRectImage");
     defer prof.end();
 
-    const width = rect.width();
-    const height = rect.height();
-    const pixels = try allocator.alloc(f32, @as(usize, width) * @as(usize, height));
-    errdefer allocator.free(pixels);
-
+    const width = dst.width;
+    const height = dst.height;
+    const src_width = @as(usize, image.width);
+    const dst_width = @as(usize, width);
     for (0..height) |dy| {
-        for (0..width) |dx| {
-            pixels[dy * width + dx] = image.pixel(rect.x0 + @as(u32, @intCast(dx)), rect.y0 + @as(u32, @intCast(dy)));
-        }
+        const src_row = @as(usize, rect.y0 + @as(u32, @intCast(dy))) * src_width + @as(usize, rect.x0);
+        const dst_row = dy * dst_width;
+        @memcpy(dst.pixels[dst_row .. dst_row + dst_width], image.pixels[src_row .. src_row + dst_width]);
     }
-
-    return .{
-        .width = width,
-        .height = height,
-        .pixels = pixels,
-    };
 }
 
 fn findWeakestPoint(points: []const RankedInterestPoint) usize {
@@ -180,6 +229,33 @@ fn findWeakestPoint(points: []const RankedInterestPoint) usize {
         }
     }
     return weakest_index;
+}
+
+fn ensureSliceCapacityF32(allocator: std.mem.Allocator, slice: *[]f32, needed: usize) !void {
+    if (slice.len >= needed) return;
+    if (slice.len == 0) {
+        slice.* = try allocator.alloc(f32, needed);
+    } else {
+        slice.* = try allocator.realloc(slice.*, needed);
+    }
+}
+
+fn ensureSliceCapacityRanked(allocator: std.mem.Allocator, slice: *[]RankedInterestPoint, needed: usize) !void {
+    if (slice.len >= needed) return;
+    if (slice.len == 0) {
+        slice.* = try allocator.alloc(RankedInterestPoint, needed);
+    } else {
+        slice.* = try allocator.realloc(slice.*, needed);
+    }
+}
+
+fn ensureSliceCapacityPoints(allocator: std.mem.Allocator, slice: *[]InterestPoint, needed: usize) !void {
+    if (slice.len >= needed) return;
+    if (slice.len == 0) {
+        slice.* = try allocator.alloc(InterestPoint, needed);
+    } else {
+        slice.* = try allocator.realloc(slice.*, needed);
+    }
 }
 
 test "grid rectangles cover the image" {

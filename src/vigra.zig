@@ -1,54 +1,127 @@
 const std = @import("std");
 const gray = @import("gray.zig");
 
+pub const CornerWorkspace = struct {
+    allocator: std.mem.Allocator,
+    gx: []f32 = &.{},
+    gy: []f32 = &.{},
+    tmp: []f32 = &.{},
+    blur_tmp: []f32 = &.{},
+    st_xx: []f32 = &.{},
+    st_xy: []f32 = &.{},
+    st_yy: []f32 = &.{},
+    smooth_kernel: []f64 = &.{},
+    grad_kernel: []f64 = &.{},
+    kernel_scale: ?f64 = null,
+
+    pub fn init(allocator: std.mem.Allocator) CornerWorkspace {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *CornerWorkspace) void {
+        freeSlice(self.allocator, &self.gx);
+        freeSlice(self.allocator, &self.gy);
+        freeSlice(self.allocator, &self.tmp);
+        freeSlice(self.allocator, &self.blur_tmp);
+        freeSlice(self.allocator, &self.st_xx);
+        freeSlice(self.allocator, &self.st_xy);
+        freeSlice(self.allocator, &self.st_yy);
+        freeSliceF64(self.allocator, &self.smooth_kernel);
+        freeSliceF64(self.allocator, &self.grad_kernel);
+        self.* = undefined;
+    }
+
+    pub fn cornerResponseInto(
+        self: *CornerWorkspace,
+        src: *const gray.GrayImage,
+        scale: f64,
+        response_pixels: []f32,
+    ) std.mem.Allocator.Error!gray.GrayImage {
+        const pixel_count = @as(usize, src.width) * @as(usize, src.height);
+        std.debug.assert(response_pixels.len >= pixel_count);
+
+        try self.ensureImageCapacity(pixel_count);
+        try self.ensureKernels(scale);
+
+        var gx = imageView(src.width, src.height, self.gx[0..pixel_count]);
+        var gy = imageView(src.width, src.height, self.gy[0..pixel_count]);
+        var tmp = imageView(src.width, src.height, self.tmp[0..pixel_count]);
+        var blur_tmp = imageView(src.width, src.height, self.blur_tmp[0..pixel_count]);
+        var st_xx = imageView(src.width, src.height, self.st_xx[0..pixel_count]);
+        var st_xy = imageView(src.width, src.height, self.st_xy[0..pixel_count]);
+        var st_yy = imageView(src.width, src.height, self.st_yy[0..pixel_count]);
+        const response = imageView(src.width, src.height, response_pixels[0..pixel_count]);
+
+        gaussianGradientWithKernels(src, self.smooth_kernel, self.grad_kernel, &tmp, &gx, &gy);
+
+        multiplyInto(&gx, &gx, &tmp);
+        gaussianSmoothingWithKernel(&tmp, self.smooth_kernel, &blur_tmp, &st_xx);
+        multiplyInto(&gy, &gy, &tmp);
+        gaussianSmoothingWithKernel(&tmp, self.smooth_kernel, &blur_tmp, &st_yy);
+        multiplyInto(&gx, &gy, &tmp);
+        gaussianSmoothingWithKernel(&tmp, self.smooth_kernel, &blur_tmp, &st_xy);
+
+        for (response.pixels, st_xx.pixels, st_yy.pixels, st_xy.pixels) |*out, xx, yy, xy| {
+            const xx64 = @as(f64, xx);
+            const yy64 = @as(f64, yy);
+            const xy64 = @as(f64, xy);
+            const trace = xx64 + yy64;
+            out.* = @as(f32, @floatCast((xx64 * yy64 - xy64 * xy64) - 0.04 * trace * trace));
+        }
+
+        return response;
+    }
+
+    fn ensureImageCapacity(self: *CornerWorkspace, needed: usize) !void {
+        try ensureSliceCapacity(self.allocator, &self.gx, needed);
+        try ensureSliceCapacity(self.allocator, &self.gy, needed);
+        try ensureSliceCapacity(self.allocator, &self.tmp, needed);
+        try ensureSliceCapacity(self.allocator, &self.blur_tmp, needed);
+        try ensureSliceCapacity(self.allocator, &self.st_xx, needed);
+        try ensureSliceCapacity(self.allocator, &self.st_xy, needed);
+        try ensureSliceCapacity(self.allocator, &self.st_yy, needed);
+    }
+
+    fn ensureKernels(self: *CornerWorkspace, scale: f64) !void {
+        if (self.kernel_scale != null and self.kernel_scale.? == scale) return;
+
+        if (self.smooth_kernel.len != 0) {
+            self.allocator.free(self.smooth_kernel);
+            self.smooth_kernel = &.{};
+        }
+        if (self.grad_kernel.len != 0) {
+            self.allocator.free(self.grad_kernel);
+            self.grad_kernel = &.{};
+        }
+
+        self.smooth_kernel = try makeGaussianKernel(self.allocator, scale);
+        errdefer {
+            self.allocator.free(self.smooth_kernel);
+            self.smooth_kernel = &.{};
+        }
+        self.grad_kernel = try makeGaussianDerivativeKernel(self.allocator, scale, 1);
+        self.kernel_scale = scale;
+    }
+};
+
 pub fn cornerResponse(
     allocator: std.mem.Allocator,
     src: *const gray.GrayImage,
     scale: f64,
 ) std.mem.Allocator.Error!gray.GrayImage {
-    var gx = try allocImage(allocator, src.width, src.height);
-    errdefer gx.deinit(allocator);
-    var gy = try allocImage(allocator, src.width, src.height);
-    errdefer gy.deinit(allocator);
+    const pixel_count = @as(usize, src.width) * @as(usize, src.height);
+    const pixels = try allocator.alloc(f32, pixel_count);
+    errdefer allocator.free(pixels);
 
-    try gaussianGradient(allocator, src, scale, &gx, &gy);
+    var workspace = CornerWorkspace.init(allocator);
+    defer workspace.deinit();
+    _ = try workspace.cornerResponseInto(src, scale, pixels);
 
-    var tmp = try allocImage(allocator, src.width, src.height);
-    errdefer tmp.deinit(allocator);
-    var st_xx = try allocImage(allocator, src.width, src.height);
-    errdefer st_xx.deinit(allocator);
-    var st_xy = try allocImage(allocator, src.width, src.height);
-    errdefer st_xy.deinit(allocator);
-    var st_yy = try allocImage(allocator, src.width, src.height);
-    errdefer st_yy.deinit(allocator);
-
-    multiplyInto(&gx, &gx, &tmp);
-    try gaussianSmoothing(allocator, &tmp, scale, &st_xx);
-    multiplyInto(&gy, &gy, &tmp);
-    try gaussianSmoothing(allocator, &tmp, scale, &st_yy);
-    multiplyInto(&gx, &gy, &tmp);
-    try gaussianSmoothing(allocator, &tmp, scale, &st_xy);
-
-    gx.deinit(allocator);
-    gy.deinit(allocator);
-    tmp.deinit(allocator);
-
-    var response = try allocImage(allocator, src.width, src.height);
-    errdefer response.deinit(allocator);
-
-    for (response.pixels, st_xx.pixels, st_yy.pixels, st_xy.pixels) |*out, xx, yy, xy| {
-        const xx64 = @as(f64, xx);
-        const yy64 = @as(f64, yy);
-        const xy64 = @as(f64, xy);
-        const trace = xx64 + yy64;
-        out.* = @as(f32, @floatCast((xx64 * yy64 - xy64 * xy64) - 0.04 * trace * trace));
-    }
-
-    st_xx.deinit(allocator);
-    st_xy.deinit(allocator);
-    st_yy.deinit(allocator);
-
-    return response;
+    return .{
+        .width = src.width,
+        .height = src.height,
+        .pixels = pixels,
+    };
 }
 
 pub fn isStrictLocalMaximum(
@@ -96,6 +169,20 @@ fn gaussianGradient(
     convolveY(&tmp, grad, gy);
 }
 
+fn gaussianGradientWithKernels(
+    src: *const gray.GrayImage,
+    smooth: []const f64,
+    grad: []const f64,
+    tmp: *gray.GrayImage,
+    gx: *gray.GrayImage,
+    gy: *gray.GrayImage,
+) void {
+    convolveX(src, grad, tmp);
+    convolveY(tmp, smooth, gx);
+    convolveX(src, smooth, tmp);
+    convolveY(tmp, grad, gy);
+}
+
 fn gaussianSmoothing(
     allocator: std.mem.Allocator,
     src: *const gray.GrayImage,
@@ -110,6 +197,16 @@ fn gaussianSmoothing(
 
     convolveX(src, kernel, &tmp);
     convolveY(&tmp, kernel, dest);
+}
+
+fn gaussianSmoothingWithKernel(
+    src: *const gray.GrayImage,
+    kernel: []const f64,
+    tmp: *gray.GrayImage,
+    dest: *gray.GrayImage,
+) void {
+    convolveX(src, kernel, tmp);
+    convolveY(tmp, kernel, dest);
 }
 
 fn multiplyInto(a: *const gray.GrayImage, b: *const gray.GrayImage, dest: *gray.GrayImage) void {
@@ -128,6 +225,33 @@ fn allocImage(
         .height = height,
         .pixels = try allocator.alloc(f32, @as(usize, width) * @as(usize, height)),
     };
+}
+
+fn imageView(width: u32, height: u32, pixels: []f32) gray.GrayImage {
+    return .{
+        .width = width,
+        .height = height,
+        .pixels = pixels,
+    };
+}
+
+fn ensureSliceCapacity(allocator: std.mem.Allocator, slice: *[]f32, needed: usize) !void {
+    if (slice.len >= needed) return;
+    if (slice.len == 0) {
+        slice.* = try allocator.alloc(f32, needed);
+    } else {
+        slice.* = try allocator.realloc(slice.*, needed);
+    }
+}
+
+fn freeSlice(allocator: std.mem.Allocator, slice: *[]f32) void {
+    if (slice.len != 0) allocator.free(slice.*);
+    slice.* = &.{};
+}
+
+fn freeSliceF64(allocator: std.mem.Allocator, slice: *[]f64) void {
+    if (slice.len != 0) allocator.free(slice.*);
+    slice.* = &.{};
 }
 
 fn convolveX(src: *const gray.GrayImage, kernel: []const f64, dest: *gray.GrayImage) void {
