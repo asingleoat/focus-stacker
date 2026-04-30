@@ -6,9 +6,9 @@
 # all-in-focus composite using align_image_stack_zig and enfuse.
 #
 # Usage:
-#   ./scripts/stack_zig.sh [--threads N] image1.jpg image2.jpg ...
-#   ./scripts/stack_zig.sh [--threads N] S001_manifest.json
-#   ./scripts/stack_zig.sh [--threads N] S001_manifest.json S002_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] image1.jpg image2.jpg ...
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] S001_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] S001_manifest.json S002_manifest.json
 #
 # Accepts any mix of image files and manifest JSON files.
 #
@@ -23,6 +23,7 @@ ALIGN_CONTROL_POINTS="${ALIGN_CONTROL_POINTS:-200}"
 ALIGN_GRID_SIZE="${ALIGN_GRID_SIZE:-7}"
 ALIGN_ERROR_THRESHOLD="${ALIGN_ERROR_THRESHOLD:-5}"
 ALIGN_THREADS="${ALIGN_THREADS:-}"
+ALIGN_PAIR_ALIGN_METHOD="${ALIGN_PAIR_ALIGN_METHOD:-hugin-ncc}"
 
 CONTRAST_WINDOW_SIZE="${CONTRAST_WINDOW_SIZE:-5}"
 HARD_MASK="${HARD_MASK:-true}"
@@ -81,6 +82,7 @@ main() {
     check_deps
 
     local threads="$ALIGN_THREADS"
+    local pair_align_method="$ALIGN_PAIR_ALIGN_METHOD"
     local -a positional=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -93,15 +95,26 @@ main() {
                 threads="${1#--threads=}"
                 shift
                 ;;
+            --pair-align)
+                [[ $# -ge 2 ]] || die "missing value for --pair-align"
+                pair_align_method="$2"
+                shift 2
+                ;;
+            --pair-align=*)
+                pair_align_method="${1#--pair-align=}"
+                shift
+                ;;
             --help|-h)
                 cat <<EOF
-usage: $0 [--threads N] <images or manifests...>
+usage: $0 [--threads N] [--pair-align METHOD] <images or manifests...>
 
 Options:
-  --threads N   Limit align_image_stack_zig pair-analysis worker threads
+  --threads N          Limit align_image_stack_zig worker threads
+  --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded
 
 Environment overrides:
   ALIGN_THREADS
+  ALIGN_PAIR_ALIGN_METHOD
   ALIGN_CONTROL_POINTS
   ALIGN_GRID_SIZE
   ALIGN_ERROR_THRESHOLD
@@ -132,8 +145,10 @@ EOF
     if [[ -n "$threads" ]]; then
         [[ "$threads" =~ ^[1-9][0-9]*$ ]] || die "--threads must be a positive integer"
     fi
+    [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded)$ ]] || \
+        die "--pair-align must be one of: hugin-ncc, phasecorr-seeded"
 
-    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] <images or manifests...>"
+    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] <images or manifests...>"
 
     local name
     name="$(derive_name "${positional[0]}")"
@@ -172,6 +187,7 @@ EOF
     else
         echo "  Threads: auto"
     fi
+    echo "  Pair align: $pair_align_method"
     echo "  Output: $OUTPUT_DIR/${name}_stacked.tif"
     echo ""
 
@@ -190,6 +206,7 @@ EOF
     if [[ -n "$threads" ]]; then
         aligner_opts+=(--threads "$threads")
     fi
+    aligner_opts+=(--pair-align "$pair_align_method")
 
     "$aligner_bin" \
         "${aligner_opts[@]}" \

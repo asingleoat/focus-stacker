@@ -213,7 +213,7 @@ fn analyzePairWithSeed(
     const scale_factor_int = @as(u32, 1) << @intCast(opts.pyr_level);
     const full_res_search_width = @max(scale_factor_int, 1);
     const seeded_search_width = if (use_seeded_fast_path)
-        @max(@as(u32, 24), opts.search_width / 2)
+        @max(@as(u32, 16), opts.search_width / 3)
     else
         opts.search_width;
     var coarse_control_point_count: usize = 0;
