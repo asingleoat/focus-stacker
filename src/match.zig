@@ -20,6 +20,7 @@ const corr_threshold_slack: f32 = 0.00025;
 const clipped_template_score_bias: f32 = 0.00075;
 const max_phase_seed_dimension: u32 = 768;
 const max_phase_seed_extra_levels: u8 = 2;
+const locked_exact_radius: i32 = 2;
 
 pub const ControlPoint = struct {
     left_image: usize,
@@ -801,6 +802,7 @@ fn matchCandidateLocked(
         seeded_center_x,
         seeded_center_y,
         opts.template_size,
+        locked_exact_radius,
         workspace,
     );
     if (passesCorrelationThreshold(locked.score, opts.corr_threshold)) {
@@ -1005,9 +1007,10 @@ fn matchAtCenterExact(
     right_center_x: u32,
     right_center_y: u32,
     template_size: u32,
+    radius: i32,
     workspace: *Workspace,
 ) MatchResult {
-    const prof = profiler.scope("match.matchAtCenterExact");
+    const prof = profiler.scope("match.matchNearCenterExact");
     defer prof.end();
 
     const templ_half = @as(i32, @intCast(template_size / 2));
@@ -1038,46 +1041,61 @@ fn matchAtCenterExact(
 
     const kul_x = tmpl_ul_x - templ_pos_x;
     const kul_y = tmpl_ul_y - templ_pos_y;
-    const right_x0 = @as(i32, @intCast(right_center_x)) + kul_x;
-    const right_y0 = @as(i32, @intCast(right_center_y)) + kul_y;
-    if (right_x0 < 0 or right_y0 < 0 or
-        right_x0 + @as(i32, @intCast(template.width)) > @as(i32, @intCast(right.width)) or
-        right_y0 + @as(i32, @intCast(template.height)) > @as(i32, @intCast(right.height)))
-    {
+    const klr_x = kul_x + @as(i32, @intCast(template.width)) - 1;
+    const klr_y = kul_y + @as(i32, @intCast(template.height)) - 1;
+    var search_ul_x = @as(i32, @intCast(right_center_x)) - radius + kul_x;
+    var search_ul_y = @as(i32, @intCast(right_center_y)) - radius + kul_y;
+    var search_lr_x = @as(i32, @intCast(right_center_x)) + radius + klr_x + 1;
+    var search_lr_y = @as(i32, @intCast(right_center_y)) + radius + klr_y + 1;
+    clipBounds(&search_ul_x, &search_lr_x, @as(i32, @intCast(right.width)));
+    clipBounds(&search_ul_y, &search_lr_y, @as(i32, @intCast(right.height)));
+    const search_w = search_lr_x - search_ul_x;
+    const search_h = search_lr_y - search_ul_y;
+    if (search_w <= 0 or search_h <= 0) {
         return .{};
     }
 
-    const search_w = template.width;
-    const search_h = template.height;
-    const integral_len = @as(usize, search_w + 1) * @as(usize, search_h + 1);
-    workspace.ensureIntegralCapacity(integral_len) catch return .{};
-    const integral = workspace.integral[0..integral_len];
-    const integral_sq = workspace.integral_sq[0..integral_len];
-    buildIntegralImages(right, right_x0, right_y0, search_w, search_h, integral, integral_sq);
+    const center_local_x = @as(i32, @intCast(right_center_x)) - search_ul_x;
+    const center_local_y = @as(i32, @intCast(right_center_y)) - search_ul_y;
+    const xstart = @max(-kul_x, center_local_x - radius);
+    const xend = @min(search_w - klr_x, center_local_x + radius + 1);
+    const ystart = @max(-kul_y, center_local_y - radius);
+    const yend = @min(search_h - klr_y, center_local_y + radius + 1);
+    if (xstart >= xend or ystart >= yend) {
+        return .{};
+    }
 
-    const patch_count = @as(f64, @floatFromInt(template.width * template.height));
-    const normalization = @sqrt(template.variance);
-    const score = exactCorrelationScoreAt(
+    const peak = computeCorrelationPeakLikeHugin(
+        workspace,
         right,
-        right_x0,
-        right_y0,
-        search_w,
-        search_h,
-        -kul_x,
-        -kul_y,
+        search_ul_x,
+        search_ul_y,
+        @as(u32, @intCast(search_w)),
+        @as(u32, @intCast(search_h)),
         kul_x,
         kul_y,
+        xstart,
+        ystart,
+        xend,
+        yend,
         template,
-        integral,
-        integral_sq,
-        patch_count,
-        normalization,
-    );
+        true,
+    ) catch null orelse return .{};
+
     var result = MatchResult{
-        .score = score,
-        .x = @floatFromInt(right_center_x),
-        .y = @floatFromInt(right_center_y),
+        .score = peak.best_score,
+        .x = @as(f64, @floatFromInt(peak.best_x + search_ul_x)),
+        .y = @as(f64, @floatFromInt(peak.best_y + search_ul_y)),
     };
+    if (peak.score_left != null and peak.score_right != null and peak.score_up != null and peak.score_down != null) {
+        const subpixel_x = fitSubpixelAxis(peak.score_left.?, peak.best_score, peak.score_right.?);
+        const subpixel_y = fitSubpixelAxis(peak.score_up.?, peak.best_score, peak.score_down.?);
+        result.score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
+        if (@abs(subpixel_x.offset) <= 1.0 and @abs(subpixel_y.offset) <= 1.0) {
+            result.x += subpixel_x.offset;
+            result.y += subpixel_y.offset;
+        }
+    }
     if (patch_w != template_size + 1 or patch_h != template_size + 1) {
         result.score -= clipped_template_score_bias;
     }
