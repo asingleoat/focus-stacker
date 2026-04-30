@@ -128,7 +128,7 @@ pub fn openTiffWriter(path: []const u8, info: ImageInfo) SaveError!TiffWriter {
     _ = c.TIFFSetField(tiff, c.TIFFTAG_PLANARCONFIG, c.PLANARCONFIG_CONTIG);
     _ = c.TIFFSetField(tiff, c.TIFFTAG_SAMPLEFORMAT, @as(c.uint16, @intCast(sample_format)));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_PHOTOMETRIC, @as(c.uint16, @intCast(photometric)));
-    _ = c.TIFFSetField(tiff, c.TIFFTAG_COMPRESSION, c.COMPRESSION_LZW);
+    _ = c.TIFFSetField(tiff, c.TIFFTAG_COMPRESSION, c.COMPRESSION_NONE);
     _ = c.TIFFSetField(tiff, c.TIFFTAG_ORIENTATION, c.ORIENTATION_TOPLEFT);
     _ = c.TIFFSetField(tiff, c.TIFFTAG_ROWSPERSTRIP, c.TIFFDefaultStripSize(tiff, row_bytes));
     _ = c.TIFFSetField(tiff, c.TIFFTAG_RESOLUTIONUNIT, c.RESUNIT_INCH);

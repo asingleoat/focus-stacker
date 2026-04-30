@@ -661,7 +661,7 @@ fn matchAroundCenter(
         return .{};
     }
 
-    if (computeCorrelationSurfaceLikeHugin(
+    if (computeCorrelationPeakLikeHugin(
         right,
         search_ul_x,
         search_ul_y,
@@ -680,9 +680,8 @@ fn matchAroundCenter(
             tmpl_ul_x == 0 or tmpl_ul_y == 0 or
             tmpl_lr_x == @as(i32, @intCast(left.width)) or
             tmpl_lr_y == @as(i32, @intCast(left.height)),
-    ) catch null) |surface| {
-        defer surface.deinit();
-        var result = finalizeSurfaceResult(surface, search_ul_x, search_ul_y, templ_half, swidth);
+    ) catch null) |peak| {
+        var result = finalizePeakResult(peak, search_ul_x, search_ul_y, templ_half, swidth);
         if (patch_w != template_size + 1 or patch_h != template_size + 1) {
             result.score -= clipped_template_score_bias;
         }
@@ -803,6 +802,20 @@ const CorrelationSurface = struct {
     fn deinit(self: CorrelationSurface) void {
         self.allocator.free(self.pixels);
     }
+};
+
+const CorrelationPeak = struct {
+    valid_x_start: i32,
+    valid_x_end: i32,
+    valid_y_start: i32,
+    valid_y_end: i32,
+    best_x: i32,
+    best_y: i32,
+    best_score: f32,
+    score_left: ?f32 = null,
+    score_right: ?f32 = null,
+    score_up: ?f32 = null,
+    score_down: ?f32 = null,
 };
 
 const TemplateStats = struct {
@@ -1057,6 +1070,293 @@ fn computeCorrelationSurfaceLikeHugin(
     };
 }
 
+fn computeCorrelationPeakLikeHugin(
+    right: *const gray.GrayImage,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    search_w: u32,
+    search_h: u32,
+    kul_x: i32,
+    kul_y: i32,
+    xstart: i32,
+    ystart: i32,
+    xend: i32,
+    yend: i32,
+    template: TemplateStats,
+    use_exact_dft: bool,
+) !?CorrelationPeak {
+    const prof = profiler.scope("match.computeCorrelationPeakLikeHugin");
+    defer prof.end();
+
+    const allocator = std.heap.page_allocator;
+    const patch_count = @as(f64, @floatFromInt(template.width * template.height));
+    const integral = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
+    defer allocator.free(integral);
+    const integral_sq = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
+    defer allocator.free(integral_sq);
+
+    buildIntegralImages(right, search_ul_x, search_ul_y, search_w, search_h, integral, integral_sq);
+
+    const normalization = @sqrt(template.variance);
+    var best_score: f32 = -1;
+    var best_x: i32 = 0;
+    var best_y: i32 = 0;
+    var valid_x_end = xend;
+    var valid_y_end = yend;
+
+    if (use_exact_dft) {
+        var center_y: i32 = ystart;
+        while (center_y < yend) : (center_y += 1) {
+            var center_x: i32 = xstart;
+            while (center_x < xend) : (center_x += 1) {
+                const score = exactCorrelationScoreAt(
+                    right,
+                    search_ul_x,
+                    search_ul_y,
+                    search_w,
+                    search_h,
+                    center_x,
+                    center_y,
+                    kul_x,
+                    kul_y,
+                    template,
+                    integral,
+                    integral_sq,
+                    patch_count,
+                    normalization,
+                );
+                if (score > best_score) {
+                    best_score = score;
+                    best_x = center_x;
+                    best_y = center_y;
+                }
+            }
+        }
+
+        if (best_score < 0) return null;
+
+        return .{
+            .valid_x_start = xstart,
+            .valid_x_end = xend,
+            .valid_y_start = ystart,
+            .valid_y_end = yend,
+            .best_x = best_x,
+            .best_y = best_y,
+            .best_score = best_score,
+            .score_left = if (best_x > xstart) exactCorrelationScoreAt(
+                right,
+                search_ul_x,
+                search_ul_y,
+                search_w,
+                search_h,
+                best_x - 1,
+                best_y,
+                kul_x,
+                kul_y,
+                template,
+                integral,
+                integral_sq,
+                patch_count,
+                normalization,
+            ) else null,
+            .score_right = if (best_x + 1 < xend) exactCorrelationScoreAt(
+                right,
+                search_ul_x,
+                search_ul_y,
+                search_w,
+                search_h,
+                best_x + 1,
+                best_y,
+                kul_x,
+                kul_y,
+                template,
+                integral,
+                integral_sq,
+                patch_count,
+                normalization,
+            ) else null,
+            .score_up = if (best_y > ystart) exactCorrelationScoreAt(
+                right,
+                search_ul_x,
+                search_ul_y,
+                search_w,
+                search_h,
+                best_x,
+                best_y - 1,
+                kul_x,
+                kul_y,
+                template,
+                integral,
+                integral_sq,
+                patch_count,
+                normalization,
+            ) else null,
+            .score_down = if (best_y + 1 < yend) exactCorrelationScoreAt(
+                right,
+                search_ul_x,
+                search_ul_y,
+                search_w,
+                search_h,
+                best_x,
+                best_y + 1,
+                kul_x,
+                kul_y,
+                template,
+                integral,
+                integral_sq,
+                patch_count,
+                normalization,
+            ) else null,
+        };
+    }
+
+    const fft_w = fft_backend.preferredCorrelationComplexLength(search_w);
+    const fft_h = fft_backend.preferredCorrelationComplexLength(search_h);
+    const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
+    const retained_w = @min(search_w, fft_w);
+    const retained_h = @min(search_h, fft_h);
+    const klr_x = kul_x + @as(i32, @intCast(template.width)) - 1;
+    const klr_y = kul_y + @as(i32, @intCast(template.height)) - 1;
+    valid_x_end = @min(xend, @as(i32, @intCast(fft_w)) - klr_x);
+    valid_y_end = @min(yend, @as(i32, @intCast(fft_h)) - klr_y);
+    if (valid_x_end <= xstart or valid_y_end <= ystart) {
+        return null;
+    }
+
+    var search_freq = try allocator.alloc(fft_backend.Complex, fft_count);
+    defer allocator.free(search_freq);
+    var kernel_freq = try allocator.alloc(fft_backend.Complex, fft_count);
+    defer allocator.free(kernel_freq);
+    var plan = try fft_backend.ComplexPlan2D.init(allocator, fft_w, fft_h);
+    defer plan.deinit();
+
+    for (search_freq) |*value| value.* = .{};
+    for (kernel_freq) |*value| value.* = .{};
+
+    var y: u32 = 0;
+    while (y < retained_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < retained_w) : (x += 1) {
+            search_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = @as(f32, @floatCast(matchPixel(
+                @as(u32, @intCast(search_ul_x)) + x,
+                @as(u32, @intCast(search_ul_y)) + y,
+                right,
+            )));
+        }
+    }
+
+    y = 0;
+    while (y < template.height) : (y += 1) {
+        var x: u32 = 0;
+        while (x < template.width) : (x += 1) {
+            const idx = @as(usize, y) * @as(usize, template.width) + @as(usize, x);
+            kernel_freq[@as(usize, y) * @as(usize, fft_w) + @as(usize, x)].re = template.zero_mean_pixels[idx];
+        }
+    }
+
+    plan.transformInPlace(search_freq, false);
+    plan.transformInPlace(kernel_freq, false);
+
+    for (search_freq, kernel_freq) |*lhs, rhs| {
+        lhs.* = lhs.mulConj(rhs);
+    }
+    plan.transformInPlace(search_freq, true);
+
+    var center_y: i32 = ystart;
+    while (center_y < valid_y_end) : (center_y += 1) {
+        var center_x: i32 = xstart;
+        while (center_x < valid_x_end) : (center_x += 1) {
+            const score = fftCorrelationScoreAt(
+                search_freq,
+                integral,
+                integral_sq,
+                search_w,
+                fft_w,
+                center_x,
+                center_y,
+                kul_x,
+                kul_y,
+                template,
+                patch_count,
+                normalization,
+            );
+            if (score > best_score) {
+                best_score = score;
+                best_x = center_x;
+                best_y = center_y;
+            }
+        }
+    }
+
+    if (best_score < 0) return null;
+
+    return .{
+        .valid_x_start = xstart,
+        .valid_x_end = valid_x_end,
+        .valid_y_start = ystart,
+        .valid_y_end = valid_y_end,
+        .best_x = best_x,
+        .best_y = best_y,
+        .best_score = best_score,
+        .score_left = if (best_x > xstart) fftCorrelationScoreAt(
+            search_freq,
+            integral,
+            integral_sq,
+            search_w,
+            fft_w,
+            best_x - 1,
+            best_y,
+            kul_x,
+            kul_y,
+            template,
+            patch_count,
+            normalization,
+        ) else null,
+        .score_right = if (best_x + 1 < valid_x_end) fftCorrelationScoreAt(
+            search_freq,
+            integral,
+            integral_sq,
+            search_w,
+            fft_w,
+            best_x + 1,
+            best_y,
+            kul_x,
+            kul_y,
+            template,
+            patch_count,
+            normalization,
+        ) else null,
+        .score_up = if (best_y > ystart) fftCorrelationScoreAt(
+            search_freq,
+            integral,
+            integral_sq,
+            search_w,
+            fft_w,
+            best_x,
+            best_y - 1,
+            kul_x,
+            kul_y,
+            template,
+            patch_count,
+            normalization,
+        ) else null,
+        .score_down = if (best_y + 1 < valid_y_end) fftCorrelationScoreAt(
+            search_freq,
+            integral,
+            integral_sq,
+            search_w,
+            fft_w,
+            best_x,
+            best_y + 1,
+            kul_x,
+            kul_y,
+            template,
+            patch_count,
+            normalization,
+        ) else null,
+    };
+}
+
 fn finalizeSurfaceResult(
     surface: CorrelationSurface,
     search_ul_x: i32,
@@ -1090,6 +1390,96 @@ fn finalizeSurfaceResult(
     }
 
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
+}
+
+fn finalizePeakResult(
+    peak: CorrelationPeak,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    templ_half: i32,
+    swidth: i32,
+) MatchResult {
+    var refined_x = @as(f64, @floatFromInt(peak.best_x + search_ul_x));
+    var refined_y = @as(f64, @floatFromInt(peak.best_y + search_ul_y));
+    var final_score = peak.best_score;
+
+    const subpixel_lower_bound = 2 + templ_half;
+    const subpixel_upper_bound = 2 * swidth + 1 - 2 - templ_half;
+    const has_neighbor_x = peak.score_left != null and peak.score_right != null;
+    const has_neighbor_y = peak.score_up != null and peak.score_down != null;
+    if (peak.best_x > subpixel_lower_bound and peak.best_x < subpixel_upper_bound and
+        peak.best_y > subpixel_lower_bound and peak.best_y < subpixel_upper_bound and
+        has_neighbor_x and has_neighbor_y)
+    {
+        const subpixel_x = fitSubpixelAxis(peak.score_left.?, peak.best_score, peak.score_right.?);
+        const subpixel_y = fitSubpixelAxis(peak.score_up.?, peak.best_score, peak.score_down.?);
+        final_score = @as(f32, @floatCast((subpixel_x.max_value + subpixel_y.max_value) / 2.0));
+        if (@abs(subpixel_x.offset) <= 1.0 and @abs(subpixel_y.offset) <= 1.0) {
+            refined_x += subpixel_x.offset;
+            refined_y += subpixel_y.offset;
+        }
+    }
+
+    return .{ .score = final_score, .x = refined_x, .y = refined_y };
+}
+
+fn exactCorrelationScoreAt(
+    right: *const gray.GrayImage,
+    search_ul_x: i32,
+    search_ul_y: i32,
+    search_w: u32,
+    search_h: u32,
+    center_x: i32,
+    center_y: i32,
+    kul_x: i32,
+    kul_y: i32,
+    template: TemplateStats,
+    integral: []const f64,
+    integral_sq: []const f64,
+    patch_count: f64,
+    normalization: f64,
+) f32 {
+    const top_x = center_x + kul_x;
+    const top_y = center_y + kul_y;
+    const sum = sumRect(integral, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+    const sum_sq = sumRect(integral_sq, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+    const denominator = @sqrt(patch_count * sum_sq - sum * sum);
+    if (denominator == 0) return -1;
+    const numerator = circularCorrelationValue(
+        right,
+        search_ul_x,
+        search_ul_y,
+        search_w,
+        search_h,
+        @as(u32, @intCast(top_x)),
+        @as(u32, @intCast(top_y)),
+        template,
+    );
+    return @as(f32, @floatCast(numerator / normalization / denominator));
+}
+
+fn fftCorrelationScoreAt(
+    spectrum: []const fft_backend.Complex,
+    integral: []const f64,
+    integral_sq: []const f64,
+    search_w: u32,
+    fft_w: u32,
+    center_x: i32,
+    center_y: i32,
+    kul_x: i32,
+    kul_y: i32,
+    template: TemplateStats,
+    patch_count: f64,
+    normalization: f64,
+) f32 {
+    const top_x = center_x + kul_x;
+    const top_y = center_y + kul_y;
+    const sum = sumRect(integral, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+    const sum_sq = sumRect(integral_sq, search_w + 1, @as(u32, @intCast(top_x)), @as(u32, @intCast(top_y)), template.width, template.height);
+    const denominator = @sqrt(patch_count * sum_sq - sum * sum);
+    if (denominator == 0) return -1;
+    const corr_idx = @as(usize, @intCast(top_y)) * @as(usize, fft_w) + @as(usize, @intCast(top_x));
+    return @as(f32, @floatCast(@as(f64, spectrum[corr_idx].re) / normalization / denominator));
 }
 
 fn buildIntegralImages(
