@@ -347,13 +347,18 @@ fn remapU8Rows(
     row_start: u32,
     row_end: u32,
 ) void {
+    const roi_left = @as(f64, @floatFromInt(roi.left));
+    const roi_top = @as(f64, @floatFromInt(roi.top));
+    const out_width_usize = @as(usize, out_width);
     for (row_start..row_end) |y| {
-        const world_y = @as(f64, @floatFromInt(roi.top)) + @as(f64, @floatFromInt(y));
-        for (0..out_width) |x| {
-            const world_x = @as(f64, @floatFromInt(roi.left)) + @as(f64, @floatFromInt(x));
+        const world_y = roi_top + @as(f64, @floatFromInt(y));
+        var world_x = roi_left;
+        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        for (0..out_width) |_| {
             const sample = optimize.inverseTransformPointCached(cache, world_x, world_y);
-            const dst_base = (@as(usize, y) * @as(usize, out_width) + @as(usize, x)) * channels;
             samplePixelBilinearU8(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+            dst_base += channels;
+            world_x += 1.0;
         }
     }
 }
@@ -370,13 +375,18 @@ fn remapU16Rows(
     row_start: u32,
     row_end: u32,
 ) void {
+    const roi_left = @as(f64, @floatFromInt(roi.left));
+    const roi_top = @as(f64, @floatFromInt(roi.top));
+    const out_width_usize = @as(usize, out_width);
     for (row_start..row_end) |y| {
-        const world_y = @as(f64, @floatFromInt(roi.top)) + @as(f64, @floatFromInt(y));
-        for (0..out_width) |x| {
-            const world_x = @as(f64, @floatFromInt(roi.left)) + @as(f64, @floatFromInt(x));
+        const world_y = roi_top + @as(f64, @floatFromInt(y));
+        var world_x = roi_left;
+        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        for (0..out_width) |_| {
             const sample = optimize.inverseTransformPointCached(cache, world_x, world_y);
-            const dst_base = (@as(usize, y) * @as(usize, out_width) + @as(usize, x)) * channels;
             samplePixelBilinearU16(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+            dst_base += channels;
+            world_x += 1.0;
         }
     }
 }

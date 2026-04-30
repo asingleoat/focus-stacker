@@ -2535,12 +2535,18 @@ fn imageToWorldRayCached(cache: BasicRectEquirectCache, x: f64, y: f64) Vec3 {
 }
 
 fn sphereTpRectPoint(p: Point2, distance: f64) Point2 {
+    const prof = profiler.scope("optimize.sphereTpRectPoint");
+    defer prof.end();
+
     const r = @sqrt(p.x * p.x + p.y * p.y) / distance;
     const theta = if (r == 0.0) 1.0 else std.math.atan(r) / r;
     return .{ .x = theta * p.x, .y = theta * p.y };
 }
 
 fn sphereTpErectPoint(p: Point2, distance: f64) Point2 {
+    const prof = profiler.scope("optimize.sphereTpErectPoint");
+    defer prof.end();
+
     var phi = p.x / distance;
     var theta = -(p.y / distance) + std.math.pi * 0.5;
     if (theta < 0.0) {
@@ -2564,21 +2570,30 @@ fn sphereTpErectPoint(p: Point2, distance: f64) Point2 {
 }
 
 fn perspSpherePoint(p: Point2, m: Matrix3, distance: f64) Point2 {
-    const r = @sqrt(p.x * p.x + p.y * p.y);
+    const prof = profiler.scope("optimize.perspSpherePoint");
+    defer prof.end();
+
+    const px = p.x;
+    const py = p.y;
+    const r = @sqrt(px * px + py * py);
     const theta = r / distance;
-    const s = if (r == 0.0) 0.0 else @sin(theta) / r;
-    var v = Vec3{
-        .x = s * p.x,
-        .y = s * p.y,
-        .z = @cos(theta),
-    };
-    v = matrixInvMul(m, v);
-    const r2 = @sqrt(v.x * v.x + v.y * v.y);
-    const scale = if (r2 == 0.0) 0.0 else distance * std.math.atan2(r2, v.z) / r2;
-    return .{ .x = scale * v.x, .y = scale * v.y };
+    const sin_theta = @sin(theta);
+    const radial_scale = if (r == 0.0) 0.0 else sin_theta / r;
+    const vx = radial_scale * px;
+    const vy = radial_scale * py;
+    const vz = @cos(theta);
+    const tx = m[0][0] * vx + m[1][0] * vy + m[2][0] * vz;
+    const ty = m[0][1] * vx + m[1][1] * vy + m[2][1] * vz;
+    const tz = m[0][2] * vx + m[1][2] * vy + m[2][2] * vz;
+    const r2 = @sqrt(tx * tx + ty * ty);
+    const scale = if (r2 == 0.0) 0.0 else distance * std.math.atan2(r2, tz) / r2;
+    return .{ .x = scale * tx, .y = scale * ty };
 }
 
 fn erectSphereTpPoint(p: Point2, distance: f64) Point2 {
+    const prof = profiler.scope("optimize.erectSphereTpPoint");
+    defer prof.end();
+
     const r = @sqrt(p.x * p.x + p.y * p.y);
     const theta = r / distance;
     const s = if (theta == 0.0) 1.0 / distance else @sin(theta) / r;
@@ -2591,6 +2606,9 @@ fn erectSphereTpPoint(p: Point2, distance: f64) Point2 {
 }
 
 fn rectSphereTpPoint(p: Point2, distance: f64) Point2 {
+    const prof = profiler.scope("optimize.rectSphereTpPoint");
+    defer prof.end();
+
     const r = @sqrt(p.x * p.x + p.y * p.y);
     const theta = r / distance;
     const rho = if (theta >= std.math.pi * 0.5)
@@ -2606,6 +2624,9 @@ fn rectSphereTpPoint(p: Point2, distance: f64) Point2 {
 }
 
 fn rectErectPoint(p: Point2, distance: f64) ?Point2 {
+    const prof = profiler.scope("optimize.rectErectPoint");
+    defer prof.end();
+
     const phi = p.x / distance;
     if (phi < -std.math.pi * 0.5 or phi > std.math.pi * 0.5) return null;
     const theta = -(p.y / distance) + std.math.pi * 0.5;
@@ -2616,6 +2637,9 @@ fn rectErectPoint(p: Point2, distance: f64) ?Point2 {
 }
 
 fn erectRectPoint(p: Point2, distance: f64) Point2 {
+    const prof = profiler.scope("optimize.erectRectPoint");
+    defer prof.end();
+
     return .{
         .x = distance * std.math.atan2(p.x, distance),
         .y = distance * std.math.atan2(p.y, @sqrt(distance * distance + p.x * p.x)),
@@ -2623,9 +2647,18 @@ fn erectRectPoint(p: Point2, distance: f64) Point2 {
 }
 
 fn rotateErectPoint(p: Point2, half_turn: f64, turn: f64) Point2 {
+    const prof = profiler.scope("optimize.rotateErectPoint");
+    defer prof.end();
+
     var x = p.x + turn;
-    while (x < -half_turn) x += 2.0 * half_turn;
-    while (x > half_turn) x -= 2.0 * half_turn;
+    const full_turn = 2.0 * half_turn;
+    if (x < -half_turn) {
+        x += full_turn;
+        while (x < -half_turn) x += full_turn;
+    } else if (x > half_turn) {
+        x -= full_turn;
+        while (x > half_turn) x -= full_turn;
+    }
     return .{ .x = x, .y = p.y };
 }
 
@@ -2798,6 +2831,7 @@ pub const InverseTransformCache = struct {
     dest_center_x: f64,
     dest_center_y: f64,
     pano_distance: f64,
+    half_turn: f64,
     resize_scale: f64,
     dest_focal: f64,
     image_focal: f64,
@@ -2829,6 +2863,7 @@ pub fn initInverseTransformCache(pose: ImagePose, width: u32, height: u32) Inver
         .dest_center_x = dest_center.x,
         .dest_center_y = dest_center.y,
         .pano_distance = pano_distance,
+        .half_turn = pano_distance * std.math.pi,
         .resize_scale = focalLengthPixels(width, effectiveHfovDegrees(pose)) / pano_distance,
         .dest_focal = pano_distance,
         .image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose)),
@@ -2859,21 +2894,7 @@ pub fn inverseTransformPointCached(cache: InverseTransformCache, out_x: f64, out
     defer prof.end();
 
     if (cache.basic_rectilinear) {
-        var p = Point2{
-            .x = out_x - cache.dest_center_x,
-            .y = out_y - cache.dest_center_y,
-        };
-        p = erectRectPoint(p, cache.pano_distance);
-        p = rotateErectPoint(p, cache.pano_distance * std.math.pi, cache.yaw_turn);
-        p = sphereTpErectPoint(p, cache.pano_distance);
-        p = perspSpherePoint(p, cache.pitch_roll, cache.pano_distance);
-        p = rectSphereTpPoint(p, cache.pano_distance);
-        p.x *= cache.resize_scale;
-        p.y *= cache.resize_scale;
-        return .{
-            .x = cache.src_center_x + p.x,
-            .y = cache.src_center_y + p.y,
-        };
+        return basicRectilinearInverseTransformPointCachedLegacy(cache, out_x, out_y);
     }
 
     const pano_ray = Vec3{
@@ -2892,6 +2913,25 @@ pub fn inverseTransformPointCached(cache: InverseTransformCache, out_x: f64, out
         .y = cache.src_center_y + undistorted.y,
     };
 }
+
+fn basicRectilinearInverseTransformPointCachedLegacy(cache: InverseTransformCache, out_x: f64, out_y: f64) Point2 {
+    var p = Point2{
+        .x = out_x - cache.dest_center_x,
+        .y = out_y - cache.dest_center_y,
+    };
+    p = erectRectPoint(p, cache.pano_distance);
+    p = rotateErectPoint(p, cache.half_turn, cache.yaw_turn);
+    p = sphereTpErectPoint(p, cache.pano_distance);
+    p = perspSpherePoint(p, cache.pitch_roll, cache.pano_distance);
+    p = rectSphereTpPoint(p, cache.pano_distance);
+    p.x *= cache.resize_scale;
+    p.y *= cache.resize_scale;
+    return .{
+        .x = cache.src_center_x + p.x,
+        .y = cache.src_center_y + p.y,
+    };
+}
+
 
 pub fn inverseTransformPointSlow(pose: ImagePose, out_x: f64, out_y: f64, width: u32, height: u32) Point2 {
     if (hasBasicRectilinearPose(pose)) {
@@ -3119,12 +3159,23 @@ fn imagePlaneFromWorldRayCached(cache: InverseTransformCache, world_ray: Vec3) P
     const prof = profiler.scope("optimize.imagePlaneFromWorldRayCached");
     defer prof.end();
 
-    const local_ray = matrixMul(cache.world_to_local, world_ray);
-    const denom = -local_ray.z;
+    const local_x =
+        cache.world_to_local[0][0] * world_ray.x +
+        cache.world_to_local[0][1] * world_ray.y +
+        cache.world_to_local[0][2] * world_ray.z;
+    const local_y =
+        cache.world_to_local[1][0] * world_ray.x +
+        cache.world_to_local[1][1] * world_ray.y +
+        cache.world_to_local[1][2] * world_ray.z;
+    const local_z =
+        cache.world_to_local[2][0] * world_ray.x +
+        cache.world_to_local[2][1] * world_ray.y +
+        cache.world_to_local[2][2] * world_ray.z;
+    const denom = -local_z;
     if (@abs(denom) < 1e-12) return .{ .x = -1.0, .y = -1.0 };
     return .{
-        .x = cache.image_focal * (local_ray.x / denom) + cache.center_shift_x,
-        .y = cache.image_focal * (local_ray.y / denom) + cache.center_shift_y,
+        .x = cache.image_focal * (local_x / denom) + cache.center_shift_x,
+        .y = cache.image_focal * (local_y / denom) + cache.center_shift_y,
     };
 }
 

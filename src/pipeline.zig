@@ -314,10 +314,23 @@ const PairWorkerState = struct {
     pairs: []const sequence.MatchPair,
     options: match.PairOptions,
     pyr_level: u8,
+    cache: []GrayImageCacheEntry,
+    cache_mutex: std.Thread.Mutex = .{},
     next_index: usize = 0,
     first_error: ?RunError = null,
     mutex: std.Thread.Mutex = .{},
     results: []PairWorkerResult,
+};
+
+const GrayImageCacheEntry = struct {
+    state: enum {
+        empty,
+        loading,
+        ready,
+    } = .empty,
+    ref_count: usize = 0,
+    images: ?GrayImagePair = null,
+    condition: std.Thread.Condition = .{},
 };
 
 fn analyzePairsParallel(
@@ -332,6 +345,9 @@ fn analyzePairsParallel(
     const worker_results = try allocator.alloc(PairWorkerResult, pairs.len);
     errdefer allocator.free(worker_results);
     for (worker_results) |*entry| entry.* = .{};
+    const cache_entries = try allocator.alloc(GrayImageCacheEntry, images.len);
+    errdefer allocator.free(cache_entries);
+    for (cache_entries) |*entry| entry.* = .{};
 
     var state = PairWorkerState{
         .allocator = thread_safe_allocator.allocator(),
@@ -339,6 +355,7 @@ fn analyzePairsParallel(
         .pairs = pairs,
         .options = options,
         .pyr_level = cfg.pyr_level,
+        .cache = cache_entries,
         .results = worker_results,
     };
 
@@ -352,6 +369,7 @@ fn analyzePairsParallel(
             thread.join();
         }
         cleanupWorkerResults(allocator, worker_results);
+        cleanupGrayImageCache(allocator, cache_entries);
     }
 
     for (threads) |*thread| {
@@ -367,6 +385,7 @@ fn analyzePairsParallel(
 
     if (state.first_error) |err| {
         cleanupWorkerResults(allocator, worker_results);
+        cleanupGrayImageCache(allocator, cache_entries);
         return err;
     }
 
@@ -376,6 +395,7 @@ fn analyzePairsParallel(
         ordered[pair_index] = entry.value orelse return error.InternalInvariantViolation;
     }
     allocator.free(worker_results);
+    cleanupGrayImageCache(allocator, cache_entries);
     return ordered;
 }
 
@@ -385,7 +405,7 @@ fn pairWorkerMain(state: *PairWorkerState) void {
     while (true) {
         const pair_index = nextPairIndex(state) orelse return;
         const pair = state.pairs[pair_index];
-        const result = analyzePairDecodedOnDemand(state.allocator, state.images, state.options, state.pyr_level, pair, &workspace) catch |err| {
+        const result = analyzePairDecodedOnDemand(state, pair, &workspace) catch |err| {
             recordError(state, err);
             return;
         };
@@ -394,21 +414,18 @@ fn pairWorkerMain(state: *PairWorkerState) void {
 }
 
 fn analyzePairDecodedOnDemand(
-    allocator: std.mem.Allocator,
-    images: []const sequence.InputImage,
-    options: match.PairOptions,
-    pyr_level: u8,
+    state: *PairWorkerState,
     pair: sequence.MatchPair,
     workspace: *match.Workspace,
 ) RunError!match.PairMatches {
-    var left_images = try loadReducedAndFullGrayImages(allocator, images[pair.left_index].path, pyr_level);
-    defer left_images.deinit(allocator);
-    var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, pyr_level);
-    defer right_images.deinit(allocator);
+    const left_images = try acquireGrayImagePair(state, pair.left_index);
+    defer releaseGrayImagePair(state, pair.left_index);
+    const right_images = try acquireGrayImagePair(state, pair.right_index);
+    defer releaseGrayImagePair(state, pair.right_index);
 
     var pair_result = try match.analyzePair(
-        allocator,
-        options,
+        state.allocator,
+        state.options,
         pair,
         &left_images.reduced,
         &left_images.full,
@@ -416,7 +433,7 @@ fn analyzePairDecodedOnDemand(
         &right_images.full,
         workspace,
     );
-    match.refinePairMatches(options, &pair_result, &left_images.full, &right_images.full);
+    match.refinePairMatches(state.options, &pair_result, &left_images.full, &right_images.full);
     return pair_result;
 }
 
@@ -473,6 +490,80 @@ fn recordError(state: *PairWorkerState, err: RunError) void {
     if (state.first_error == null) {
         state.first_error = err;
     }
+}
+
+fn acquireGrayImagePair(state: *PairWorkerState, image_index: usize) RunError!*GrayImagePair {
+    while (true) {
+        state.cache_mutex.lock();
+        const entry = &state.cache[image_index];
+        switch (entry.state) {
+            .ready => {
+                entry.ref_count += 1;
+                const images = &entry.images.?;
+                state.cache_mutex.unlock();
+                return images;
+            },
+            .loading => {
+                entry.condition.wait(&state.cache_mutex);
+                state.cache_mutex.unlock();
+                continue;
+            },
+            .empty => {
+                entry.state = .loading;
+                entry.ref_count = 1;
+                state.cache_mutex.unlock();
+
+                const loaded = loadReducedAndFullGrayImages(state.allocator, state.images[image_index].path, state.pyr_level) catch |err| {
+                    state.cache_mutex.lock();
+                    entry.state = .empty;
+                    entry.ref_count = 0;
+                    entry.condition.broadcast();
+                    state.cache_mutex.unlock();
+                    return err;
+                };
+
+                state.cache_mutex.lock();
+                entry.images = loaded;
+                entry.state = .ready;
+                const images = &entry.images.?;
+                entry.condition.broadcast();
+                state.cache_mutex.unlock();
+                return images;
+            },
+        }
+    }
+}
+
+fn releaseGrayImagePair(state: *PairWorkerState, image_index: usize) void {
+    var to_free: ?GrayImagePair = null;
+
+    state.cache_mutex.lock();
+    const entry = &state.cache[image_index];
+    std.debug.assert(entry.state == .ready);
+    std.debug.assert(entry.ref_count > 0);
+    entry.ref_count -= 1;
+    if (entry.ref_count == 0) {
+        to_free = entry.images.?;
+        entry.images = null;
+        entry.state = .empty;
+    }
+    state.cache_mutex.unlock();
+
+    if (to_free) |*images| {
+        images.deinit(state.allocator);
+    }
+}
+
+fn cleanupGrayImageCache(allocator: std.mem.Allocator, cache_entries: []GrayImageCacheEntry) void {
+    for (cache_entries) |*entry| {
+        if (entry.images) |*images| {
+            images.deinit(allocator);
+            entry.images = null;
+        }
+        entry.state = .empty;
+        entry.ref_count = 0;
+    }
+    allocator.free(cache_entries);
 }
 
 fn loadReducedGrayImage(
