@@ -191,9 +191,9 @@ fn reduceAndConvert(
     const channels = @as(usize, info.color_channels);
     var width = info.width;
     var height = info.height;
-
-    var current = try allocator.dupe(T, src);
-    errdefer allocator.free(current);
+    var current_owned: ?[]T = null;
+    defer if (current_owned) |buffer| allocator.free(buffer);
+    var current: []const T = src;
 
     var level: u8 = 0;
     while (level < levels) : (level += 1) {
@@ -201,12 +201,12 @@ fn reduceAndConvert(
         const next_height = (height + 1) / 2;
         const next = try allocator.alloc(T, @as(usize, next_width) * @as(usize, next_height) * channels);
         reduceTypedByHalf(T, current, width, height, channels, next, next_width, next_height);
-        allocator.free(current);
+        if (current_owned) |buffer| allocator.free(buffer);
+        current_owned = next;
         current = next;
         width = next_width;
         height = next_height;
     }
-    defer allocator.free(current);
 
     const out_pixels = try allocator.alloc(f32, @as(usize, width) * @as(usize, height));
     errdefer allocator.free(out_pixels);
