@@ -2802,6 +2802,7 @@ pub const InverseTransformCache = struct {
     dest_focal: f64,
     image_focal: f64,
     pitch_roll: Matrix3,
+    world_to_local: Matrix3,
     yaw_turn: f64,
     yaw: f64,
     radial_a: f64,
@@ -2832,6 +2833,7 @@ pub fn initInverseTransformCache(pose: ImagePose, width: u32, height: u32) Inver
         .dest_focal = pano_distance,
         .image_focal = focalLengthPixels(width, effectiveHfovDegrees(pose)),
         .pitch_roll = setMatrix(-pose.pitch, 0.0, pose.roll, true),
+        .world_to_local = matrixMatrixMul(setMatrix(-pose.pitch, 0.0, pose.roll, true), yawMatrix(-pose.yaw)),
         .yaw_turn = -pose.yaw * pano_distance,
         .yaw = pose.yaw,
         .radial_a = pose.radial_a,
@@ -2871,9 +2873,13 @@ pub fn inverseTransformPointCached(cache: InverseTransformCache, out_x: f64, out
         };
     }
 
-    const pano_ray = rectilinearRay(out_x - cache.dest_center_x, out_y - cache.dest_center_y, cache.dest_focal);
+    const pano_ray = Vec3{
+        .x = out_x - cache.dest_center_x,
+        .y = out_y - cache.dest_center_y,
+        .z = -cache.dest_focal,
+    };
     const camera_ray = if (cache.has_translation)
-        rayFromTranslationPlaneCached(cache, pano_ray) orelse return .{ .x = -1.0, .y = -1.0 }
+        rayFromTranslationPlaneCachedUnnormalized(cache, pano_ray) orelse return .{ .x = -1.0, .y = -1.0 }
     else
         pano_ray;
     const radial = imagePlaneFromWorldRayCached(cache, camera_ray);
@@ -3107,8 +3113,7 @@ fn imagePlaneFromWorldRay(pose: ImagePose, world_ray: Vec3, width: u32) Point2 {
 }
 
 fn imagePlaneFromWorldRayCached(cache: InverseTransformCache, world_ray: Vec3) Point2 {
-    const unyawed = rotateYaw(world_ray, -cache.yaw);
-    const local_ray = matrixMul(cache.pitch_roll, unyawed);
+    const local_ray = matrixMul(cache.world_to_local, world_ray);
     const denom = -local_ray.z;
     if (@abs(denom) < 1e-12) return .{ .x = -1.0, .y = -1.0 };
     return .{
@@ -3241,6 +3246,19 @@ fn rayFromTranslationPlaneCached(cache: InverseTransformCache, pano_ray: Vec3) ?
         .y = plane_hit.y - cache.trans_y,
         .z = plane_hit.z - cache.trans_z,
     });
+}
+
+fn rayFromTranslationPlaneCachedUnnormalized(cache: InverseTransformCache, pano_ray: Vec3) ?Vec3 {
+    const plane_hit = linePlaneIntersection(
+        cache.translation_plane_normal,
+        .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+        pano_ray,
+    ) orelse return null;
+    return .{
+        .x = plane_hit.x - cache.trans_x,
+        .y = plane_hit.y - cache.trans_y,
+        .z = plane_hit.z - cache.trans_z,
+    };
 }
 
 fn linePlaneIntersection(normal: Vec3, p1: Vec3, p2: Vec3) ?Vec3 {

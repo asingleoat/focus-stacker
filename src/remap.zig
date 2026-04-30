@@ -35,9 +35,11 @@ pub fn writeAlignedImages(
     }
 
     if (tasks.items.len == 0) return;
+    const row_jobs_per_image: usize = 1;
+
     if (jobs <= 1 or tasks.items.len == 1) {
         for (tasks.items) |task| {
-            try writeAlignedImageTask(allocator, prefix, images, poses, roi, task);
+            try writeAlignedImageTask(allocator, prefix, images, poses, roi, row_jobs_per_image, task);
         }
         return;
     }
@@ -50,6 +52,7 @@ pub fn writeAlignedImages(
         .poses = poses,
         .roi = roi,
         .tasks = tasks.items,
+        .row_jobs_per_image = row_jobs_per_image,
     };
 
     const worker_count = jobs - 1;
@@ -91,6 +94,7 @@ const OutputWorkerState = struct {
     poses: []const optimize.ImagePose,
     roi: ?Rect,
     tasks: []const OutputTask,
+    row_jobs_per_image: usize,
     next_index: usize = 0,
     first_error: ?anyerror = null,
     mutex: std.Thread.Mutex = .{},
@@ -99,7 +103,7 @@ const OutputWorkerState = struct {
 fn outputWorkerMain(state: *OutputWorkerState) void {
     while (true) {
         const task = nextOutputTask(state) orelse return;
-        writeAlignedImageTask(state.allocator, state.prefix, state.images, state.poses, state.roi, task) catch |err| {
+        writeAlignedImageTask(state.allocator, state.prefix, state.images, state.poses, state.roi, state.row_jobs_per_image, task) catch |err| {
             recordOutputError(state, err);
             return;
         };
@@ -132,6 +136,7 @@ fn writeAlignedImageTask(
     images: []const sequence.InputImage,
     poses: []const optimize.ImagePose,
     roi: ?Rect,
+    remap_jobs: usize,
     task: OutputTask,
 ) !void {
     var src = blk: {
@@ -144,7 +149,7 @@ fn writeAlignedImageTask(
     var remapped = blk: {
         const phase_prof = profiler.scope("remap.remapImage");
         defer phase_prof.end();
-        break :blk try remapRigidImage(allocator, &src, poses[task.image_index], roi);
+        break :blk try remapRigidImage(allocator, &src, poses[task.image_index], roi, remap_jobs);
     };
     defer remapped.deinit(allocator);
 
@@ -162,7 +167,8 @@ pub fn remapRigidImage(
     src: *const image_io.Image,
     pose: optimize.ImagePose,
     roi: ?Rect,
-) std.mem.Allocator.Error!image_io.Image {
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!image_io.Image {
     const prof = profiler.scope("remap.remapRigidImage");
     defer prof.end();
 
@@ -178,7 +184,7 @@ pub fn remapRigidImage(
         .u8 => blk: {
             const pixels = try allocator.alloc(u8, pixelCount(info));
             errdefer allocator.free(pixels);
-            remapU8(pixels, src, pose, out_rect);
+            try remapU8(allocator, pixels, src, pose, out_rect, jobs);
             break :blk .{
                 .info = info,
                 .pixels = .{ .u8 = pixels },
@@ -187,7 +193,7 @@ pub fn remapRigidImage(
         .u16 => blk: {
             const pixels = try allocator.alloc(u16, pixelCount(info));
             errdefer allocator.free(pixels);
-            remapU16(pixels, src, pose, out_rect);
+            try remapU16(allocator, pixels, src, pose, out_rect, jobs);
             break :blk .{
                 .info = info,
                 .pixels = .{ .u16 = pixels },
@@ -212,7 +218,7 @@ fn imageInfoForRect(src: *const image_io.Image, out_rect: Rect) image_io.ImageIn
     };
 }
 
-fn remapU8(dst: []u8, src: *const image_io.Image, pose: optimize.ImagePose, roi: Rect) void {
+fn remapU8(allocator: std.mem.Allocator, dst: []u8, src: *const image_io.Image, pose: optimize.ImagePose, roi: Rect, jobs: usize) !void {
     const prof = profiler.scope("remap.remapU8");
     defer prof.end();
 
@@ -224,18 +230,51 @@ fn remapU8(dst: []u8, src: *const image_io.Image, pose: optimize.ImagePose, roi:
     const src_pixels = src.pixels.u8;
     const cache = optimize.initInverseTransformCache(pose, width, height);
 
-    for (0..out_height) |y| {
-        const world_y = @as(f64, @floatFromInt(roi.top)) + @as(f64, @floatFromInt(y));
-        for (0..out_width) |x| {
-            const world_x = @as(f64, @floatFromInt(roi.left)) + @as(f64, @floatFromInt(x));
-            const sample = optimize.inverseTransformPointCached(cache, world_x, world_y);
-            const dst_base = (@as(usize, y) * @as(usize, out_width) + @as(usize, x)) * channels;
-            samplePixelBilinearU8(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
-        }
+    if (jobs <= 1 or out_height <= 32) {
+        remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        return;
+    }
+
+    const worker_count = @min(jobs, @as(usize, out_height));
+    if (worker_count <= 1) {
+        remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        return;
+    }
+
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+
+    const rows_per_worker = std.math.divCeil(usize, out_height, worker_count) catch unreachable;
+    var ranges = try allocator.alloc(RemapRowRange, worker_count);
+    defer allocator.free(ranges);
+    for (0..worker_count) |worker_index| {
+        const start = @min(worker_index * rows_per_worker, @as(usize, out_height));
+        const end = @min(start + rows_per_worker, @as(usize, out_height));
+        ranges[worker_index] = .{ .start = @intCast(start), .end = @intCast(end) };
+    }
+
+    for (threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, remapU8RowsWorker, .{
+            dst,
+            src_pixels,
+            width,
+            height,
+            channels,
+            roi,
+            cache,
+            out_width,
+            ranges[i + 1],
+        });
+    }
+
+    remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, ranges[0].start, ranges[0].end);
+
+    for (threads) |thread| {
+        thread.join();
     }
 }
 
-fn remapU16(dst: []u16, src: *const image_io.Image, pose: optimize.ImagePose, roi: Rect) void {
+fn remapU16(allocator: std.mem.Allocator, dst: []u16, src: *const image_io.Image, pose: optimize.ImagePose, roi: Rect, jobs: usize) !void {
     const prof = profiler.scope("remap.remapU16");
     defer prof.end();
 
@@ -247,7 +286,91 @@ fn remapU16(dst: []u16, src: *const image_io.Image, pose: optimize.ImagePose, ro
     const src_pixels = src.pixels.u16;
     const cache = optimize.initInverseTransformCache(pose, width, height);
 
-    for (0..out_height) |y| {
+    if (jobs <= 1 or out_height <= 32) {
+        remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        return;
+    }
+
+    const worker_count = @min(jobs, @as(usize, out_height));
+    if (worker_count <= 1) {
+        remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        return;
+    }
+
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+
+    const rows_per_worker = std.math.divCeil(usize, out_height, worker_count) catch unreachable;
+    var ranges = try allocator.alloc(RemapRowRange, worker_count);
+    defer allocator.free(ranges);
+    for (0..worker_count) |worker_index| {
+        const start = @min(worker_index * rows_per_worker, @as(usize, out_height));
+        const end = @min(start + rows_per_worker, @as(usize, out_height));
+        ranges[worker_index] = .{ .start = @intCast(start), .end = @intCast(end) };
+    }
+
+    for (threads, 0..) |*thread, i| {
+        thread.* = try std.Thread.spawn(.{}, remapU16RowsWorker, .{
+            dst,
+            src_pixels,
+            width,
+            height,
+            channels,
+            roi,
+            cache,
+            out_width,
+            ranges[i + 1],
+        });
+    }
+
+    remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, ranges[0].start, ranges[0].end);
+
+    for (threads) |thread| {
+        thread.join();
+    }
+}
+
+const RemapRowRange = struct {
+    start: u32,
+    end: u32,
+};
+
+fn remapU8Rows(
+    dst: []u8,
+    src_pixels: []const u8,
+    width: u32,
+    height: u32,
+    channels: usize,
+    roi: Rect,
+    cache: optimize.InverseTransformCache,
+    out_width: u32,
+    row_start: u32,
+    row_end: u32,
+) void {
+    for (row_start..row_end) |y| {
+        const world_y = @as(f64, @floatFromInt(roi.top)) + @as(f64, @floatFromInt(y));
+        for (0..out_width) |x| {
+            const world_x = @as(f64, @floatFromInt(roi.left)) + @as(f64, @floatFromInt(x));
+            const sample = optimize.inverseTransformPointCached(cache, world_x, world_y);
+            const dst_base = (@as(usize, y) * @as(usize, out_width) + @as(usize, x)) * channels;
+            samplePixelBilinearU8(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+        }
+    }
+}
+
+fn remapU16Rows(
+    dst: []u16,
+    src_pixels: []const u16,
+    width: u32,
+    height: u32,
+    channels: usize,
+    roi: Rect,
+    cache: optimize.InverseTransformCache,
+    out_width: u32,
+    row_start: u32,
+    row_end: u32,
+) void {
+    for (row_start..row_end) |y| {
         const world_y = @as(f64, @floatFromInt(roi.top)) + @as(f64, @floatFromInt(y));
         for (0..out_width) |x| {
             const world_x = @as(f64, @floatFromInt(roi.left)) + @as(f64, @floatFromInt(x));
@@ -256,6 +379,34 @@ fn remapU16(dst: []u16, src: *const image_io.Image, pose: optimize.ImagePose, ro
             samplePixelBilinearU16(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
         }
     }
+}
+
+fn remapU8RowsWorker(
+    dst: []u8,
+    src_pixels: []const u8,
+    width: u32,
+    height: u32,
+    channels: usize,
+    roi: Rect,
+    cache: optimize.InverseTransformCache,
+    out_width: u32,
+    range: RemapRowRange,
+) void {
+    remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, range.start, range.end);
+}
+
+fn remapU16RowsWorker(
+    dst: []u16,
+    src_pixels: []const u16,
+    width: u32,
+    height: u32,
+    channels: usize,
+    roi: Rect,
+    cache: optimize.InverseTransformCache,
+    out_width: u32,
+    range: RemapRowRange,
+) void {
+    remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, range.start, range.end);
 }
 
 pub const Rect = struct {
@@ -618,7 +769,7 @@ test "identity remap preserves interior grayscale pixels" {
         .pixels = .{ .u8 = pixels },
     };
 
-    var remapped = try remapRigidImage(allocator, &src, .{}, null);
+    var remapped = try remapRigidImage(allocator, &src, .{}, null, 1);
     defer remapped.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 5), remapped.info.width);
