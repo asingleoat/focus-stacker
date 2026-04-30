@@ -1,3 +1,4 @@
+pub const alloc_profiler = @import("alloc_profiler.zig");
 pub const config = @import("config.zig");
 pub const fft_backend = @import("fft_backend.zig");
 pub const features = @import("features.zig");

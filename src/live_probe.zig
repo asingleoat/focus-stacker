@@ -2,7 +2,8 @@ const std = @import("std");
 const core = @import("root.zig");
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    const allocator = core.alloc_profiler.wrap(std.heap.page_allocator);
+    defer writeProfilerReport();
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -226,6 +227,14 @@ pub fn main() !void {
     printLmStats("roundtrip.component", roundtrip_result.component_lm);
     printLmStats("reseeded.distance", reseeded_result.distance_lm);
     printLmStats("reseeded.component", reseeded_result.component_lm);
+}
+
+fn writeProfilerReport() void {
+    if (!core.alloc_profiler.enabled) return;
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    core.alloc_profiler.maybeWriteReport(&stderr_writer.interface) catch {};
+    stderr_writer.interface.flush() catch {};
 }
 
 fn collectBasePoses(allocator: std.mem.Allocator, images: []const core.parity_pto.ImageEntry) ![]core.optimize.ImagePose {

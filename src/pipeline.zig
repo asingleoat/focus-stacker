@@ -231,55 +231,63 @@ pub fn analyzePairs(
 
     const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len);
     if (pair_jobs == 1) {
+        var workspace = match.Workspace.init(allocator);
+        defer workspace.deinit();
         if (cfg.align_to_first) {
-            var left = try loadReducedGrayImage(allocator, images[plan.pairs.items[0].left_index].path, cfg.pyr_level);
-            defer left.deinit(allocator);
-            var left_full = try loadReducedGrayImage(allocator, images[plan.pairs.items[0].left_index].path, 0);
-            defer left_full.deinit(allocator);
+            var left_images = try loadReducedAndFullGrayImages(allocator, images[plan.pairs.items[0].left_index].path, cfg.pyr_level);
+            defer left_images.deinit(allocator);
 
             for (plan.pairs.items) |pair| {
-                var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
-                defer right.deinit(allocator);
-                var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
-                defer right_full.deinit(allocator);
+                var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, cfg.pyr_level);
+                defer right_images.deinit(allocator);
 
-                var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
-                match.refinePairMatches(options, &pair_result, &left_full, &right_full);
+                var pair_result = try match.analyzePair(
+                    allocator,
+                    options,
+                    pair,
+                    &left_images.reduced,
+                    &left_images.full,
+                    &right_images.reduced,
+                    &right_images.full,
+                    &workspace,
+                );
+                match.refinePairMatches(options, &pair_result, &left_images.full, &right_images.full);
                 try results.append(allocator, pair_result);
             }
         } else {
             var left_index = plan.pairs.items[0].left_index;
-            var left = try loadReducedGrayImage(allocator, images[left_index].path, cfg.pyr_level);
-            defer left.deinit(allocator);
-            var left_full = try loadReducedGrayImage(allocator, images[left_index].path, 0);
-            defer left_full.deinit(allocator);
+            var left_images = try loadReducedAndFullGrayImages(allocator, images[left_index].path, cfg.pyr_level);
+            defer left_images.deinit(allocator);
 
             for (plan.pairs.items, 0..) |pair, pair_idx| {
                 if (pair.left_index != left_index) {
-                    left.deinit(allocator);
-                    left = try loadReducedGrayImage(allocator, images[pair.left_index].path, cfg.pyr_level);
-                    left_full.deinit(allocator);
-                    left_full = try loadReducedGrayImage(allocator, images[pair.left_index].path, 0);
+                    left_images.deinit(allocator);
+                    left_images = try loadReducedAndFullGrayImages(allocator, images[pair.left_index].path, cfg.pyr_level);
                     left_index = pair.left_index;
                 }
 
-                var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, cfg.pyr_level);
-                var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
-                var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
-                match.refinePairMatches(options, &pair_result, &left_full, &right_full);
+                var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, cfg.pyr_level);
+                var pair_result = try match.analyzePair(
+                    allocator,
+                    options,
+                    pair,
+                    &left_images.reduced,
+                    &left_images.full,
+                    &right_images.reduced,
+                    &right_images.full,
+                    &workspace,
+                );
+                match.refinePairMatches(options, &pair_result, &left_images.full, &right_images.full);
                 try results.append(allocator, pair_result);
 
                 const should_reuse_right = pair_idx + 1 < plan.pairs.items.len and
                     plan.pairs.items[pair_idx + 1].left_index == pair.right_index;
                 if (should_reuse_right) {
-                    left.deinit(allocator);
-                    left = right;
-                    left_full.deinit(allocator);
-                    left_full = right_full;
+                    left_images.deinit(allocator);
+                    left_images = right_images;
                     left_index = pair.right_index;
                 } else {
-                    right.deinit(allocator);
-                    right_full.deinit(allocator);
+                    right_images.deinit(allocator);
                 }
             }
         }
@@ -372,10 +380,12 @@ fn analyzePairsParallel(
 }
 
 fn pairWorkerMain(state: *PairWorkerState) void {
+    var workspace = match.Workspace.init(state.allocator);
+    defer workspace.deinit();
     while (true) {
         const pair_index = nextPairIndex(state) orelse return;
         const pair = state.pairs[pair_index];
-        const result = analyzePairDecodedOnDemand(state.allocator, state.images, state.options, state.pyr_level, pair) catch |err| {
+        const result = analyzePairDecodedOnDemand(state.allocator, state.images, state.options, state.pyr_level, pair, &workspace) catch |err| {
             recordError(state, err);
             return;
         };
@@ -389,18 +399,24 @@ fn analyzePairDecodedOnDemand(
     options: match.PairOptions,
     pyr_level: u8,
     pair: sequence.MatchPair,
+    workspace: *match.Workspace,
 ) RunError!match.PairMatches {
-    var left = try loadReducedGrayImage(allocator, images[pair.left_index].path, pyr_level);
-    defer left.deinit(allocator);
-    var left_full = try loadReducedGrayImage(allocator, images[pair.left_index].path, 0);
-    defer left_full.deinit(allocator);
-    var right = try loadReducedGrayImage(allocator, images[pair.right_index].path, pyr_level);
-    defer right.deinit(allocator);
-    var right_full = try loadReducedGrayImage(allocator, images[pair.right_index].path, 0);
-    defer right_full.deinit(allocator);
+    var left_images = try loadReducedAndFullGrayImages(allocator, images[pair.left_index].path, pyr_level);
+    defer left_images.deinit(allocator);
+    var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, pyr_level);
+    defer right_images.deinit(allocator);
 
-    var pair_result = try match.analyzePair(allocator, options, pair, &left, &left_full, &right, &right_full);
-    match.refinePairMatches(options, &pair_result, &left_full, &right_full);
+    var pair_result = try match.analyzePair(
+        allocator,
+        options,
+        pair,
+        &left_images.reduced,
+        &left_images.full,
+        &right_images.reduced,
+        &right_images.full,
+        workspace,
+    );
+    match.refinePairMatches(options, &pair_result, &left_images.full, &right_images.full);
     return pair_result;
 }
 
@@ -470,6 +486,42 @@ fn loadReducedGrayImage(
     var decoded = try image_io.loadImage(allocator, path);
     defer decoded.deinit(allocator);
     return gray.fromLoadedReducedLikeHugin(allocator, &decoded, pyr_level);
+}
+
+const GrayImagePair = struct {
+    reduced: gray.GrayImage,
+    full: gray.GrayImage,
+
+    fn deinit(self: *GrayImagePair, allocator: std.mem.Allocator) void {
+        self.reduced.deinit(allocator);
+        self.full.deinit(allocator);
+    }
+};
+
+fn loadReducedAndFullGrayImages(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    pyr_level: u8,
+) RunError!GrayImagePair {
+    const prof = profiler.scope("pipeline.loadReducedAndFullGrayImages");
+    defer prof.end();
+
+    var decoded = try image_io.loadImage(allocator, path);
+    defer decoded.deinit(allocator);
+
+    var full = try gray.fromLoaded(allocator, &decoded);
+    errdefer full.deinit(allocator);
+
+    const reduced = if (pyr_level == 0)
+        try full.clone(allocator)
+    else
+        try gray.fromLoadedReducedLikeHugin(allocator, &decoded, pyr_level);
+    errdefer reduced.deinit(allocator);
+
+    return .{
+        .reduced = reduced,
+        .full = full,
+    };
 }
 
 fn writeFirstPairPreview(

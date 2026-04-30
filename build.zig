@@ -4,8 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const function_timing = b.option(bool, "function-timing", "Enable comptime-gated function timing instrumentation") orelse false;
+    const allocation_profiling = b.option(bool, "allocation-profiling", "Enable comptime-gated allocation churn profiling") orelse false;
     const build_options = b.addOptions();
     build_options.addOption(bool, "function_timing", function_timing);
+    build_options.addOption(bool, "allocation_profiling", allocation_profiling);
     const smooth_numbers = b.addModule("smooth_numbers", .{
         .root_source_file = b.path("vendor/smooth-numbers/src/largest_n_smooth.zig"),
         .target = target,

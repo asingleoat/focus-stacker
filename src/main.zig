@@ -4,7 +4,7 @@ const core = @import("root.zig");
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = core.alloc_profiler.wrap(gpa.allocator());
     defer writeProfilerReport();
 
     const argv = try std.process.argsAlloc(allocator);
@@ -99,10 +99,11 @@ fn exitWithReport(code: u8) noreturn {
 }
 
 fn writeProfilerReport() void {
-    if (!core.profiler.enabled) return;
+    if (!core.profiler.enabled and !core.alloc_profiler.enabled) return;
     var stderr_buffer: [4096]u8 = undefined;
     var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
     core.profiler.maybeWriteReport(&stderr_writer.interface) catch {};
+    core.alloc_profiler.maybeWriteReport(&stderr_writer.interface) catch {};
     stderr_writer.interface.flush() catch {};
 }
 

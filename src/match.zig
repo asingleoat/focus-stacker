@@ -76,6 +76,82 @@ pub const PairMatches = struct {
     }
 };
 
+pub const Workspace = struct {
+    allocator: std.mem.Allocator,
+    integral: []f64 = &.{},
+    integral_sq: []f64 = &.{},
+    search_freq: []fft_backend.Complex = &.{},
+    kernel_freq: []fft_backend.Complex = &.{},
+    fft_plan: ?fft_backend.ComplexPlan2D = null,
+    fft_width: u32 = 0,
+    fft_height: u32 = 0,
+
+    pub fn init(allocator: std.mem.Allocator) Workspace {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Workspace) void {
+        if (self.integral.len != 0) self.allocator.free(self.integral);
+        if (self.integral_sq.len != 0) self.allocator.free(self.integral_sq);
+        if (self.search_freq.len != 0) self.allocator.free(self.search_freq);
+        if (self.kernel_freq.len != 0) self.allocator.free(self.kernel_freq);
+        if (self.fft_plan) |*plan| {
+            plan.deinit();
+        }
+        self.* = undefined;
+    }
+
+    fn ensureIntegralCapacity(self: *Workspace, needed: usize) !void {
+        if (self.integral.len < needed) {
+            if (self.integral.len == 0) {
+                self.integral = try self.allocator.alloc(f64, needed);
+            } else {
+                self.integral = try self.allocator.realloc(self.integral, needed);
+            }
+        }
+        if (self.integral_sq.len < needed) {
+            if (self.integral_sq.len == 0) {
+                self.integral_sq = try self.allocator.alloc(f64, needed);
+            } else {
+                self.integral_sq = try self.allocator.realloc(self.integral_sq, needed);
+            }
+        }
+    }
+
+    fn ensureFftCapacity(self: *Workspace, width: u32, height: u32) !void {
+        if (self.fft_plan) |*plan| {
+            if (self.fft_width != width or self.fft_height != height) {
+                plan.deinit();
+                self.fft_plan = null;
+                self.fft_width = 0;
+                self.fft_height = 0;
+            }
+        }
+
+        if (self.fft_plan == null) {
+            self.fft_plan = try fft_backend.ComplexPlan2D.init(self.allocator, width, height);
+            self.fft_width = width;
+            self.fft_height = height;
+        }
+
+        const fft_count = @as(usize, width) * @as(usize, height);
+        if (self.search_freq.len < fft_count) {
+            if (self.search_freq.len == 0) {
+                self.search_freq = try self.allocator.alloc(fft_backend.Complex, fft_count);
+            } else {
+                self.search_freq = try self.allocator.realloc(self.search_freq, fft_count);
+            }
+        }
+        if (self.kernel_freq.len < fft_count) {
+            if (self.kernel_freq.len == 0) {
+                self.kernel_freq = try self.allocator.alloc(fft_backend.Complex, fft_count);
+            } else {
+                self.kernel_freq = try self.allocator.realloc(self.kernel_freq, fft_count);
+            }
+        }
+    }
+};
+
 pub fn analyzePair(
     allocator: std.mem.Allocator,
     opts: PairOptions,
@@ -84,6 +160,7 @@ pub fn analyzePair(
     left_full: *const gray.GrayImage,
     right: *const gray.GrayImage,
     right_full: *const gray.GrayImage,
+    workspace: *Workspace,
 ) std.mem.Allocator.Error!PairMatches {
     const prof = profiler.scope("match.analyzePair");
     defer prof.end();
@@ -124,7 +201,7 @@ pub fn analyzePair(
         var accepted_in_rect: u32 = 0;
         for (candidates) |candidate| {
             candidates_considered += 1;
-            const result = matchCandidate(left, right, candidate, opts);
+            const result = matchCandidate(left, right, candidate, opts, workspace);
             if (!passesCorrelationThreshold(result.score, opts.corr_threshold)) {
                 continue;
             }
@@ -153,6 +230,7 @@ pub fn analyzePair(
                     truncFloatToPixel(result.y * scale_factor, right_full.height),
                     opts.full_res_template_size,
                     full_res_search_width,
+                    workspace,
                 );
                 if (!passesCorrelationThreshold(refined.score, opts.corr_threshold)) {
                     continue;
@@ -332,6 +410,8 @@ pub fn probeMatchAroundCenter(
     template_size: u32,
     search_width: u32,
 ) MatchResult {
+    var workspace = Workspace.init(std.heap.page_allocator);
+    defer workspace.deinit();
     return matchAroundCenter(
         left,
         right,
@@ -341,6 +421,7 @@ pub fn probeMatchAroundCenter(
         right_center_y,
         template_size,
         search_width,
+        &workspace,
     );
 }
 
@@ -553,6 +634,8 @@ pub fn probeMatchAroundCenterDebug(
         };
     }
 
+    var workspace = Workspace.init(std.heap.page_allocator);
+    defer workspace.deinit();
     return .{
         .result = matchAroundCenter(
             left,
@@ -563,6 +646,7 @@ pub fn probeMatchAroundCenterDebug(
             right_center_y,
             template_size,
             search_width,
+            &workspace,
         ),
         .best_x = 0,
         .best_y = 0,
@@ -574,6 +658,7 @@ fn matchCandidate(
     right: *const gray.GrayImage,
     candidate: features.InterestPoint,
     opts: PairOptions,
+    workspace: *Workspace,
 ) MatchResult {
     const prof = profiler.scope("match.matchCandidate");
     defer prof.end();
@@ -587,6 +672,7 @@ fn matchCandidate(
         candidate.y,
         opts.template_size,
         opts.search_width,
+        workspace,
     );
 }
 
@@ -599,6 +685,7 @@ fn matchAroundCenter(
     right_center_y: u32,
     template_size: u32,
     search_width: u32,
+    workspace: *Workspace,
 ) MatchResult {
     const prof = profiler.scope("match.matchAroundCenter");
     defer prof.end();
@@ -662,6 +749,7 @@ fn matchAroundCenter(
     }
 
     if (computeCorrelationPeakLikeHugin(
+        workspace,
         right,
         search_ul_x,
         search_ul_y,
@@ -1071,6 +1159,7 @@ fn computeCorrelationSurfaceLikeHugin(
 }
 
 fn computeCorrelationPeakLikeHugin(
+    workspace: *Workspace,
     right: *const gray.GrayImage,
     search_ul_x: i32,
     search_ul_y: i32,
@@ -1088,12 +1177,11 @@ fn computeCorrelationPeakLikeHugin(
     const prof = profiler.scope("match.computeCorrelationPeakLikeHugin");
     defer prof.end();
 
-    const allocator = std.heap.page_allocator;
     const patch_count = @as(f64, @floatFromInt(template.width * template.height));
-    const integral = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
-    defer allocator.free(integral);
-    const integral_sq = try allocator.alloc(f64, @as(usize, search_w + 1) * @as(usize, search_h + 1));
-    defer allocator.free(integral_sq);
+    const integral_len = @as(usize, search_w + 1) * @as(usize, search_h + 1);
+    try workspace.ensureIntegralCapacity(integral_len);
+    const integral = workspace.integral[0..integral_len];
+    const integral_sq = workspace.integral_sq[0..integral_len];
 
     buildIntegralImages(right, search_ul_x, search_ul_y, search_w, search_h, integral, integral_sq);
 
@@ -1223,12 +1311,10 @@ fn computeCorrelationPeakLikeHugin(
         return null;
     }
 
-    var search_freq = try allocator.alloc(fft_backend.Complex, fft_count);
-    defer allocator.free(search_freq);
-    var kernel_freq = try allocator.alloc(fft_backend.Complex, fft_count);
-    defer allocator.free(kernel_freq);
-    var plan = try fft_backend.ComplexPlan2D.init(allocator, fft_w, fft_h);
-    defer plan.deinit();
+    try workspace.ensureFftCapacity(fft_w, fft_h);
+    const search_freq = workspace.search_freq[0..fft_count];
+    const kernel_freq = workspace.kernel_freq[0..fft_count];
+    const plan = &workspace.fft_plan.?;
 
     for (search_freq) |*value| value.* = .{};
     for (kernel_freq) |*value| value.* = .{};
@@ -1707,6 +1793,8 @@ test "pair matching recovers a small translation" {
         .height = 48,
         .pixels = right_pixels,
     };
+    var workspace = Workspace.init(allocator);
+    defer workspace.deinit();
 
     var matches = try analyzePair(allocator, .{
         .points_per_grid = 4,
@@ -1719,7 +1807,7 @@ test "pair matching recovers a small translation" {
     }, .{
         .left_index = 0,
         .right_index = 1,
-    }, &left, &left, &right, &right);
+    }, &left, &left, &right, &right, &workspace);
     defer matches.deinit(allocator);
 
     try std.testing.expect(matches.control_points.len > 0);
@@ -1786,6 +1874,8 @@ test "full-resolution refinement can prune and tighten coarse matches" {
     defer left_reduced.deinit(allocator);
     var right_reduced = try gray.reduceNTimes(allocator, &right_full, 1);
     defer right_reduced.deinit(allocator);
+    var workspace = Workspace.init(allocator);
+    defer workspace.deinit();
 
     var matches = try analyzePair(allocator, .{
         .points_per_grid = 4,
@@ -1799,7 +1889,7 @@ test "full-resolution refinement can prune and tighten coarse matches" {
     }, .{
         .left_index = 0,
         .right_index = 1,
-    }, &left_reduced, &left_full, &right_reduced, &right_full);
+    }, &left_reduced, &left_full, &right_reduced, &right_full, &workspace);
     defer matches.deinit(allocator);
 
     try std.testing.expect(matches.control_points.len > 0);
