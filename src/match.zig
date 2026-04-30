@@ -18,7 +18,7 @@ pub const PairOptions = struct {
 
 const corr_threshold_slack: f32 = 0.00025;
 const clipped_template_score_bias: f32 = 0.00075;
-const max_phase_seed_dimension: u32 = 1024;
+const max_phase_seed_dimension: u32 = 768;
 const max_phase_seed_extra_levels: u8 = 2;
 
 pub const ControlPoint = struct {
