@@ -16,7 +16,6 @@ pub const WeightMap = struct {
 const ScratchPad = struct {
     sum: f64 = 0,
     sum_sqr: f64 = 0,
-    n: u32 = 0,
 };
 
 pub fn computeLocalContrastWeights(
@@ -100,71 +99,70 @@ fn computeRange(
     const last_row_exclusive = @min(end_row, image.height - border);
     if (first_row >= last_row_exclusive) return;
 
-    const scratch = try std.heap.page_allocator.alloc(ScratchPad, @as(usize, image.width) + 1);
+    const scratch = try std.heap.page_allocator.alloc(ScratchPad, @as(usize, image.width));
     defer std.heap.page_allocator.free(scratch);
 
     const width = @as(i32, @intCast(image.width));
     const border_i = @as(i32, @intCast(border));
     const window_size_i = @as(i32, @intCast(window_size));
+    const full_window_samples = window_size * window_size;
+
+    {
+        var column: i32 = 0;
+        while (column < width) : (column += 1) {
+            var col_sum: f64 = 0;
+            var col_sum_sqr: f64 = 0;
+            var yy = @as(i32, @intCast(first_row)) - border_i;
+            while (yy <= @as(i32, @intCast(first_row)) + border_i) : (yy += 1) {
+                const value = image.pixel(@intCast(column), @intCast(yy));
+                col_sum += value;
+                col_sum_sqr += value * value;
+            }
+            scratch[@as(usize, @intCast(column))] = .{
+                .sum = col_sum,
+                .sum_sqr = col_sum_sqr,
+            };
+        }
+    }
 
     var row: i32 = @as(i32, @intCast(first_row));
     while (row < @as(i32, @intCast(last_row_exclusive))) : (row += 1) {
         var sum: f64 = 0;
         var sum_sqr: f64 = 0;
-        var n: u32 = 0;
 
         var column: i32 = 0;
         while (column < window_size_i) : (column += 1) {
-            var col_sum: f64 = 0;
-            var col_sum_sqr: f64 = 0;
-            var col_n: u32 = 0;
-
-            var yy = row - border_i;
-            while (yy <= row + border_i) : (yy += 1) {
-                const value = image.pixel(@intCast(column), @intCast(yy));
-                col_sum += value;
-                col_sum_sqr += value * value;
-                col_n += 1;
-            }
-
-            const slot = &scratch[@as(usize, @intCast(column))];
-            slot.sum = col_sum;
-            slot.sum_sqr = col_sum_sqr;
-            slot.n = col_n;
-            sum += col_sum;
-            sum_sqr += col_sum_sqr;
-            n += col_n;
+            const slot = scratch[@as(usize, @intCast(column))];
+            sum += slot.sum;
+            sum_sqr += slot.sum_sqr;
         }
 
         var x: i32 = border_i;
         while (true) {
             const out_index = @as(usize, @intCast(row)) * @as(usize, image.width) + @as(usize, @intCast(x));
-            weights[out_index] = sampleStdDev(sum, sum_sqr, n);
+            weights[out_index] = sampleStdDev(sum, sum_sqr, full_window_samples);
             if (x == width - border_i - 1) break;
 
             const next_column = x + border_i + 1;
-            var next_sum: f64 = 0;
-            var next_sum_sqr: f64 = 0;
-            var next_n: u32 = 0;
-            var yy = row - border_i;
-            while (yy <= row + border_i) : (yy += 1) {
-                const value = image.pixel(@intCast(next_column), @intCast(yy));
-                next_sum += value;
-                next_sum_sqr += value * value;
-                next_n += 1;
-            }
-
             const old_slot = &scratch[@as(usize, @intCast(x - border_i))];
-            sum += next_sum - old_slot.sum;
-            sum_sqr += next_sum_sqr - old_slot.sum_sqr;
-            n += next_n - old_slot.n;
-            old_slot.* = .{
-                .sum = next_sum,
-                .sum_sqr = next_sum_sqr,
-                .n = next_n,
-            };
+            const next_slot = scratch[@as(usize, @intCast(next_column))];
+            sum += next_slot.sum - old_slot.sum;
+            sum_sqr += next_slot.sum_sqr - old_slot.sum_sqr;
 
             x += 1;
+        }
+
+        if (row + 1 >= @as(i32, @intCast(last_row_exclusive))) continue;
+
+        const remove_y = row - border_i;
+        const add_y = row + border_i + 1;
+        var column_update: i32 = 0;
+        while (column_update < width) : (column_update += 1) {
+            const slot = &scratch[@as(usize, @intCast(column_update))];
+            const removed = image.pixel(@intCast(column_update), @intCast(remove_y));
+            const added = image.pixel(@intCast(column_update), @intCast(add_y));
+            slot.sum += added - removed;
+            slot.sum_sqr += added * added - removed * removed;
         }
     }
 }
