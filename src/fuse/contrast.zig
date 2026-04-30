@@ -30,22 +30,38 @@ pub fn computeLocalContrastWeights(
     const count = @as(usize, image.width) * @as(usize, image.height);
     const weights = try allocator.alloc(f32, count);
     errdefer allocator.free(weights);
-    @memset(weights, 0);
+    try computeLocalContrastWeightsInto(image, window_size, jobs, weights);
+
+    return .{
+        .width = image.width,
+        .height = image.height,
+        .pixels = weights,
+    };
+}
+
+pub fn computeLocalContrastWeightsInto(
+    image: *const gray.GrayImage,
+    window_size: u32,
+    jobs: usize,
+    weights: []f32,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const prof = profiler.scope("fuse.contrast.computeLocalContrastWeightsInto");
+    defer prof.end();
+
+    const count = @as(usize, image.width) * @as(usize, image.height);
+    std.debug.assert(weights.len >= count);
+    @memset(weights[0..count], 0);
 
     if (window_size < 3 or image.width < window_size or image.height < window_size) {
-        return .{
-            .width = image.width,
-            .height = image.height,
-            .pixels = weights,
-        };
+        return;
     }
 
     const worker_count = @min(@max(jobs, 1), @as(usize, @intCast(image.height)));
     if (worker_count <= 1) {
-        try computeRange(image, window_size, weights, 0, image.height);
+        try computeRange(image, window_size, weights[0..count], 0, image.height);
     } else {
-        var threads = try allocator.alloc(std.Thread, worker_count - 1);
-        defer allocator.free(threads);
+        var threads = try std.heap.page_allocator.alloc(std.Thread, worker_count - 1);
+        defer std.heap.page_allocator.free(threads);
 
         const rows_per_worker = std.math.divCeil(usize, image.height, worker_count) catch unreachable;
         var started_threads: usize = 0;
@@ -56,20 +72,14 @@ pub fn computeLocalContrastWeights(
         for (threads, 0..) |*thread, i| {
             const worker_start = @as(u32, @intCast((i + 1) * rows_per_worker));
             const worker_end = @as(u32, @intCast(@min((i + 2) * rows_per_worker, image.height)));
-            thread.* = try std.Thread.spawn(.{}, computeRangeThread, .{ image, window_size, weights, worker_start, worker_end });
+            thread.* = try std.Thread.spawn(.{}, computeRangeThread, .{ image, window_size, weights[0..count], worker_start, worker_end });
             started_threads += 1;
         }
 
         const main_end = @as(u32, @intCast(@min(rows_per_worker, image.height)));
-        try computeRange(image, window_size, weights, 0, main_end);
+        try computeRange(image, window_size, weights[0..count], 0, main_end);
         for (threads) |thread| thread.join();
     }
-
-    return .{
-        .width = image.width,
-        .height = image.height,
-        .pixels = weights,
-    };
 }
 
 fn computeRangeThread(

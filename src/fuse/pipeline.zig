@@ -17,6 +17,10 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
     const jobs = resolveJobs(cfg.jobs);
     var best_weights = std.ArrayListUnmanaged(f32){};
     defer best_weights.deinit(allocator);
+    var gray_buffer = std.ArrayListUnmanaged(f32){};
+    defer gray_buffer.deinit(allocator);
+    var weight_buffer = std.ArrayListUnmanaged(f32){};
+    defer weight_buffer.deinit(allocator);
 
     var output: ?image_io.Image = null;
     defer if (output) |*image| image.deinit(allocator);
@@ -37,14 +41,27 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
             output = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
             const count = @as(usize, image.info.width) * @as(usize, image.info.height);
             try best_weights.resize(allocator, count);
+            try gray_buffer.resize(allocator, count);
+            try weight_buffer.resize(allocator, count);
             @memset(best_weights.items, -std.math.inf(f32));
         }
 
-        var gray_image = try gray.fromLoaded(allocator, &image);
-        defer gray_image.deinit(allocator);
-
-        var weights = try contrast.computeLocalContrastWeights(allocator, &gray_image, cfg.contrast_window_size, jobs);
-        defer weights.deinit(allocator);
+        gray.fillFromLoaded(gray_buffer.items, &image);
+        var gray_image = gray.GrayImage{
+            .width = image.info.width,
+            .height = image.info.height,
+            .pixels = gray_buffer.items,
+            .sample_scale = switch (image.info.sample_type) {
+                .u8 => 255.0,
+                .u16 => 65535.0,
+            },
+        };
+        try contrast.computeLocalContrastWeightsInto(&gray_image, cfg.contrast_window_size, jobs, weight_buffer.items);
+        var weights = contrast.WeightMap{
+            .width = gray_image.width,
+            .height = gray_image.height,
+            .pixels = weight_buffer.items,
+        };
 
         if (cfg.verbose > 1) {
             const stats = weightStats(&weights);

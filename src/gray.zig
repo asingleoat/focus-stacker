@@ -47,10 +47,7 @@ pub fn fromLoaded(allocator: std.mem.Allocator, image: *const image_io.Image) st
     const pixels = try allocator.alloc(f32, count);
     errdefer allocator.free(pixels);
 
-    switch (image.pixels) {
-        .u8 => |src| convertU8(pixels, image, src),
-        .u16 => |src| convertU16(pixels, image, src),
-    }
+    fillFromLoaded(pixels, image);
 
     return .{
         .width = image.info.width,
@@ -58,6 +55,19 @@ pub fn fromLoaded(allocator: std.mem.Allocator, image: *const image_io.Image) st
         .pixels = pixels,
         .sample_scale = sampleScaleForType(image.info.sample_type),
     };
+}
+
+pub fn fillFromLoaded(dst: []f32, image: *const image_io.Image) void {
+    const prof = profiler.scope("gray.fillFromLoaded");
+    defer prof.end();
+
+    const count = @as(usize, image.info.width) * @as(usize, image.info.height);
+    std.debug.assert(dst.len >= count);
+
+    switch (image.pixels) {
+        .u8 => |src| convertU8(dst[0..count], image, src),
+        .u16 => |src| convertU16(dst[0..count], image, src),
+    }
 }
 
 pub fn fromLoadedReducedLikeHugin(

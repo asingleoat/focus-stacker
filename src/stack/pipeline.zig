@@ -100,6 +100,10 @@ fn fuseRemappedImages(
     const jobs = resolveJobs(cfg.jobs);
     var best_weights = std.ArrayListUnmanaged(f32){};
     defer best_weights.deinit(allocator);
+    var gray_buffer = std.ArrayListUnmanaged(f32){};
+    defer gray_buffer.deinit(allocator);
+    var weight_buffer = std.ArrayListUnmanaged(f32){};
+    defer weight_buffer.deinit(allocator);
 
     var output: ?align_core.image_io.Image = null;
     defer if (output) |*image| image.deinit(allocator);
@@ -127,13 +131,27 @@ fn fuseRemappedImages(
             output = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
             const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
             try best_weights.resize(allocator, count);
+            try gray_buffer.resize(allocator, count);
+            try weight_buffer.resize(allocator, count);
             @memset(best_weights.items, -std.math.inf(f32));
         }
 
-        var gray_image = try align_core.gray.fromLoaded(allocator, &remapped);
-        defer gray_image.deinit(allocator);
-        var weights = try fuse.contrast.computeLocalContrastWeights(allocator, &gray_image, cfg.contrast_window_size, jobs);
-        defer weights.deinit(allocator);
+        align_core.gray.fillFromLoaded(gray_buffer.items, &remapped);
+        var gray_image = align_core.gray.GrayImage{
+            .width = remapped.info.width,
+            .height = remapped.info.height,
+            .pixels = gray_buffer.items,
+            .sample_scale = switch (remapped.info.sample_type) {
+                .u8 => 255.0,
+                .u16 => 65535.0,
+            },
+        };
+        try fuse.contrast.computeLocalContrastWeightsInto(&gray_image, cfg.contrast_window_size, jobs, weight_buffer.items);
+        var weights = fuse.contrast.WeightMap{
+            .width = gray_image.width,
+            .height = gray_image.height,
+            .pixels = weight_buffer.items,
+        };
         try fuse.blend.updateWinners(allocator, &remapped, &weights, best_weights.items, &output.?, jobs);
     }
 
