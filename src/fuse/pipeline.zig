@@ -11,6 +11,7 @@ const masks = @import("masks.zig");
 const pyramid = @import("pyramid.zig");
 
 pub const RunError = io.LoadError || image_io.SaveError || std.mem.Allocator.Error || std.Thread.SpawnError;
+const max_cached_pyramid_bytes: usize = 2 * 1024 * 1024 * 1024;
 
 pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!void {
     const prof = profiler.scope("fuse.pipeline.run");
@@ -153,13 +154,20 @@ fn runPyramidPass(
 
     var expected: ?io.StackInfo = null;
     const input_count = cfg.input_files.items.len;
+    var cached_images = std.ArrayListUnmanaged(image_io.Image){};
+    defer {
+        for (cached_images.items) |*image| image.deinit(allocator);
+        cached_images.deinit(allocator);
+    }
+    var cache_images = false;
 
     for (cfg.input_files.items, 0..) |path, index| {
         if (cfg.verbose > 0) {
             std.debug.print("focus fuse: [{d}/{d}] loading {s} for weight normalization\n", .{ index + 1, input_count, path });
         }
         var image = try io.loadAndValidateImage(allocator, path, expected);
-        defer image.deinit(allocator);
+        var keep_image = false;
+        errdefer if (!keep_image) image.deinit(allocator);
         if (expected == null) {
             expected = io.stackInfoFromImage(&image);
             output.* = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
@@ -169,25 +177,54 @@ fn runPyramidPass(
             try norm_weight_sums.resize(allocator, count);
             @memset(norm_weight_sums.items, 0);
             accumulator.* = try pyramid.Accumulator.init(allocator, image.info.width, image.info.height);
+            cache_images = estimatedCacheBytes(image.info, input_count) <= max_cached_pyramid_bytes;
+            if (cfg.verbose > 0 and cache_images) {
+                std.debug.print("focus fuse: caching aligned inputs in memory for pyramid blend\n", .{});
+            }
         }
         try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
         masks.applySupportInto(&image, weight_buffer.items);
         for (norm_weight_sums.items, weight_buffer.items) |*sum, weight| sum.* += weight;
+        if (cache_images) {
+            try cached_images.append(allocator, image);
+            keep_image = true;
+        }
     }
 
     try gray_buffer.resize(allocator, norm_weight_sums.items.len);
 
-    for (cfg.input_files.items, 0..) |path, index| {
-        if (cfg.verbose > 0) {
-            std.debug.print("focus fuse: [{d}/{d}] loading {s} for pyramid blend\n", .{ index + 1, input_count, path });
+    if (cache_images) {
+        for (cached_images.items, 0..) |*image, index| {
+            if (cfg.verbose > 0) {
+                std.debug.print("focus fuse: [{d}/{d}] pyramid blend from cached image\n", .{ index + 1, input_count });
+            }
+            try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, weight_buffer.items);
+            masks.applySupportInto(image, weight_buffer.items);
+            pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+        try pyramid.accumulateImage(allocator, image, gray_buffer.items, &accumulator.*.?);
         }
-        var image = try io.loadAndValidateImage(allocator, path, expected);
-        defer image.deinit(allocator);
-        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
-        masks.applySupportInto(&image, weight_buffer.items);
-        pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-        try pyramid.accumulateImage(allocator, &image, gray_buffer.items, &accumulator.*.?);
+    } else {
+        for (cfg.input_files.items, 0..) |path, index| {
+            if (cfg.verbose > 0) {
+                std.debug.print("focus fuse: [{d}/{d}] loading {s} for pyramid blend\n", .{ index + 1, input_count, path });
+            }
+            var image = try io.loadAndValidateImage(allocator, path, expected);
+            defer image.deinit(allocator);
+            try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+            masks.applySupportInto(&image, weight_buffer.items);
+            pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            try pyramid.accumulateImage(allocator, &image, gray_buffer.items, &accumulator.*.?);
+        }
     }
+}
+
+fn estimatedCacheBytes(info: image_io.ImageInfo, image_count: usize) usize {
+    const sample_bytes: usize = switch (info.sample_type) {
+        .u8 => 1,
+        .u16 => 2,
+    };
+    const pixel_bytes = @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels + info.extra_channels) * sample_bytes;
+    return pixel_bytes * image_count;
 }
 
 fn computeWeightMapForImage(

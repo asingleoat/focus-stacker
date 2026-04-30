@@ -2,6 +2,7 @@ const std = @import("std");
 const align_core = @import("align_stack_core");
 const fuse = @import("focus_fuse_core");
 const config = @import("config.zig");
+const max_cached_pyramid_bytes: usize = 2 * 1024 * 1024 * 1024;
 
 pub const RunError = anyerror;
 
@@ -216,6 +217,13 @@ fn runPyramidStackFusion(
         }
     }
 
+    var cached_remapped = std.ArrayListUnmanaged(align_core.image_io.Image){};
+    defer {
+        for (cached_remapped.items) |*image| image.deinit(allocator);
+        cached_remapped.deinit(allocator);
+    }
+    var cache_images = false;
+
     for (active_indices.items, 0..) |image_index, active_i| {
         if (cfg.verbose > 0) {
             std.debug.print("stack fuse: [{d}] remapping {s} for weight normalization\n", .{ active_i + 1, images[image_index].path });
@@ -223,7 +231,8 @@ fn runPyramidStackFusion(
         var src = try align_core.image_io.loadImage(allocator, images[image_index].path);
         defer src.deinit(allocator);
         var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
-        defer remapped.deinit(allocator);
+        var keep_remapped = false;
+        errdefer if (!keep_remapped) remapped.deinit(allocator);
 
         if (output.* == null) {
             output.* = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
@@ -233,26 +242,46 @@ fn runPyramidStackFusion(
             try norm_weight_sums.resize(allocator, count);
             @memset(norm_weight_sums.items, 0);
             pyramid_accumulator.* = try fuse.pyramid.Accumulator.init(allocator, remapped.info.width, remapped.info.height);
+            cache_images = estimatedCacheBytes(remapped.info, active_indices.items.len) <= max_cached_pyramid_bytes;
+            if (cfg.verbose > 0 and cache_images) {
+                std.debug.print("stack fuse: caching remapped images in memory for pyramid blend\n", .{});
+            }
         }
 
         try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items);
         fuse.masks.applySupportInto(&remapped, weight_buffer.items);
         for (norm_weight_sums.items, weight_buffer.items) |*sum, weight| sum.* += weight;
+        if (cache_images) {
+            try cached_remapped.append(allocator, remapped);
+            keep_remapped = true;
+        }
     }
 
-    for (active_indices.items, 0..) |image_index, active_i| {
-        if (cfg.verbose > 0) {
-            std.debug.print("stack fuse: [{d}] remapping {s} for pyramid blend\n", .{ active_i + 1, images[image_index].path });
+    if (cache_images) {
+        for (cached_remapped.items, 0..) |*remapped, active_i| {
+            if (cfg.verbose > 0) {
+                std.debug.print("stack fuse: [{d}] pyramid blend from cached remap\n", .{ active_i + 1 });
+            }
+            try computeWeightMapForRemapped(cfg, jobs, remapped, gray_buffer.items, weight_buffer.items);
+            fuse.masks.applySupportInto(remapped, weight_buffer.items);
+            fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
+            try fuse.pyramid.accumulateImage(allocator, remapped, gray_buffer.items, &pyramid_accumulator.*.?);
         }
-        var src = try align_core.image_io.loadImage(allocator, images[image_index].path);
-        defer src.deinit(allocator);
-        var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
-        defer remapped.deinit(allocator);
+    } else {
+        for (active_indices.items, 0..) |image_index, active_i| {
+            if (cfg.verbose > 0) {
+                std.debug.print("stack fuse: [{d}] remapping {s} for pyramid blend\n", .{ active_i + 1, images[image_index].path });
+            }
+            var src = try align_core.image_io.loadImage(allocator, images[image_index].path);
+            defer src.deinit(allocator);
+            var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
+            defer remapped.deinit(allocator);
 
-        try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items);
-        fuse.masks.applySupportInto(&remapped, weight_buffer.items);
-        fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-        try fuse.pyramid.accumulateImage(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?);
+            try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items);
+            fuse.masks.applySupportInto(&remapped, weight_buffer.items);
+            fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
+            try fuse.pyramid.accumulateImage(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?);
+        }
     }
 }
 
@@ -286,4 +315,13 @@ fn resolveJobs(requested: ?u32) usize {
     if (requested) |value| return @max(@as(usize, value), 1);
     const cpu_count = std.Thread.getCpuCount() catch 1;
     return if (cpu_count > 2) cpu_count - 2 else 1;
+}
+
+fn estimatedCacheBytes(info: align_core.image_io.ImageInfo, image_count: usize) usize {
+    const sample_bytes: usize = switch (info.sample_type) {
+        .u8 => 1,
+        .u16 => 2,
+    };
+    const pixel_bytes = @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels + info.extra_channels) * sample_bytes;
+    return pixel_bytes * image_count;
 }
