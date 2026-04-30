@@ -18,6 +18,8 @@ pub const PairOptions = struct {
 
 const corr_threshold_slack: f32 = 0.00025;
 const clipped_template_score_bias: f32 = 0.00075;
+const max_phase_seed_dimension: u32 = 1024;
+const max_phase_seed_extra_levels: u8 = 2;
 
 pub const ControlPoint = struct {
     left_image: usize,
@@ -166,7 +168,36 @@ pub fn analyzePair(
     right: *const gray.GrayImage,
     right_full: *const gray.GrayImage,
     workspace: *Workspace,
-) std.mem.Allocator.Error!PairMatches {
+) anyerror!PairMatches {
+    return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, null, false);
+}
+
+pub fn analyzePairPhaseCorrSeeded(
+    allocator: std.mem.Allocator,
+    opts: PairOptions,
+    pair: sequence.MatchPair,
+    left: *const gray.GrayImage,
+    left_full: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    right_full: *const gray.GrayImage,
+    workspace: *Workspace,
+) anyerror!PairMatches {
+    const seed = try computeGlobalPhaseCorrelationSeed(left, right, workspace);
+    return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, true);
+}
+
+fn analyzePairWithSeed(
+    allocator: std.mem.Allocator,
+    opts: PairOptions,
+    pair: sequence.MatchPair,
+    left: *const gray.GrayImage,
+    left_full: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    right_full: *const gray.GrayImage,
+    workspace: *Workspace,
+    seed: ?GlobalSeed,
+    use_seeded_fast_path: bool,
+) anyerror!PairMatches {
     const prof = profiler.scope("match.analyzePair");
     defer prof.end();
 
@@ -181,15 +212,26 @@ pub fn analyzePair(
     const scale_factor = @as(f32, @floatFromInt(@as(u32, 1) << @intCast(opts.pyr_level)));
     const scale_factor_int = @as(u32, 1) << @intCast(opts.pyr_level);
     const full_res_search_width = @max(scale_factor_int, 1);
+    const seeded_search_width = if (use_seeded_fast_path)
+        @max(@as(u32, 24), opts.search_width / 2)
+    else
+        opts.search_width;
     var coarse_control_point_count: usize = 0;
     var coarse_score_sum: f64 = 0;
     var coarse_best_score: ?f32 = null;
 
     if (opts.verbose > 0) {
-        std.debug.print(
-            "pair [{d}] -> [{d}]: matching {d} grid cells, target {d} control points per cell\n",
-            .{ pair.left_index, pair.right_index, rects.len, opts.points_per_grid },
-        );
+        if (seed) |global_seed| {
+            std.debug.print(
+                "pair [{d}] -> [{d}]: matching {d} grid cells, target {d} control points per cell, phase seed dx={d} dy={d} score={d:.4}\n",
+                .{ pair.left_index, pair.right_index, rects.len, opts.points_per_grid, global_seed.dx, global_seed.dy, global_seed.score },
+            );
+        } else {
+            std.debug.print(
+                "pair [{d}] -> [{d}]: matching {d} grid cells, target {d} control points per cell\n",
+                .{ pair.left_index, pair.right_index, rects.len, opts.points_per_grid },
+            );
+        }
     }
 
     for (rects, 0..) |rect, rect_index| {
@@ -205,7 +247,10 @@ pub fn analyzePair(
         var accepted_in_rect: u32 = 0;
         for (candidates) |candidate| {
             candidates_considered += 1;
-            const result = matchCandidate(left, right, candidate, opts, workspace);
+            const result = if (seed) |global_seed|
+                matchCandidateSeeded(left, right, candidate, global_seed, opts, seeded_search_width, workspace)
+            else
+                matchCandidate(left, right, candidate, opts, workspace);
             if (!passesCorrelationThreshold(result.score, opts.corr_threshold)) {
                 continue;
             }
@@ -382,6 +427,12 @@ pub const MatchResult = struct {
     score: f32 = -1,
     x: f64 = 0,
     y: f64 = 0,
+};
+
+const GlobalSeed = struct {
+    dx: i32,
+    dy: i32,
+    score: f32,
 };
 
 pub const ProbeMatchDebug = struct {
@@ -678,6 +729,43 @@ fn matchCandidate(
         opts.search_width,
         workspace,
     );
+}
+
+fn matchCandidateSeeded(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    candidate: features.InterestPoint,
+    seed: GlobalSeed,
+    opts: PairOptions,
+    seeded_search_width: u32,
+    workspace: *Workspace,
+) MatchResult {
+    const prof = profiler.scope("match.matchCandidateSeeded");
+    defer prof.end();
+
+    const seeded_center_x = addSignedClamped(candidate.x, seed.dx, right.width);
+    const seeded_center_y = addSignedClamped(candidate.y, seed.dy, right.height);
+    const fast = matchAroundCenter(
+        left,
+        right,
+        candidate.x,
+        candidate.y,
+        seeded_center_x,
+        seeded_center_y,
+        opts.template_size,
+        seeded_search_width,
+        workspace,
+    );
+    if (passesCorrelationThreshold(fast.score, opts.corr_threshold)) {
+        return fast;
+    }
+    return matchCandidate(left, right, candidate, opts, workspace);
+}
+
+fn addSignedClamped(base: u32, delta: i32, limit: u32) u32 {
+    const value = @as(i64, @intCast(base)) + @as(i64, delta);
+    const clamped = @max(@as(i64, 0), @min(@as(i64, @intCast(limit - 1)), value));
+    return @as(u32, @intCast(clamped));
 }
 
 fn matchAroundCenter(
@@ -1513,6 +1601,126 @@ fn finalizePeakResult(
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
 }
 
+fn computeGlobalPhaseCorrelationSeed(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    workspace: *Workspace,
+) !?GlobalSeed {
+    const prof = profiler.scope("match.computeGlobalPhaseCorrelationSeed");
+    defer prof.end();
+
+    var extra_levels: u8 = 0;
+    var seed_width = left.width;
+    var seed_height = left.height;
+    while (extra_levels < max_phase_seed_extra_levels and
+        (seed_width > max_phase_seed_dimension or seed_height > max_phase_seed_dimension))
+    {
+        seed_width = (seed_width + 1) / 2;
+        seed_height = (seed_height + 1) / 2;
+        extra_levels += 1;
+    }
+
+    var reduced_left_storage: ?gray.GrayImage = null;
+    defer if (reduced_left_storage) |*image| image.deinit(workspace.allocator);
+    var reduced_right_storage: ?gray.GrayImage = null;
+    defer if (reduced_right_storage) |*image| image.deinit(workspace.allocator);
+
+    var seed_left = left;
+    var seed_right = right;
+    if (extra_levels > 0) {
+        reduced_left_storage = try gray.reduceNTimes(workspace.allocator, left, extra_levels);
+        reduced_right_storage = try gray.reduceNTimes(workspace.allocator, right, extra_levels);
+        seed_left = &reduced_left_storage.?;
+        seed_right = &reduced_right_storage.?;
+    }
+
+    const fft_w = fft_backend.preferredCorrelationComplexLength(seed_left.width);
+    const fft_h = fft_backend.preferredCorrelationComplexLength(seed_left.height);
+    const retained_w = @min(seed_left.width, fft_w);
+    const retained_h = @min(seed_left.height, fft_h);
+    if (retained_w == 0 or retained_h == 0) return null;
+
+    const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
+    try workspace.ensureFftCapacity(fft_w, fft_h);
+    const left_freq = workspace.search_freq[0..fft_count];
+    const right_freq = workspace.kernel_freq[0..fft_count];
+    const plan = &workspace.fft_plan.?;
+
+    for (left_freq) |*value| value.* = .{};
+    for (right_freq) |*value| value.* = .{};
+
+    const retained_count = @as(f64, @floatFromInt(retained_w)) * @as(f64, @floatFromInt(retained_h));
+    var left_mean: f64 = 0.0;
+    var right_mean: f64 = 0.0;
+    var y: u32 = 0;
+    while (y < retained_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < retained_w) : (x += 1) {
+            left_mean += seed_left.pixel(x, y);
+            right_mean += seed_right.pixel(x, y);
+        }
+    }
+    left_mean /= retained_count;
+    right_mean /= retained_count;
+
+    y = 0;
+    while (y < retained_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < retained_w) : (x += 1) {
+            const idx = @as(usize, y) * @as(usize, fft_w) + @as(usize, x);
+            left_freq[idx].re = @as(f32, @floatCast(@as(f64, seed_left.pixel(x, y)) - left_mean));
+            right_freq[idx].re = @as(f32, @floatCast(@as(f64, seed_right.pixel(x, y)) - right_mean));
+        }
+    }
+
+    plan.transformInPlace(left_freq, false);
+    plan.transformInPlace(right_freq, false);
+
+    for (left_freq, right_freq) |*lhs, rhs| {
+        const cross = rhs.mulConj(lhs.*);
+        const magnitude = @sqrt(cross.re * cross.re + cross.im * cross.im);
+        if (magnitude > 1e-12) {
+            lhs.* = .{
+                .re = cross.re / magnitude,
+                .im = cross.im / magnitude,
+            };
+        } else {
+            lhs.* = .{};
+        }
+    }
+    left_freq[0] = .{};
+    plan.transformInPlace(left_freq, true);
+
+    var best_idx: usize = 0;
+    var best_score: f32 = left_freq[0].re;
+    for (left_freq[1..], 1..) |value, idx| {
+        if (value.re > best_score) {
+            best_score = value.re;
+            best_idx = idx;
+        }
+    }
+
+    const peak_x: u32 = @intCast(best_idx % @as(usize, fft_w));
+    const peak_y: u32 = @intCast(best_idx / @as(usize, fft_w));
+    const half_w = fft_w / 2;
+    const half_h = fft_h / 2;
+    const scale_factor: i32 = @as(i32, 1) << @intCast(extra_levels);
+    const seed_dx = if (peak_x > half_w)
+        @as(i32, @intCast(peak_x)) - @as(i32, @intCast(fft_w))
+    else
+        @as(i32, @intCast(peak_x));
+    const seed_dy = if (peak_y > half_h)
+        @as(i32, @intCast(peak_y)) - @as(i32, @intCast(fft_h))
+    else
+        @as(i32, @intCast(peak_y));
+
+    return .{
+        .dx = seed_dx * scale_factor,
+        .dy = seed_dy * scale_factor,
+        .score = best_score,
+    };
+}
+
 fn exactCorrelationScoreAt(
     right: *const gray.GrayImage,
     search_ul_x: i32,
@@ -1919,4 +2127,60 @@ test "full-resolution refinement can prune and tighten coarse matches" {
         }
     }
     try std.testing.expect(found);
+}
+
+test "global phase correlation seed recovers reduced-image translation" {
+    const allocator = std.testing.allocator;
+
+    const width: usize = 64;
+    const height: usize = 64;
+    const left_pixels = try allocator.alloc(f32, width * height);
+    defer allocator.free(left_pixels);
+    @memset(left_pixels, 0);
+
+    for (10..22) |y| {
+        for (8..18) |x| {
+            left_pixels[y * width + x] = 1.0;
+        }
+    }
+    for (28..42) |y| {
+        for (26..46) |x| {
+            left_pixels[y * width + x] = 0.65;
+        }
+    }
+    for (6..14) |y| {
+        for (40..52) |x| {
+            left_pixels[y * width + x] = 0.35;
+        }
+    }
+
+    const right_pixels = try allocator.alloc(f32, width * height);
+    defer allocator.free(right_pixels);
+    @memset(right_pixels, 0);
+
+    const shift_x: usize = 5;
+    const shift_y: usize = 3;
+    for (0..(height - shift_y)) |y| {
+        for (0..(width - shift_x)) |x| {
+            right_pixels[(y + shift_y) * width + (x + shift_x)] = left_pixels[y * width + x];
+        }
+    }
+
+    const left = gray.GrayImage{
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixels = left_pixels,
+    };
+    const right = gray.GrayImage{
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixels = right_pixels,
+    };
+
+    var workspace = Workspace.init(allocator);
+    defer workspace.deinit();
+
+    const seed = (try computeGlobalPhaseCorrelationSeed(&left, &right, &workspace)).?;
+    try std.testing.expectEqual(@as(i32, @intCast(shift_x)), seed.dx);
+    try std.testing.expectEqual(@as(i32, @intCast(shift_y)), seed.dy);
 }

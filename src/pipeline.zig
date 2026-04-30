@@ -217,7 +217,7 @@ pub fn analyzePairs(
 
     return switch (cfg.pair_alignment_method) {
         .hugin_ncc => analyzePairsHuginNcc(allocator, cfg, images, plan),
-        .phasecorr_seeded => error.NotImplemented,
+        .phasecorr_seeded => analyzePairsPhaseCorrSeeded(allocator, cfg, images, plan),
     };
 }
 
@@ -320,6 +320,66 @@ fn analyzePairsHuginNcc(
     return results.toOwnedSlice(allocator);
 }
 
+fn analyzePairsPhaseCorrSeeded(
+    allocator: std.mem.Allocator,
+    cfg: *const config_mod.Config,
+    images: []const sequence.InputImage,
+    plan: *const sequence.Plan,
+) RunError![]match.PairMatches {
+    const prof = profiler.scope("pipeline.analyzePairsPhaseCorrSeeded");
+    defer prof.end();
+
+    if (plan.pairs.items.len == 0) {
+        return allocator.alloc(match.PairMatches, 0);
+    }
+
+    var results: std.ArrayList(match.PairMatches) = .empty;
+    defer results.deinit(allocator);
+
+    const options = match.PairOptions{
+        .points_per_grid = cfg.points_per_grid,
+        .grid_size = cfg.grid_size,
+        .corr_threshold = @as(f32, @floatCast(cfg.corr_thresh)),
+        .pyr_level = cfg.pyr_level,
+        .verbose = cfg.verbose,
+    };
+
+    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len);
+    if (pair_jobs == 1) {
+        var workspace = match.Workspace.init(allocator);
+        defer workspace.deinit();
+
+        for (plan.pairs.items) |pair| {
+            var left_images = try loadReducedAndFullGrayImages(allocator, images[pair.left_index].path, cfg.pyr_level);
+            defer left_images.deinit(allocator);
+            var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, cfg.pyr_level);
+            defer right_images.deinit(allocator);
+
+            const pair_result = try match.analyzePairPhaseCorrSeeded(
+                allocator,
+                options,
+                pair,
+                &left_images.reduced,
+                &left_images.full,
+                &right_images.reduced,
+                &right_images.full,
+                &workspace,
+            );
+            try results.append(allocator, pair_result);
+        }
+
+        return results.toOwnedSlice(allocator);
+    }
+
+    const parallel_results = try analyzePairsParallelPhaseCorrSeeded(allocator, cfg, images, plan.pairs.items, options, pair_jobs);
+    defer allocator.free(parallel_results);
+    try results.ensureTotalCapacityPrecise(allocator, parallel_results.len);
+    for (parallel_results) |pair_result| {
+        results.appendAssumeCapacity(pair_result);
+    }
+    return results.toOwnedSlice(allocator);
+}
+
 const PairWorkerResult = struct {
     value: ?match.PairMatches = null,
 };
@@ -330,6 +390,7 @@ const PairWorkerState = struct {
     pairs: []const sequence.MatchPair,
     options: match.PairOptions,
     pyr_level: u8,
+    use_phasecorr_seeded: bool,
     cache: []GrayImageCacheEntry,
     cache_mutex: std.Thread.Mutex = .{},
     next_index: usize = 0,
@@ -357,6 +418,29 @@ fn analyzePairsParallel(
     options: match.PairOptions,
     pair_jobs: usize,
 ) RunError![]match.PairMatches {
+    return analyzePairsParallelGeneric(allocator, cfg, images, pairs, options, pair_jobs, false);
+}
+
+fn analyzePairsParallelPhaseCorrSeeded(
+    allocator: std.mem.Allocator,
+    cfg: *const config_mod.Config,
+    images: []const sequence.InputImage,
+    pairs: []const sequence.MatchPair,
+    options: match.PairOptions,
+    pair_jobs: usize,
+) RunError![]match.PairMatches {
+    return analyzePairsParallelGeneric(allocator, cfg, images, pairs, options, pair_jobs, true);
+}
+
+fn analyzePairsParallelGeneric(
+    allocator: std.mem.Allocator,
+    cfg: *const config_mod.Config,
+    images: []const sequence.InputImage,
+    pairs: []const sequence.MatchPair,
+    options: match.PairOptions,
+    pair_jobs: usize,
+    use_phasecorr_seeded: bool,
+) RunError![]match.PairMatches {
     var thread_safe_allocator: std.heap.ThreadSafeAllocator = .{ .child_allocator = allocator };
     const worker_results = try allocator.alloc(PairWorkerResult, pairs.len);
     errdefer allocator.free(worker_results);
@@ -371,6 +455,7 @@ fn analyzePairsParallel(
         .pairs = pairs,
         .options = options,
         .pyr_level = cfg.pyr_level,
+        .use_phasecorr_seeded = use_phasecorr_seeded,
         .cache = cache_entries,
         .results = worker_results,
     };
@@ -439,7 +524,20 @@ fn analyzePairDecodedOnDemand(
     const right_images = try acquireGrayImagePair(state, pair.right_index);
     defer releaseGrayImagePair(state, pair.right_index);
 
-    var pair_result = try match.analyzePair(
+    if (state.use_phasecorr_seeded) {
+        return match.analyzePairPhaseCorrSeeded(
+            state.allocator,
+            state.options,
+            pair,
+            &left_images.reduced,
+            &left_images.full,
+            &right_images.reduced,
+            &right_images.full,
+            workspace,
+        );
+    }
+
+    return match.analyzePair(
         state.allocator,
         state.options,
         pair,
@@ -449,8 +547,6 @@ fn analyzePairDecodedOnDemand(
         &right_images.full,
         workspace,
     );
-    match.refinePairMatches(state.options, &pair_result, &left_images.full, &right_images.full);
-    return pair_result;
 }
 
 fn cleanupWorkerResults(allocator: std.mem.Allocator, worker_results: []PairWorkerResult) void {
