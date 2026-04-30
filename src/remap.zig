@@ -35,7 +35,8 @@ pub fn writeAlignedImages(
     }
 
     if (tasks.items.len == 0) return;
-    const row_jobs_per_image: usize = 1;
+    const image_parallelism = @min(tasks.items.len, jobs);
+    const row_jobs_per_image = @max(@as(usize, 1), jobs / image_parallelism);
 
     if (jobs <= 1 or tasks.items.len == 1) {
         for (tasks.items) |task| {
@@ -55,7 +56,7 @@ pub fn writeAlignedImages(
         .row_jobs_per_image = row_jobs_per_image,
     };
 
-    const worker_count = jobs - 1;
+    const worker_count = image_parallelism - 1;
     var threads = try allocator.alloc(std.Thread, worker_count);
     defer allocator.free(threads);
 

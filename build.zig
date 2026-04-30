@@ -95,6 +95,19 @@ pub fn build(b: *std.Build) void {
     configureImageDeps(live_probe.root_module);
     configureFftDeps(b, live_probe.root_module);
 
+    const remap_probe = b.addExecutable(.{
+        .name = "remap_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/remap_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    remap_probe.root_module.addOptions("build_options", build_options);
+    remap_probe.root_module.addImport("smooth_numbers", smooth_numbers);
+    configureImageDeps(remap_probe.root_module);
+    configureFftDeps(b, remap_probe.root_module);
+
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -130,6 +143,13 @@ pub fn build(b: *std.Build) void {
     }
     const live_step = b.step("probe-live", "Run the live pipeline solve comparison probe");
     live_step.dependOn(&run_live_probe.step);
+
+    const run_remap_probe = b.addRunArtifact(remap_probe);
+    if (b.args) |args| {
+        run_remap_probe.addArgs(args);
+    }
+    const remap_step = b.step("probe-remap", "Run the remap/output benchmark probe");
+    remap_step.dependOn(&run_remap_probe.step);
 
     const core_tests = b.addTest(.{
         .root_module = core,
