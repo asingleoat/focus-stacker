@@ -119,7 +119,7 @@ pub fn collapseToImage(
         const parent = &collapsed[level_index - 1];
         const expanded = try allocator.alloc(f32, @as(usize, parent.width) * @as(usize, parent.height) * 3);
         defer allocator.free(expanded);
-        expandRgb(parent.width, parent.height, child.width, child.height, child.pixels, expanded);
+        try expandRgb(allocator, parent.width, parent.height, child.width, child.height, child.pixels, expanded);
         for (parent.pixels, expanded) |*dst, value| {
             dst.* += value;
         }
