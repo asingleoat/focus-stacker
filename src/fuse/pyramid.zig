@@ -59,6 +59,86 @@ pub const Accumulator = struct {
     }
 };
 
+pub const Workspace = struct {
+    mask_levels: []ScalarLevel,
+    gaussian_levels: []RgbLevel,
+    laplacian_levels: []RgbLevel,
+    expanded_levels: []RgbLevel,
+
+    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) std.mem.Allocator.Error!Workspace {
+        const level_count = computeLevelCount(width, height);
+        const mask_levels = try allocator.alloc(ScalarLevel, level_count);
+        errdefer allocator.free(mask_levels);
+        const gaussian_levels = try allocator.alloc(RgbLevel, level_count);
+        errdefer allocator.free(gaussian_levels);
+        const laplacian_levels = try allocator.alloc(RgbLevel, level_count);
+        errdefer allocator.free(laplacian_levels);
+        const expanded_levels = try allocator.alloc(RgbLevel, level_count - 1);
+        errdefer allocator.free(expanded_levels);
+
+        var w = width;
+        var h = height;
+        var built_masks: usize = 0;
+        var built_gaussians: usize = 0;
+        var built_laplacians: usize = 0;
+        var built_expanded: usize = 0;
+        errdefer {
+            for (mask_levels[0..built_masks]) |*level| level.deinit(allocator);
+            for (gaussian_levels[0..built_gaussians]) |*level| level.deinit(allocator);
+            for (laplacian_levels[0..built_laplacians]) |*level| level.deinit(allocator);
+            for (expanded_levels[0..built_expanded]) |*level| level.deinit(allocator);
+        }
+
+        for (0..level_count) |i| {
+            const mask_count = @as(usize, w) * @as(usize, h);
+            const rgb_count = mask_count * 3;
+            mask_levels[i] = .{
+                .width = w,
+                .height = h,
+                .pixels = try allocator.alloc(f32, mask_count),
+            };
+            built_masks += 1;
+            gaussian_levels[i] = .{
+                .width = w,
+                .height = h,
+                .pixels = try allocator.alloc(f32, rgb_count),
+            };
+            built_gaussians += 1;
+            laplacian_levels[i] = .{
+                .width = w,
+                .height = h,
+                .pixels = try allocator.alloc(f32, rgb_count),
+            };
+            built_laplacians += 1;
+            if (i + 1 < level_count) {
+                expanded_levels[i] = .{
+                    .width = w,
+                    .height = h,
+                    .pixels = try allocator.alloc(f32, rgb_count),
+                };
+                built_expanded += 1;
+            }
+            if (w == 1 and h == 1) break;
+            w = nextLevelSize(w);
+            h = nextLevelSize(h);
+        }
+
+        return .{
+            .mask_levels = mask_levels,
+            .gaussian_levels = gaussian_levels,
+            .laplacian_levels = laplacian_levels,
+            .expanded_levels = expanded_levels,
+        };
+    }
+
+    pub fn deinit(self: *Workspace, allocator: std.mem.Allocator) void {
+        deinitScalarLevels(allocator, self.mask_levels);
+        deinitRgbLevels(allocator, self.gaussian_levels);
+        deinitRgbLevels(allocator, self.laplacian_levels);
+        deinitRgbLevels(allocator, self.expanded_levels);
+    }
+};
+
 pub fn computeLevelCount(width: u32, height: u32) usize {
     var levels: usize = 1;
     var w = width;
@@ -80,16 +160,25 @@ pub fn accumulateImage(
     normalized_mask: []const f32,
     result: *Accumulator,
 ) std.mem.Allocator.Error!void {
+    var workspace = try Workspace.init(allocator, image.info.width, image.info.height);
+    defer workspace.deinit(allocator);
+    return accumulateImageWithWorkspace(allocator, image, normalized_mask, result, &workspace);
+}
+
+pub fn accumulateImageWithWorkspace(
+    allocator: std.mem.Allocator,
+    image: *const image_io.Image,
+    normalized_mask: []const f32,
+    result: *Accumulator,
+    workspace: *Workspace,
+) std.mem.Allocator.Error!void {
     const prof = profiler.scope("fuse.pyramid.accumulateImage");
     defer prof.end();
 
-    const mask_levels = try buildMaskGaussianPyramid(allocator, image.info.width, image.info.height, normalized_mask, result.levels.len);
-    defer deinitScalarLevels(allocator, mask_levels);
+    try buildMaskGaussianPyramidInto(allocator, normalized_mask, workspace.mask_levels);
+    try buildImageLaplacianPyramidInto(allocator, image, workspace.gaussian_levels, workspace.laplacian_levels, workspace.expanded_levels);
 
-    const image_levels = try buildImageLaplacianPyramid(allocator, image, result.levels.len);
-    defer deinitRgbLevels(allocator, image_levels);
-
-    for (result.levels, image_levels, mask_levels) |*dst, src_level, mask_level| {
+    for (result.levels, workspace.laplacian_levels, workspace.mask_levels) |*dst, src_level, mask_level| {
         const pixel_count = @as(usize, dst.width) * @as(usize, dst.height);
         for (0..pixel_count) |pixel_index| {
             const weight = mask_level.pixels[pixel_index];
@@ -195,6 +284,20 @@ pub fn buildMaskGaussianPyramid(
     return levels;
 }
 
+fn buildMaskGaussianPyramidInto(
+    allocator: std.mem.Allocator,
+    base_mask: []const f32,
+    levels: []ScalarLevel,
+) std.mem.Allocator.Error!void {
+    @memcpy(levels[0].pixels, base_mask);
+    var built: usize = 1;
+    while (built < levels.len) : (built += 1) {
+        const prev = levels[built - 1];
+        const next = levels[built];
+        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels);
+    }
+}
+
 pub fn buildImageLaplacianPyramid(
     allocator: std.mem.Allocator,
     image: *const image_io.Image,
@@ -229,32 +332,68 @@ pub fn buildImageLaplacianPyramid(
 
     var laps = try allocator.alloc(RgbLevel, level_count);
     errdefer allocator.free(laps);
-    for (gaussians, 0..) |level, i| {
-        laps[i] = .{
-            .width = level.width,
-            .height = level.height,
-            .pixels = try allocator.alloc(f32, level.pixels.len),
-        };
-        @memcpy(laps[i].pixels, level.pixels);
-    }
+    var lap_built: usize = 0;
     errdefer {
-        for (laps) |*level| level.deinit(allocator);
+        for (laps[0..lap_built]) |*level| level.deinit(allocator);
     }
 
     for (0..level_count - 1) |i| {
-        const next = gaussians[i + 1];
         const current = gaussians[i];
+        const next = gaussians[i + 1];
+        const lap_pixels = try allocator.alloc(f32, current.pixels.len);
+        errdefer allocator.free(lap_pixels);
         const expanded = try allocator.alloc(f32, current.pixels.len);
         defer allocator.free(expanded);
         try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded);
-        for (laps[i].pixels, expanded) |*dst, value| {
-            dst.* -= value;
+        for (lap_pixels, current.pixels, expanded) |*dst, base_value, expanded_value| {
+            dst.* = base_value - expanded_value;
         }
+        laps[i] = .{
+            .width = current.width,
+            .height = current.height,
+            .pixels = lap_pixels,
+        };
+        lap_built += 1;
     }
+
+    const last = gaussians[level_count - 1];
+    laps[level_count - 1] = .{
+        .width = last.width,
+        .height = last.height,
+        .pixels = try allocator.dupe(f32, last.pixels),
+    };
+    lap_built += 1;
 
     for (gaussians) |*level| level.deinit(allocator);
     allocator.free(gaussians);
     return laps;
+}
+
+fn buildImageLaplacianPyramidInto(
+    allocator: std.mem.Allocator,
+    image: *const image_io.Image,
+    gaussians: []RgbLevel,
+    laps: []RgbLevel,
+    expanded_levels: []RgbLevel,
+) std.mem.Allocator.Error!void {
+    fillRgbBase(image, gaussians[0].pixels);
+    var built: usize = 1;
+    while (built < gaussians.len) : (built += 1) {
+        const prev = gaussians[built - 1];
+        const next = gaussians[built];
+        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels);
+    }
+
+    for (0..gaussians.len - 1) |i| {
+        const current = gaussians[i];
+        const next = gaussians[i + 1];
+        const expanded = expanded_levels[i];
+        try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded.pixels);
+        for (laps[i].pixels, current.pixels, expanded.pixels) |*dst, base_value, expanded_value| {
+            dst.* = base_value - expanded_value;
+        }
+    }
+    @memcpy(laps[laps.len - 1].pixels, gaussians[gaussians.len - 1].pixels);
 }
 
 fn deinitScalarLevels(allocator: std.mem.Allocator, levels: []ScalarLevel) void {

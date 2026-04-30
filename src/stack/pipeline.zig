@@ -222,6 +222,8 @@ fn runPyramidStackFusion(
         for (cached_remapped.items) |*image| image.deinit(allocator);
         cached_remapped.deinit(allocator);
     }
+    var workspace: ?fuse.pyramid.Workspace = null;
+    defer if (workspace) |*value| value.deinit(allocator);
     var cache_images = false;
 
     for (active_indices.items, 0..) |image_index, active_i| {
@@ -242,6 +244,7 @@ fn runPyramidStackFusion(
             try norm_weight_sums.resize(allocator, count);
             @memset(norm_weight_sums.items, 0);
             pyramid_accumulator.* = try fuse.pyramid.Accumulator.init(allocator, remapped.info.width, remapped.info.height);
+            workspace = try fuse.pyramid.Workspace.init(allocator, remapped.info.width, remapped.info.height);
             cache_images = estimatedCacheBytes(remapped.info, active_indices.items.len) <= max_cached_pyramid_bytes;
             if (cfg.verbose > 0 and cache_images) {
                 std.debug.print("stack fuse: caching remapped images in memory for pyramid blend\n", .{});
@@ -265,7 +268,7 @@ fn runPyramidStackFusion(
             try computeWeightMapForRemapped(cfg, jobs, remapped, gray_buffer.items, weight_buffer.items);
             fuse.masks.applySupportInto(remapped, weight_buffer.items);
             fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            try fuse.pyramid.accumulateImage(allocator, remapped, gray_buffer.items, &pyramid_accumulator.*.?);
+            try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?);
         }
     } else {
         for (active_indices.items, 0..) |image_index, active_i| {
@@ -280,7 +283,7 @@ fn runPyramidStackFusion(
             try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items);
             fuse.masks.applySupportInto(&remapped, weight_buffer.items);
             fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            try fuse.pyramid.accumulateImage(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?);
+            try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?);
         }
     }
 }

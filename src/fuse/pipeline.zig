@@ -165,6 +165,8 @@ fn runPyramidPass(
         for (cached_weights.items) |weights| allocator.free(weights);
         cached_weights.deinit(allocator);
     }
+    var workspace: ?pyramid.Workspace = null;
+    defer if (workspace) |*value| value.deinit(allocator);
     var cache_images = false;
     var cache_weights = false;
 
@@ -184,6 +186,7 @@ fn runPyramidPass(
             try norm_weight_sums.resize(allocator, count);
             @memset(norm_weight_sums.items, 0);
             accumulator.* = try pyramid.Accumulator.init(allocator, image.info.width, image.info.height);
+            workspace = try pyramid.Workspace.init(allocator, image.info.width, image.info.height);
             cache_images = estimatedCacheBytes(image.info, input_count) <= max_cached_pyramid_bytes;
             cache_weights = cache_images and estimatedCacheBytes(image.info, input_count) + estimatedWeightCacheBytes(image.info.width, image.info.height, input_count) <= max_cached_pyramid_total_bytes;
             if (cfg.verbose > 0 and cache_images) {
@@ -219,7 +222,7 @@ fn runPyramidPass(
                 masks.applySupportInto(image, weight_buffer.items);
             }
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-            try pyramid.accumulateImage(allocator, image, gray_buffer.items, &accumulator.*.?);
+            try pyramid.accumulateImageWithWorkspace(allocator, image, gray_buffer.items, &accumulator.*.?, &workspace.?);
         }
     } else {
         for (cfg.input_files.items, 0..) |path, index| {
@@ -231,7 +234,7 @@ fn runPyramidPass(
             try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
             masks.applySupportInto(&image, weight_buffer.items);
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-            try pyramid.accumulateImage(allocator, &image, gray_buffer.items, &accumulator.*.?);
+            try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, &accumulator.*.?, &workspace.?);
         }
     }
 }
