@@ -347,6 +347,11 @@ fn remapU8Rows(
     row_start: u32,
     row_end: u32,
 ) void {
+    if (!cache.basic_rectilinear and !cache.has_translation) {
+        remapU8RowsNoTranslationLens(dst, src_pixels, width, height, channels, roi, cache, out_width, row_start, row_end);
+        return;
+    }
+
     const roi_left = @as(f64, @floatFromInt(roi.left));
     const roi_top = @as(f64, @floatFromInt(roi.top));
     const out_width_usize = @as(usize, out_width);
@@ -363,6 +368,64 @@ fn remapU8Rows(
     }
 }
 
+fn remapU8RowsNoTranslationLens(
+    dst: []u8,
+    src_pixels: []const u8,
+    width: u32,
+    height: u32,
+    channels: usize,
+    roi: Rect,
+    cache: optimize.InverseTransformCache,
+    out_width: u32,
+    row_start: u32,
+    row_end: u32,
+) void {
+    const prof = profiler.scope("remap.remapU8RowsNoTranslationLens");
+    defer prof.end();
+
+    const roi_left = @as(f64, @floatFromInt(roi.left));
+    const roi_top = @as(f64, @floatFromInt(roi.top));
+    const out_width_usize = @as(usize, out_width);
+    const pano_x_step_x = cache.world_to_local[0][0];
+    const pano_x_step_y = cache.world_to_local[1][0];
+    const pano_x_step_z = cache.world_to_local[2][0];
+    const constant_z = -cache.dest_focal;
+    const base_x = roi_left - cache.dest_center_x;
+
+    for (row_start..row_end) |y| {
+        const pano_y = (roi_top + @as(f64, @floatFromInt(y))) - cache.dest_center_y;
+        var local_x =
+            cache.world_to_local[0][0] * base_x +
+            cache.world_to_local[0][1] * pano_y +
+            cache.world_to_local[0][2] * constant_z;
+        var local_y =
+            cache.world_to_local[1][0] * base_x +
+            cache.world_to_local[1][1] * pano_y +
+            cache.world_to_local[1][2] * constant_z;
+        var local_z =
+            cache.world_to_local[2][0] * base_x +
+            cache.world_to_local[2][1] * pano_y +
+            cache.world_to_local[2][2] * constant_z;
+
+        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        for (0..out_width) |_| {
+            const denom = -local_z;
+            if (@abs(denom) < 1e-12) {
+                @memset(dst[dst_base .. dst_base + channels], 0);
+            } else {
+                const radial_x = cache.image_focal * (local_x / denom) + cache.center_shift_x;
+                const radial_y = cache.image_focal * (local_y / denom) + cache.center_shift_y;
+                const sample = undistortSourcePoint(cache, radial_x, radial_y);
+                samplePixelBilinearU8(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+            }
+            dst_base += channels;
+            local_x += pano_x_step_x;
+            local_y += pano_x_step_y;
+            local_z += pano_x_step_z;
+        }
+    }
+}
+
 fn remapU16Rows(
     dst: []u16,
     src_pixels: []const u16,
@@ -375,6 +438,11 @@ fn remapU16Rows(
     row_start: u32,
     row_end: u32,
 ) void {
+    if (!cache.basic_rectilinear and !cache.has_translation) {
+        remapU16RowsNoTranslationLens(dst, src_pixels, width, height, channels, roi, cache, out_width, row_start, row_end);
+        return;
+    }
+
     const roi_left = @as(f64, @floatFromInt(roi.left));
     const roi_top = @as(f64, @floatFromInt(roi.top));
     const out_width_usize = @as(usize, out_width);
@@ -387,6 +455,64 @@ fn remapU16Rows(
             samplePixelBilinearU16(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
             dst_base += channels;
             world_x += 1.0;
+        }
+    }
+}
+
+fn remapU16RowsNoTranslationLens(
+    dst: []u16,
+    src_pixels: []const u16,
+    width: u32,
+    height: u32,
+    channels: usize,
+    roi: Rect,
+    cache: optimize.InverseTransformCache,
+    out_width: u32,
+    row_start: u32,
+    row_end: u32,
+) void {
+    const prof = profiler.scope("remap.remapU16RowsNoTranslationLens");
+    defer prof.end();
+
+    const roi_left = @as(f64, @floatFromInt(roi.left));
+    const roi_top = @as(f64, @floatFromInt(roi.top));
+    const out_width_usize = @as(usize, out_width);
+    const pano_x_step_x = cache.world_to_local[0][0];
+    const pano_x_step_y = cache.world_to_local[1][0];
+    const pano_x_step_z = cache.world_to_local[2][0];
+    const constant_z = -cache.dest_focal;
+    const base_x = roi_left - cache.dest_center_x;
+
+    for (row_start..row_end) |y| {
+        const pano_y = (roi_top + @as(f64, @floatFromInt(y))) - cache.dest_center_y;
+        var local_x =
+            cache.world_to_local[0][0] * base_x +
+            cache.world_to_local[0][1] * pano_y +
+            cache.world_to_local[0][2] * constant_z;
+        var local_y =
+            cache.world_to_local[1][0] * base_x +
+            cache.world_to_local[1][1] * pano_y +
+            cache.world_to_local[1][2] * constant_z;
+        var local_z =
+            cache.world_to_local[2][0] * base_x +
+            cache.world_to_local[2][1] * pano_y +
+            cache.world_to_local[2][2] * constant_z;
+
+        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        for (0..out_width) |_| {
+            const denom = -local_z;
+            if (@abs(denom) < 1e-12) {
+                @memset(dst[dst_base .. dst_base + channels], 0);
+            } else {
+                const radial_x = cache.image_focal * (local_x / denom) + cache.center_shift_x;
+                const radial_y = cache.image_focal * (local_y / denom) + cache.center_shift_y;
+                const sample = undistortSourcePoint(cache, radial_x, radial_y);
+                samplePixelBilinearU16(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+            }
+            dst_base += channels;
+            local_x += pano_x_step_x;
+            local_y += pano_x_step_y;
+            local_z += pano_x_step_z;
         }
     }
 }
@@ -638,6 +764,39 @@ fn samplePixelBilinearU8(
             }
         },
     }
+}
+
+fn undistortSourcePoint(cache: optimize.InverseTransformCache, dx: f64, dy: f64) optimize.Point2 {
+    const q_radius = @sqrt(dx * dx + dy * dy);
+    if (q_radius < 1e-12) {
+        return .{
+            .x = cache.src_center_x + dx,
+            .y = cache.src_center_y + dy,
+        };
+    }
+
+    var radius = q_radius;
+    for (0..6) |_| {
+        const normalized_r2 = radius * radius * cache.radial_inv_norm;
+        const normalized_r4 = normalized_r2 * normalized_r2;
+        const factor = 1.0 + cache.radial_a * normalized_r2 + cache.radial_b * normalized_r4 + cache.radial_c * normalized_r4 * normalized_r2;
+        const factor_derivative =
+            cache.radial_a +
+            2.0 * cache.radial_b * normalized_r2 +
+            3.0 * cache.radial_c * normalized_r4;
+        const f = radius * factor - q_radius;
+        if (@abs(f) <= 1e-9) break;
+        const df = factor + 2.0 * radius * radius * cache.radial_inv_norm * factor_derivative;
+        if (@abs(df) < 1e-12) break;
+        radius -= f / df;
+        radius = @max(radius, 0.0);
+    }
+
+    const scale = radius / q_radius;
+    return .{
+        .x = cache.src_center_x + (dx * scale),
+        .y = cache.src_center_y + (dy * scale),
+    };
 }
 
 fn bilinearSampleU16(
