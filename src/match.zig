@@ -187,6 +187,25 @@ pub fn analyzePairPhaseCorrSeeded(
     return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, true);
 }
 
+pub fn analyzePairPhaseCorrSeededPrepared(
+    allocator: std.mem.Allocator,
+    opts: PairOptions,
+    pair: sequence.MatchPair,
+    left: *const gray.GrayImage,
+    left_full: *const gray.GrayImage,
+    left_seed: *const gray.GrayImage,
+    left_seed_extra_levels: u8,
+    right: *const gray.GrayImage,
+    right_full: *const gray.GrayImage,
+    right_seed: *const gray.GrayImage,
+    right_seed_extra_levels: u8,
+    workspace: *Workspace,
+) anyerror!PairMatches {
+    std.debug.assert(left_seed_extra_levels == right_seed_extra_levels);
+    const seed = try computeGlobalPhaseCorrelationSeedPrepared(left_seed, right_seed, left_seed_extra_levels, workspace);
+    return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, true);
+}
+
 pub fn analyzePairPhaseCorrLocked(
     allocator: std.mem.Allocator,
     opts: PairOptions,
@@ -199,6 +218,39 @@ pub fn analyzePairPhaseCorrLocked(
 ) anyerror!PairMatches {
     const seed = try computeGlobalPhaseCorrelationSeed(left, right, workspace);
     return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, false);
+}
+
+pub fn analyzePairPhaseCorrLockedPrepared(
+    allocator: std.mem.Allocator,
+    opts: PairOptions,
+    pair: sequence.MatchPair,
+    left: *const gray.GrayImage,
+    left_full: *const gray.GrayImage,
+    left_seed: *const gray.GrayImage,
+    left_seed_extra_levels: u8,
+    right: *const gray.GrayImage,
+    right_full: *const gray.GrayImage,
+    right_seed: *const gray.GrayImage,
+    right_seed_extra_levels: u8,
+    workspace: *Workspace,
+) anyerror!PairMatches {
+    std.debug.assert(left_seed_extra_levels == right_seed_extra_levels);
+    const seed = try computeGlobalPhaseCorrelationSeedPrepared(left_seed, right_seed, left_seed_extra_levels, workspace);
+    return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, false);
+}
+
+pub fn phaseSeedExtraLevels(width: u32, height: u32) u8 {
+    var extra_levels: u8 = 0;
+    var seed_width = width;
+    var seed_height = height;
+    while (extra_levels < max_phase_seed_extra_levels and
+        (seed_width > max_phase_seed_dimension or seed_height > max_phase_seed_dimension))
+    {
+        seed_width = (seed_width + 1) / 2;
+        seed_height = (seed_height + 1) / 2;
+        extra_levels += 1;
+    }
+    return extra_levels;
 }
 
 fn analyzePairWithSeed(
@@ -228,7 +280,10 @@ fn analyzePairWithSeed(
     const scale_factor_int = @as(u32, 1) << @intCast(opts.pyr_level);
     const full_res_search_width = @max(scale_factor_int, 1);
     const seeded_search_width = if (seed != null)
-        @max(@as(u32, 16), opts.search_width / 3)
+        if (use_seeded_fast_path)
+            @max(@as(u32, 16), opts.search_width / 3)
+        else
+            @max(@as(u32, 16), opts.search_width / 4)
     else
         opts.search_width;
     var coarse_control_point_count: usize = 0;
@@ -1761,16 +1816,7 @@ fn computeGlobalPhaseCorrelationSeed(
     const prof = profiler.scope("match.computeGlobalPhaseCorrelationSeed");
     defer prof.end();
 
-    var extra_levels: u8 = 0;
-    var seed_width = left.width;
-    var seed_height = left.height;
-    while (extra_levels < max_phase_seed_extra_levels and
-        (seed_width > max_phase_seed_dimension or seed_height > max_phase_seed_dimension))
-    {
-        seed_width = (seed_width + 1) / 2;
-        seed_height = (seed_height + 1) / 2;
-        extra_levels += 1;
-    }
+    const extra_levels = phaseSeedExtraLevels(left.width, left.height);
 
     var reduced_left_storage: ?gray.GrayImage = null;
     defer if (reduced_left_storage) |*image| image.deinit(workspace.allocator);
@@ -1822,6 +1868,102 @@ fn computeGlobalPhaseCorrelationSeed(
             const idx = @as(usize, y) * @as(usize, fft_w) + @as(usize, x);
             left_freq[idx].re = @as(f32, @floatCast(@as(f64, seed_left.pixel(x, y)) - left_mean));
             right_freq[idx].re = @as(f32, @floatCast(@as(f64, seed_right.pixel(x, y)) - right_mean));
+        }
+    }
+
+    plan.transformInPlace(left_freq, false);
+    plan.transformInPlace(right_freq, false);
+
+    for (left_freq, right_freq) |*lhs, rhs| {
+        const cross = rhs.mulConj(lhs.*);
+        const magnitude = @sqrt(cross.re * cross.re + cross.im * cross.im);
+        if (magnitude > 1e-12) {
+            lhs.* = .{
+                .re = cross.re / magnitude,
+                .im = cross.im / magnitude,
+            };
+        } else {
+            lhs.* = .{};
+        }
+    }
+    left_freq[0] = .{};
+    plan.transformInPlace(left_freq, true);
+
+    var best_idx: usize = 0;
+    var best_score: f32 = left_freq[0].re;
+    for (left_freq[1..], 1..) |value, idx| {
+        if (value.re > best_score) {
+            best_score = value.re;
+            best_idx = idx;
+        }
+    }
+
+    const peak_x: u32 = @intCast(best_idx % @as(usize, fft_w));
+    const peak_y: u32 = @intCast(best_idx / @as(usize, fft_w));
+    const half_w = fft_w / 2;
+    const half_h = fft_h / 2;
+    const scale_factor: i32 = @as(i32, 1) << @intCast(extra_levels);
+    const seed_dx = if (peak_x > half_w)
+        @as(i32, @intCast(peak_x)) - @as(i32, @intCast(fft_w))
+    else
+        @as(i32, @intCast(peak_x));
+    const seed_dy = if (peak_y > half_h)
+        @as(i32, @intCast(peak_y)) - @as(i32, @intCast(fft_h))
+    else
+        @as(i32, @intCast(peak_y));
+
+    return .{
+        .dx = seed_dx * scale_factor,
+        .dy = seed_dy * scale_factor,
+        .score = best_score,
+    };
+}
+
+fn computeGlobalPhaseCorrelationSeedPrepared(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    extra_levels: u8,
+    workspace: *Workspace,
+) !?GlobalSeed {
+    const prof = profiler.scope("match.computeGlobalPhaseCorrelationSeedPrepared");
+    defer prof.end();
+
+    const fft_w = fft_backend.preferredCorrelationComplexLength(left.width);
+    const fft_h = fft_backend.preferredCorrelationComplexLength(left.height);
+    const retained_w = @min(left.width, fft_w);
+    const retained_h = @min(left.height, fft_h);
+    if (retained_w == 0 or retained_h == 0) return null;
+
+    const fft_count = @as(usize, fft_w) * @as(usize, fft_h);
+    try workspace.ensureFftCapacity(fft_w, fft_h);
+    const left_freq = workspace.search_freq[0..fft_count];
+    const right_freq = workspace.kernel_freq[0..fft_count];
+    const plan = &workspace.fft_plan.?;
+
+    for (left_freq) |*value| value.* = .{};
+    for (right_freq) |*value| value.* = .{};
+
+    const retained_count = @as(f64, @floatFromInt(retained_w)) * @as(f64, @floatFromInt(retained_h));
+    var left_mean: f64 = 0.0;
+    var right_mean: f64 = 0.0;
+    var y: u32 = 0;
+    while (y < retained_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < retained_w) : (x += 1) {
+            left_mean += left.pixel(x, y);
+            right_mean += right.pixel(x, y);
+        }
+    }
+    left_mean /= retained_count;
+    right_mean /= retained_count;
+
+    y = 0;
+    while (y < retained_h) : (y += 1) {
+        var x: u32 = 0;
+        while (x < retained_w) : (x += 1) {
+            const idx = @as(usize, y) * @as(usize, fft_w) + @as(usize, x);
+            left_freq[idx].re = @as(f32, @floatCast(@as(f64, left.pixel(x, y)) - left_mean));
+            right_freq[idx].re = @as(f32, @floatCast(@as(f64, right.pixel(x, y)) - right_mean));
         }
     }
 

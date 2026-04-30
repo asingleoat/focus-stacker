@@ -356,14 +356,18 @@ fn analyzePairsPhaseCorrSeeded(
             var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, cfg.pyr_level);
             defer right_images.deinit(allocator);
 
-            const pair_result = try match.analyzePairPhaseCorrSeeded(
+            const pair_result = try match.analyzePairPhaseCorrSeededPrepared(
                 allocator,
                 options,
                 pair,
                 &left_images.reduced,
                 &left_images.full,
+                left_images.seedView(),
+                left_images.phase_seed_extra_levels,
                 &right_images.reduced,
                 &right_images.full,
+                right_images.seedView(),
+                right_images.phase_seed_extra_levels,
                 &workspace,
             );
             try results.append(allocator, pair_result);
@@ -416,14 +420,18 @@ fn analyzePairsPhaseCorrLocked(
             var right_images = try loadReducedAndFullGrayImages(allocator, images[pair.right_index].path, cfg.pyr_level);
             defer right_images.deinit(allocator);
 
-            const pair_result = try match.analyzePairPhaseCorrLocked(
+            const pair_result = try match.analyzePairPhaseCorrLockedPrepared(
                 allocator,
                 options,
                 pair,
                 &left_images.reduced,
                 &left_images.full,
+                left_images.seedView(),
+                left_images.phase_seed_extra_levels,
                 &right_images.reduced,
                 &right_images.full,
+                right_images.seedView(),
+                right_images.phase_seed_extra_levels,
                 &workspace,
             );
             try results.append(allocator, pair_result);
@@ -596,24 +604,32 @@ fn analyzePairDecodedOnDemand(
             &right_images.full,
             workspace,
         ),
-        .phasecorr_seeded => match.analyzePairPhaseCorrSeeded(
+        .phasecorr_seeded => match.analyzePairPhaseCorrSeededPrepared(
             state.allocator,
             state.options,
             pair,
             &left_images.reduced,
             &left_images.full,
+            left_images.seedView(),
+            left_images.phase_seed_extra_levels,
             &right_images.reduced,
             &right_images.full,
+            right_images.seedView(),
+            right_images.phase_seed_extra_levels,
             workspace,
         ),
-        .phasecorr_locked => match.analyzePairPhaseCorrLocked(
+        .phasecorr_locked => match.analyzePairPhaseCorrLockedPrepared(
             state.allocator,
             state.options,
             pair,
             &left_images.reduced,
             &left_images.full,
+            left_images.seedView(),
+            left_images.phase_seed_extra_levels,
             &right_images.reduced,
             &right_images.full,
+            right_images.seedView(),
+            right_images.phase_seed_extra_levels,
             workspace,
         ),
     };
@@ -764,10 +780,19 @@ fn loadReducedGrayImage(
 const GrayImagePair = struct {
     reduced: gray.GrayImage,
     full: gray.GrayImage,
+    phase_seed: ?gray.GrayImage = null,
+    phase_seed_extra_levels: u8 = 0,
 
     fn deinit(self: *GrayImagePair, allocator: std.mem.Allocator) void {
+        if (self.phase_seed) |*seed| {
+            seed.deinit(allocator);
+        }
         self.reduced.deinit(allocator);
         self.full.deinit(allocator);
+    }
+
+    fn seedView(self: *const GrayImagePair) *const gray.GrayImage {
+        return if (self.phase_seed) |*seed| seed else &self.reduced;
     }
 };
 
@@ -785,15 +810,24 @@ fn loadReducedAndFullGrayImages(
     var full = try gray.fromLoaded(allocator, &decoded);
     errdefer full.deinit(allocator);
 
-    const reduced = if (pyr_level == 0)
+    var reduced = if (pyr_level == 0)
         try full.clone(allocator)
     else
         try gray.fromLoadedReducedLikeHugin(allocator, &decoded, pyr_level);
     errdefer reduced.deinit(allocator);
 
+    const seed_extra_levels = match.phaseSeedExtraLevels(reduced.width, reduced.height);
+    const phase_seed = if (seed_extra_levels > 0)
+        try gray.reduceNTimes(allocator, &reduced, seed_extra_levels)
+    else
+        null;
+    errdefer if (phase_seed) |*seed| seed.deinit(allocator);
+
     return .{
         .reduced = reduced,
         .full = full,
+        .phase_seed = phase_seed,
+        .phase_seed_extra_levels = seed_extra_levels,
     };
 }
 
