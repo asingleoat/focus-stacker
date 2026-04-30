@@ -186,6 +186,20 @@ pub fn analyzePairPhaseCorrSeeded(
     return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, true);
 }
 
+pub fn analyzePairPhaseCorrLocked(
+    allocator: std.mem.Allocator,
+    opts: PairOptions,
+    pair: sequence.MatchPair,
+    left: *const gray.GrayImage,
+    left_full: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    right_full: *const gray.GrayImage,
+    workspace: *Workspace,
+) anyerror!PairMatches {
+    const seed = try computeGlobalPhaseCorrelationSeed(left, right, workspace);
+    return analyzePairWithSeed(allocator, opts, pair, left, left_full, right, right_full, workspace, seed, false);
+}
+
 fn analyzePairWithSeed(
     allocator: std.mem.Allocator,
     opts: PairOptions,
@@ -212,7 +226,7 @@ fn analyzePairWithSeed(
     const scale_factor = @as(f32, @floatFromInt(@as(u32, 1) << @intCast(opts.pyr_level)));
     const scale_factor_int = @as(u32, 1) << @intCast(opts.pyr_level);
     const full_res_search_width = @max(scale_factor_int, 1);
-    const seeded_search_width = if (use_seeded_fast_path)
+    const seeded_search_width = if (seed != null)
         @max(@as(u32, 16), opts.search_width / 3)
     else
         opts.search_width;
@@ -248,7 +262,10 @@ fn analyzePairWithSeed(
         for (candidates) |candidate| {
             candidates_considered += 1;
             const result = if (seed) |global_seed|
-                matchCandidateSeeded(left, right, candidate, global_seed, opts, seeded_search_width, workspace)
+                if (use_seeded_fast_path)
+                    matchCandidateSeeded(left, right, candidate, global_seed, opts, seeded_search_width, workspace)
+                else
+                    matchCandidateLocked(left, right, candidate, global_seed, opts, seeded_search_width, workspace)
             else
                 matchCandidate(left, right, candidate, opts, workspace);
             if (!passesCorrelationThreshold(result.score, opts.corr_threshold)) {
@@ -762,6 +779,36 @@ fn matchCandidateSeeded(
     return matchCandidate(left, right, candidate, opts, workspace);
 }
 
+fn matchCandidateLocked(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    candidate: features.InterestPoint,
+    seed: GlobalSeed,
+    opts: PairOptions,
+    seeded_search_width: u32,
+    workspace: *Workspace,
+) MatchResult {
+    const prof = profiler.scope("match.matchCandidateLocked");
+    defer prof.end();
+
+    const seeded_center_x = addSignedClamped(candidate.x, seed.dx, right.width);
+    const seeded_center_y = addSignedClamped(candidate.y, seed.dy, right.height);
+    const locked = matchAtCenterExact(
+        left,
+        right,
+        candidate.x,
+        candidate.y,
+        seeded_center_x,
+        seeded_center_y,
+        opts.template_size,
+        workspace,
+    );
+    if (passesCorrelationThreshold(locked.score, opts.corr_threshold)) {
+        return locked;
+    }
+    return matchCandidateSeeded(left, right, candidate, seed, opts, seeded_search_width, workspace);
+}
+
 fn addSignedClamped(base: u32, delta: i32, limit: u32) u32 {
     const value = @as(i64, @intCast(base)) + @as(i64, delta);
     const clamped = @max(@as(i64, 0), @min(@as(i64, @intCast(limit - 1)), value));
@@ -948,6 +995,93 @@ fn matchAroundCenter(
     }
 
     return .{ .score = final_score, .x = refined_x, .y = refined_y };
+}
+
+fn matchAtCenterExact(
+    left: *const gray.GrayImage,
+    right: *const gray.GrayImage,
+    left_x: u32,
+    left_y: u32,
+    right_center_x: u32,
+    right_center_y: u32,
+    template_size: u32,
+    workspace: *Workspace,
+) MatchResult {
+    const prof = profiler.scope("match.matchAtCenterExact");
+    defer prof.end();
+
+    const templ_half = @as(i32, @intCast(template_size / 2));
+    const templ_pos_x = @as(i32, @intCast(left_x));
+    const templ_pos_y = @as(i32, @intCast(left_y));
+
+    var tmpl_ul_x = templ_pos_x - templ_half;
+    var tmpl_ul_y = templ_pos_y - templ_half;
+    var tmpl_lr_x = templ_pos_x + templ_half + 1;
+    var tmpl_lr_y = templ_pos_y + templ_half + 1;
+    clipBounds(&tmpl_ul_x, &tmpl_lr_x, @as(i32, @intCast(left.width)));
+    clipBounds(&tmpl_ul_y, &tmpl_lr_y, @as(i32, @intCast(left.height)));
+    if (tmpl_ul_x >= tmpl_lr_x or tmpl_ul_y >= tmpl_lr_y) {
+        return .{};
+    }
+
+    const patch_w = @as(u32, @intCast(tmpl_lr_x - tmpl_ul_x));
+    const patch_h = @as(u32, @intCast(tmpl_lr_y - tmpl_ul_y));
+    var template_storage: [1024]f32 = undefined;
+    const template = buildTemplateStats(
+        left,
+        tmpl_ul_x,
+        tmpl_ul_y,
+        patch_w,
+        patch_h,
+        &template_storage,
+    ) orelse return .{};
+
+    const kul_x = tmpl_ul_x - templ_pos_x;
+    const kul_y = tmpl_ul_y - templ_pos_y;
+    const right_x0 = @as(i32, @intCast(right_center_x)) + kul_x;
+    const right_y0 = @as(i32, @intCast(right_center_y)) + kul_y;
+    if (right_x0 < 0 or right_y0 < 0 or
+        right_x0 + @as(i32, @intCast(template.width)) > @as(i32, @intCast(right.width)) or
+        right_y0 + @as(i32, @intCast(template.height)) > @as(i32, @intCast(right.height)))
+    {
+        return .{};
+    }
+
+    const search_w = template.width;
+    const search_h = template.height;
+    const integral_len = @as(usize, search_w + 1) * @as(usize, search_h + 1);
+    workspace.ensureIntegralCapacity(integral_len) catch return .{};
+    const integral = workspace.integral[0..integral_len];
+    const integral_sq = workspace.integral_sq[0..integral_len];
+    buildIntegralImages(right, right_x0, right_y0, search_w, search_h, integral, integral_sq);
+
+    const patch_count = @as(f64, @floatFromInt(template.width * template.height));
+    const normalization = @sqrt(template.variance);
+    const score = exactCorrelationScoreAt(
+        right,
+        right_x0,
+        right_y0,
+        search_w,
+        search_h,
+        -kul_x,
+        -kul_y,
+        kul_x,
+        kul_y,
+        template,
+        integral,
+        integral_sq,
+        patch_count,
+        normalization,
+    );
+    var result = MatchResult{
+        .score = score,
+        .x = @floatFromInt(right_center_x),
+        .y = @floatFromInt(right_center_y),
+    };
+    if (patch_w != template_size + 1 or patch_h != template_size + 1) {
+        result.score -= clipped_template_score_bias;
+    }
+    return result;
 }
 
 fn truncFloatToPixel(value: f64, limit: u32) u32 {

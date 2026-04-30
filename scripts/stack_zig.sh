@@ -110,7 +110,7 @@ usage: $0 [--threads N] [--pair-align METHOD] <images or manifests...>
 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
-  --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded
+  --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
 
 Environment overrides:
   ALIGN_THREADS
@@ -145,8 +145,8 @@ EOF
     if [[ -n "$threads" ]]; then
         [[ "$threads" =~ ^[1-9][0-9]*$ ]] || die "--threads must be a positive integer"
     fi
-    [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded)$ ]] || \
-        die "--pair-align must be one of: hugin-ncc, phasecorr-seeded"
+    [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded|phasecorr-locked)$ ]] || \
+        die "--pair-align must be one of: hugin-ncc, phasecorr-seeded, phasecorr-locked"
 
     [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] <images or manifests...>"
 

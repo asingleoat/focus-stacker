@@ -153,7 +153,7 @@ pub fn renderUsage(
         \\  -g gsize  Break image into a gsize x gsize grid (default: 5)
         \\  --pair-align method
         \\             Pair alignment implementation to use:
-        \\               hugin-ncc (default), phasecorr-seeded
+        \\               hugin-ncc (default), phasecorr-seeded, phasecorr-locked
         \\  --distortion      Try to load distortion data from the lens database
         \\  --use-given-order Use the image order as given on the command line
         \\  --align-to-first  Align all images to the first one
