@@ -144,15 +144,16 @@ pub fn reduceNTimes(
 
 fn convertU8(dst: []f32, image: *const image_io.Image, src: []const u8) void {
     const count = @as(usize, image.info.width) * @as(usize, image.info.height);
+    const stride = @as(usize, image.info.color_channels + image.info.extra_channels);
     switch (image.info.color_model) {
         .grayscale => {
-            for (dst, src[0..count]) |*out, value| {
-                out.* = @as(f32, @floatFromInt(value)) / 255.0;
+            for (0..count) |i| {
+                dst[i] = @as(f32, @floatFromInt(src[i * stride])) / 255.0;
             }
         },
         .rgb => {
             for (0..count) |i| {
-                const base = i * 3;
+                const base = i * stride;
                 const gray = rgbToGrayRoundedU8(src[base], src[base + 1], src[base + 2]);
                 dst[i] = @as(f32, @floatFromInt(gray)) / 255.0;
             }
@@ -162,15 +163,16 @@ fn convertU8(dst: []f32, image: *const image_io.Image, src: []const u8) void {
 
 fn convertU16(dst: []f32, image: *const image_io.Image, src: []const u16) void {
     const count = @as(usize, image.info.width) * @as(usize, image.info.height);
+    const stride = @as(usize, image.info.color_channels + image.info.extra_channels);
     switch (image.info.color_model) {
         .grayscale => {
-            for (dst, src[0..count]) |*out, value| {
-                out.* = @as(f32, @floatFromInt(value)) / 65535.0;
+            for (0..count) |i| {
+                dst[i] = @as(f32, @floatFromInt(src[i * stride])) / 65535.0;
             }
         },
         .rgb => {
             for (0..count) |i| {
-                const base = i * 3;
+                const base = i * stride;
                 const gray = rgbToGrayRoundedU16(src[base], src[base + 1], src[base + 2]);
                 dst[i] = @as(f32, @floatFromInt(gray)) / 65535.0;
             }
@@ -188,7 +190,7 @@ fn reduceAndConvert(
     const prof = profiler.scope("gray.reduceAndConvert");
     defer prof.end();
 
-    const channels = @as(usize, info.color_channels);
+    const channels = @as(usize, info.color_channels + info.extra_channels);
     var width = info.width;
     var height = info.height;
     var current_owned: ?[]T = null;
@@ -212,8 +214,8 @@ fn reduceAndConvert(
     errdefer allocator.free(out_pixels);
 
     switch (T) {
-        u8 => convertReducedU8(out_pixels, info.color_model, width, height, current),
-        u16 => convertReducedU16(out_pixels, info.color_model, width, height, current),
+        u8 => convertReducedU8(out_pixels, info.color_model, width, height, channels, current),
+        u16 => convertReducedU16(out_pixels, info.color_model, width, height, channels, current),
         else => unreachable,
     }
 
@@ -440,17 +442,17 @@ fn reducedOutputValue(comptime T: type, channels: usize, numerator: i64) i64 {
     return @as(i64, @intFromFloat(@min(max_value, rounded)));
 }
 
-fn convertReducedU8(dst: []f32, color_model: image_io.ColorModel, width: u32, height: u32, src: []const u8) void {
+fn convertReducedU8(dst: []f32, color_model: image_io.ColorModel, width: u32, height: u32, stride: usize, src: []const u8) void {
     const count = @as(usize, width) * @as(usize, height);
     switch (color_model) {
         .grayscale => {
-            for (dst, src[0..count]) |*out, value| {
-                out.* = @as(f32, @floatFromInt(value)) / 255.0;
+            for (0..count) |i| {
+                dst[i] = @as(f32, @floatFromInt(src[i * stride])) / 255.0;
             }
         },
         .rgb => {
             for (0..count) |i| {
-                const base = i * 3;
+                const base = i * stride;
                 const gray = rgbToGrayRoundedU8(src[base], src[base + 1], src[base + 2]);
                 dst[i] = @as(f32, @floatFromInt(gray)) / 255.0;
             }
@@ -458,17 +460,17 @@ fn convertReducedU8(dst: []f32, color_model: image_io.ColorModel, width: u32, he
     }
 }
 
-fn convertReducedU16(dst: []f32, color_model: image_io.ColorModel, width: u32, height: u32, src: []const u16) void {
+fn convertReducedU16(dst: []f32, color_model: image_io.ColorModel, width: u32, height: u32, stride: usize, src: []const u16) void {
     const count = @as(usize, width) * @as(usize, height);
     switch (color_model) {
         .grayscale => {
-            for (dst, src[0..count]) |*out, value| {
-                out.* = @as(f32, @floatFromInt(value)) / 65535.0;
+            for (0..count) |i| {
+                dst[i] = @as(f32, @floatFromInt(src[i * stride])) / 65535.0;
             }
         },
         .rgb => {
             for (0..count) |i| {
-                const base = i * 3;
+                const base = i * stride;
                 const gray = rgbToGrayRoundedU16(src[base], src[base + 1], src[base + 2]);
                 dst[i] = @as(f32, @floatFromInt(gray)) / 65535.0;
             }

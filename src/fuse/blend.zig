@@ -81,7 +81,8 @@ fn updateRange(
     const prof = profiler.scope("fuse.blend.updateRange");
     defer prof.end();
 
-    const pixel_channels = @as(usize, image.info.color_channels + image.info.extra_channels);
+    const src_pixel_channels = @as(usize, image.info.color_channels + image.info.extra_channels);
+    const dst_pixel_channels = @as(usize, output.info.color_channels + output.info.extra_channels);
     const width = @as(usize, image.info.width);
 
     switch (image.pixels) {
@@ -91,12 +92,12 @@ fn updateRange(
                     const row_base = @as(usize, row) * width;
                     for (0..width) |x| {
                         const pixel_index = row_base + x;
-                        const weight = weights.pixels[pixel_index];
+                        const weight = effectiveWeightU8(image.info, src, weights.pixels[pixel_index], pixel_index, src_pixel_channels);
                         if (weight <= best_weights[pixel_index]) continue;
                         best_weights[pixel_index] = weight;
-                        const src_base = pixel_index * pixel_channels;
-                        const dst_base = pixel_index * pixel_channels;
-                        @memcpy(dst[dst_base .. dst_base + pixel_channels], src[src_base .. src_base + pixel_channels]);
+                        const src_base = pixel_index * src_pixel_channels;
+                        const dst_base = pixel_index * dst_pixel_channels;
+                        @memcpy(dst[dst_base .. dst_base + dst_pixel_channels], src[src_base .. src_base + dst_pixel_channels]);
                     }
                 }
             },
@@ -108,18 +109,44 @@ fn updateRange(
                     const row_base = @as(usize, row) * width;
                     for (0..width) |x| {
                         const pixel_index = row_base + x;
-                        const weight = weights.pixels[pixel_index];
+                        const weight = effectiveWeightU16(image.info, src, weights.pixels[pixel_index], pixel_index, src_pixel_channels);
                         if (weight <= best_weights[pixel_index]) continue;
                         best_weights[pixel_index] = weight;
-                        const src_base = pixel_index * pixel_channels;
-                        const dst_base = pixel_index * pixel_channels;
-                        @memcpy(dst[dst_base .. dst_base + pixel_channels], src[src_base .. src_base + pixel_channels]);
+                        const src_base = pixel_index * src_pixel_channels;
+                        const dst_base = pixel_index * dst_pixel_channels;
+                        @memcpy(dst[dst_base .. dst_base + dst_pixel_channels], src[src_base .. src_base + dst_pixel_channels]);
                     }
                 }
             },
             else => unreachable,
         },
     }
+}
+
+fn effectiveWeightU8(
+    info: image_io.ImageInfo,
+    src: []const u8,
+    base_weight: f32,
+    pixel_index: usize,
+    pixel_channels: usize,
+) f32 {
+    if (info.extra_channels == 0) return base_weight;
+    const alpha_index = pixel_index * pixel_channels + @as(usize, info.color_channels);
+    const support = @as(f32, @floatFromInt(src[alpha_index])) / 255.0;
+    return base_weight * support;
+}
+
+fn effectiveWeightU16(
+    info: image_io.ImageInfo,
+    src: []const u16,
+    base_weight: f32,
+    pixel_index: usize,
+    pixel_channels: usize,
+) f32 {
+    if (info.extra_channels == 0) return base_weight;
+    const alpha_index = pixel_index * pixel_channels + @as(usize, info.color_channels);
+    const support = @as(f32, @floatFromInt(src[alpha_index])) / 65535.0;
+    return base_weight * support;
 }
 
 test "winner update prefers higher weight" {
@@ -155,4 +182,56 @@ test "winner update prefers higher weight" {
 
     try updateWinners(allocator, &image, &weights, best, &output, 1);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6 }, output.pixels.u8);
+}
+
+test "winner update discounts low-support alpha" {
+    const allocator = std.testing.allocator;
+    var output = try allocateOutput(allocator, .{
+        .format = .tiff,
+        .width = 1,
+        .height = 1,
+        .color_model = .rgb,
+        .sample_type = .u8,
+        .color_channels = 3,
+        .extra_channels = 0,
+        .exposure_value = null,
+    });
+    defer output.deinit(allocator);
+
+    const best = try allocator.alloc(f32, 1);
+    defer allocator.free(best);
+    @memset(best, -std.math.inf(f32));
+
+    var weights = contrast.WeightMap{
+        .width = 1,
+        .height = 1,
+        .pixels = try allocator.dupe(f32, &[_]f32{1.0}),
+    };
+    defer weights.deinit(allocator);
+
+    var low_support = image_io.Image{
+        .info = .{
+            .format = .tiff,
+            .width = 1,
+            .height = 1,
+            .color_model = .rgb,
+            .sample_type = .u8,
+            .color_channels = 3,
+            .extra_channels = 1,
+            .exposure_value = null,
+        },
+        .pixels = .{ .u8 = try allocator.dupe(u8, &[_]u8{ 200, 10, 10, 32 }) },
+    };
+    defer low_support.deinit(allocator);
+
+    var full_support = image_io.Image{
+        .info = low_support.info,
+        .pixels = .{ .u8 = try allocator.dupe(u8, &[_]u8{ 10, 200, 10, 255 }) },
+    };
+    defer full_support.deinit(allocator);
+
+    try updateWinners(allocator, &low_support, &weights, best, &output, 1);
+    weights.pixels[0] = 0.2;
+    try updateWinners(allocator, &full_support, &weights, best, &output, 1);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 10, 200, 10 }, output.pixels.u8);
 }

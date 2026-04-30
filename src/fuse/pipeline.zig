@@ -34,7 +34,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
 
         if (expected == null) {
             expected = io.stackInfoFromImage(&image);
-            output = try blend.allocateOutput(allocator, image.info);
+            output = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
             const count = @as(usize, image.info.width) * @as(usize, image.info.height);
             try best_weights.resize(allocator, count);
             @memset(best_weights.items, -std.math.inf(f32));
@@ -58,6 +58,12 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
         std.debug.print("focus fuse: writing {s}\n", .{cfg.output_path.?});
     }
     try image_io.writeTiff(cfg.output_path.?, &output.?);
+}
+
+fn fusedOutputInfo(info: image_io.ImageInfo) image_io.ImageInfo {
+    var out = info;
+    out.extra_channels = 0;
+    return out;
 }
 
 pub fn resolveJobs(requested: ?u32) usize {

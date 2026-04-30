@@ -168,6 +168,7 @@ fn expectImagesClose(allocator: std.mem.Allocator, expected_path: []const u8, ac
     try std.testing.expectEqual(expected.info.color_model, actual.info.color_model);
     try std.testing.expectEqual(expected.info.sample_type, actual.info.sample_type);
     try std.testing.expectEqual(expected.info.color_channels, actual.info.color_channels);
+    try std.testing.expect(actual.info.extra_channels >= expected.info.extra_channels);
 
     switch (expected.pixels) {
         .u8 => |expected_pixels| {
@@ -175,14 +176,32 @@ fn expectImagesClose(allocator: std.mem.Allocator, expected_path: []const u8, ac
                 .u8 => |pixels| pixels,
                 .u16 => unreachable,
             };
-            try expectNormalizedRmseU8(expected_pixels, actual_pixels, max_normalized_rmse);
+            try expectNormalizedRmseU8(
+                expected_pixels,
+                actual_pixels,
+                expected.info.width,
+                expected.info.height,
+                expected.info.color_channels,
+                expected.info.color_channels + expected.info.extra_channels,
+                actual.info.color_channels + actual.info.extra_channels,
+                max_normalized_rmse,
+            );
         },
         .u16 => |expected_pixels| {
             const actual_pixels = switch (actual.pixels) {
                 .u8 => unreachable,
                 .u16 => |pixels| pixels,
             };
-            try expectNormalizedRmseU16(expected_pixels, actual_pixels, max_normalized_rmse);
+            try expectNormalizedRmseU16(
+                expected_pixels,
+                actual_pixels,
+                expected.info.width,
+                expected.info.height,
+                expected.info.color_channels,
+                expected.info.color_channels + expected.info.extra_channels,
+                actual.info.color_channels + actual.info.extra_channels,
+                max_normalized_rmse,
+            );
         },
     }
 }
@@ -199,26 +218,70 @@ fn expectNear(expected: f64, actual: f64, tolerance: f64) !void {
     try std.testing.expectApproxEqAbs(expected, actual, tolerance);
 }
 
-fn expectNormalizedRmseU8(expected: []const u8, actual: []const u8, max_normalized_rmse: f64) !void {
-    try std.testing.expectEqual(expected.len, actual.len);
+fn expectNormalizedRmseU8(
+    expected: []const u8,
+    actual: []const u8,
+    width: u32,
+    height: u32,
+    compare_channels: u8,
+    expected_stride: u8,
+    actual_stride: u8,
+    max_normalized_rmse: f64,
+) !void {
+    const pixel_count = @as(usize, width) * @as(usize, height);
+    try std.testing.expectEqual(pixel_count * @as(usize, expected_stride), expected.len);
+    try std.testing.expectEqual(pixel_count * @as(usize, actual_stride), actual.len);
     var sum_sq: f64 = 0.0;
-    for (expected, actual) |expected_value, actual_value| {
-        const delta = @as(f64, @floatFromInt(@as(i32, expected_value) - @as(i32, actual_value)));
-        sum_sq += delta * delta;
+    var compared_samples: usize = 0;
+    for (0..pixel_count) |pixel_index| {
+        const expected_base = pixel_index * @as(usize, expected_stride);
+        const actual_base = pixel_index * @as(usize, actual_stride);
+        if (expected_stride > compare_channels and expected[expected_base + compare_channels] != 255) continue;
+        if (actual_stride > compare_channels and actual[actual_base + compare_channels] != 255) continue;
+        for (0..compare_channels) |channel| {
+            const expected_value = expected[expected_base + channel];
+            const actual_value = actual[actual_base + channel];
+            const delta = @as(f64, @floatFromInt(@as(i32, expected_value) - @as(i32, actual_value)));
+            sum_sq += delta * delta;
+            compared_samples += 1;
+        }
     }
-    const rmse = @sqrt(sum_sq / @as(f64, @floatFromInt(expected.len)));
+    try std.testing.expect(compared_samples > 0);
+    const rmse = @sqrt(sum_sq / @as(f64, @floatFromInt(compared_samples)));
     const normalized = rmse / 255.0;
     try std.testing.expect(normalized <= max_normalized_rmse);
 }
 
-fn expectNormalizedRmseU16(expected: []const u16, actual: []const u16, max_normalized_rmse: f64) !void {
-    try std.testing.expectEqual(expected.len, actual.len);
+fn expectNormalizedRmseU16(
+    expected: []const u16,
+    actual: []const u16,
+    width: u32,
+    height: u32,
+    compare_channels: u8,
+    expected_stride: u8,
+    actual_stride: u8,
+    max_normalized_rmse: f64,
+) !void {
+    const pixel_count = @as(usize, width) * @as(usize, height);
+    try std.testing.expectEqual(pixel_count * @as(usize, expected_stride), expected.len);
+    try std.testing.expectEqual(pixel_count * @as(usize, actual_stride), actual.len);
     var sum_sq: f64 = 0.0;
-    for (expected, actual) |expected_value, actual_value| {
-        const delta = @as(f64, @floatFromInt(@as(i64, expected_value) - @as(i64, actual_value)));
-        sum_sq += delta * delta;
+    var compared_samples: usize = 0;
+    for (0..pixel_count) |pixel_index| {
+        const expected_base = pixel_index * @as(usize, expected_stride);
+        const actual_base = pixel_index * @as(usize, actual_stride);
+        if (expected_stride > compare_channels and expected[expected_base + compare_channels] != 65535) continue;
+        if (actual_stride > compare_channels and actual[actual_base + compare_channels] != 65535) continue;
+        for (0..compare_channels) |channel| {
+            const expected_value = expected[expected_base + channel];
+            const actual_value = actual[actual_base + channel];
+            const delta = @as(f64, @floatFromInt(@as(i64, expected_value) - @as(i64, actual_value)));
+            sum_sq += delta * delta;
+            compared_samples += 1;
+        }
     }
-    const rmse = @sqrt(sum_sq / @as(f64, @floatFromInt(expected.len)));
+    try std.testing.expect(compared_samples > 0);
+    const rmse = @sqrt(sum_sq / @as(f64, @floatFromInt(compared_samples)));
     const normalized = rmse / 65535.0;
     try std.testing.expect(normalized <= max_normalized_rmse);
 }

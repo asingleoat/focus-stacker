@@ -211,7 +211,7 @@ fn imageInfoForRect(src: *const image_io.Image, out_rect: Rect) image_io.ImageIn
         .color_model = src.info.color_model,
         .sample_type = src.info.sample_type,
         .color_channels = src.info.color_channels,
-        .extra_channels = 0,
+        .extra_channels = 1,
         .exposure_value = src.info.exposure_value,
         .exif_focal_length_mm = src.info.exif_focal_length_mm,
         .exif_focal_length_35mm = src.info.exif_focal_length_35mm,
@@ -227,18 +227,19 @@ fn remapU8(allocator: std.mem.Allocator, dst: []u8, src: *const image_io.Image, 
     const height = src.info.height;
     const out_width = @as(u32, @intCast(roi.right - roi.left));
     const out_height = @as(u32, @intCast(roi.bottom - roi.top));
-    const channels = @as(usize, src.info.color_channels);
+    const src_channels = @as(usize, src.info.color_channels);
+    const dst_channels = src_channels + 1;
     const src_pixels = src.pixels.u8;
     const cache = optimize.initInverseTransformCache(pose, width, height);
 
     if (jobs <= 1 or out_height <= 32) {
-        remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        remapU8Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, 0, out_height);
         return;
     }
 
     const worker_count = @min(jobs, @as(usize, out_height));
     if (worker_count <= 1) {
-        remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        remapU8Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, 0, out_height);
         return;
     }
 
@@ -260,7 +261,8 @@ fn remapU8(allocator: std.mem.Allocator, dst: []u8, src: *const image_io.Image, 
             src_pixels,
             width,
             height,
-            channels,
+            src_channels,
+            dst_channels,
             roi,
             cache,
             out_width,
@@ -268,7 +270,7 @@ fn remapU8(allocator: std.mem.Allocator, dst: []u8, src: *const image_io.Image, 
         });
     }
 
-    remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, ranges[0].start, ranges[0].end);
+    remapU8Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, ranges[0].start, ranges[0].end);
 
     for (threads) |thread| {
         thread.join();
@@ -283,18 +285,19 @@ fn remapU16(allocator: std.mem.Allocator, dst: []u16, src: *const image_io.Image
     const height = src.info.height;
     const out_width = @as(u32, @intCast(roi.right - roi.left));
     const out_height = @as(u32, @intCast(roi.bottom - roi.top));
-    const channels = @as(usize, src.info.color_channels);
+    const src_channels = @as(usize, src.info.color_channels);
+    const dst_channels = src_channels + 1;
     const src_pixels = src.pixels.u16;
     const cache = optimize.initInverseTransformCache(pose, width, height);
 
     if (jobs <= 1 or out_height <= 32) {
-        remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        remapU16Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, 0, out_height);
         return;
     }
 
     const worker_count = @min(jobs, @as(usize, out_height));
     if (worker_count <= 1) {
-        remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, 0, out_height);
+        remapU16Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, 0, out_height);
         return;
     }
 
@@ -316,7 +319,8 @@ fn remapU16(allocator: std.mem.Allocator, dst: []u16, src: *const image_io.Image
             src_pixels,
             width,
             height,
-            channels,
+            src_channels,
+            dst_channels,
             roi,
             cache,
             out_width,
@@ -324,7 +328,7 @@ fn remapU16(allocator: std.mem.Allocator, dst: []u16, src: *const image_io.Image
         });
     }
 
-    remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, ranges[0].start, ranges[0].end);
+    remapU16Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, ranges[0].start, ranges[0].end);
 
     for (threads) |thread| {
         thread.join();
@@ -341,7 +345,8 @@ fn remapU8Rows(
     src_pixels: []const u8,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     roi: Rect,
     cache: optimize.InverseTransformCache,
     out_width: u32,
@@ -349,7 +354,7 @@ fn remapU8Rows(
     row_end: u32,
 ) void {
     if (!cache.basic_rectilinear and !cache.has_translation) {
-        remapU8RowsNoTranslationLens(dst, src_pixels, width, height, channels, roi, cache, out_width, row_start, row_end);
+        remapU8RowsNoTranslationLens(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, row_start, row_end);
         return;
     }
 
@@ -359,11 +364,11 @@ fn remapU8Rows(
     for (row_start..row_end) |y| {
         const world_y = roi_top + @as(f64, @floatFromInt(y));
         var world_x = roi_left;
-        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        var dst_base = (@as(usize, y) * out_width_usize) * dst_channels;
         for (0..out_width) |_| {
             const sample = optimize.inverseTransformPointCached(cache, world_x, world_y);
-            samplePixelBilinearU8(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
-            dst_base += channels;
+            samplePixelBilinearU8(dst[dst_base .. dst_base + dst_channels], src_pixels, width, height, src_channels, dst_channels, sample.x, sample.y);
+            dst_base += dst_channels;
             world_x += 1.0;
         }
     }
@@ -374,7 +379,8 @@ fn remapU8RowsNoTranslationLens(
     src_pixels: []const u8,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     roi: Rect,
     cache: optimize.InverseTransformCache,
     out_width: u32,
@@ -408,18 +414,18 @@ fn remapU8RowsNoTranslationLens(
             cache.world_to_local[2][1] * pano_y +
             cache.world_to_local[2][2] * constant_z;
 
-        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        var dst_base = (@as(usize, y) * out_width_usize) * dst_channels;
         for (0..out_width) |_| {
             const denom = -local_z;
             if (@abs(denom) < 1e-12) {
-                @memset(dst[dst_base .. dst_base + channels], 0);
+                @memset(dst[dst_base .. dst_base + dst_channels], 0);
             } else {
                 const radial_x = cache.image_focal * (local_x / denom) + cache.center_shift_x;
                 const radial_y = cache.image_focal * (local_y / denom) + cache.center_shift_y;
                 const sample = undistortSourcePoint(cache, radial_x, radial_y);
-                samplePixelBilinearU8(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+                samplePixelBilinearU8(dst[dst_base .. dst_base + dst_channels], src_pixels, width, height, src_channels, dst_channels, sample.x, sample.y);
             }
-            dst_base += channels;
+            dst_base += dst_channels;
             local_x += pano_x_step_x;
             local_y += pano_x_step_y;
             local_z += pano_x_step_z;
@@ -432,7 +438,8 @@ fn remapU16Rows(
     src_pixels: []const u16,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     roi: Rect,
     cache: optimize.InverseTransformCache,
     out_width: u32,
@@ -440,7 +447,7 @@ fn remapU16Rows(
     row_end: u32,
 ) void {
     if (!cache.basic_rectilinear and !cache.has_translation) {
-        remapU16RowsNoTranslationLens(dst, src_pixels, width, height, channels, roi, cache, out_width, row_start, row_end);
+        remapU16RowsNoTranslationLens(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, row_start, row_end);
         return;
     }
 
@@ -450,11 +457,11 @@ fn remapU16Rows(
     for (row_start..row_end) |y| {
         const world_y = roi_top + @as(f64, @floatFromInt(y));
         var world_x = roi_left;
-        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        var dst_base = (@as(usize, y) * out_width_usize) * dst_channels;
         for (0..out_width) |_| {
             const sample = optimize.inverseTransformPointCached(cache, world_x, world_y);
-            samplePixelBilinearU16(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
-            dst_base += channels;
+            samplePixelBilinearU16(dst[dst_base .. dst_base + dst_channels], src_pixels, width, height, src_channels, dst_channels, sample.x, sample.y);
+            dst_base += dst_channels;
             world_x += 1.0;
         }
     }
@@ -465,7 +472,8 @@ fn remapU16RowsNoTranslationLens(
     src_pixels: []const u16,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     roi: Rect,
     cache: optimize.InverseTransformCache,
     out_width: u32,
@@ -499,18 +507,18 @@ fn remapU16RowsNoTranslationLens(
             cache.world_to_local[2][1] * pano_y +
             cache.world_to_local[2][2] * constant_z;
 
-        var dst_base = (@as(usize, y) * out_width_usize) * channels;
+        var dst_base = (@as(usize, y) * out_width_usize) * dst_channels;
         for (0..out_width) |_| {
             const denom = -local_z;
             if (@abs(denom) < 1e-12) {
-                @memset(dst[dst_base .. dst_base + channels], 0);
+                @memset(dst[dst_base .. dst_base + dst_channels], 0);
             } else {
                 const radial_x = cache.image_focal * (local_x / denom) + cache.center_shift_x;
                 const radial_y = cache.image_focal * (local_y / denom) + cache.center_shift_y;
                 const sample = undistortSourcePoint(cache, radial_x, radial_y);
-                samplePixelBilinearU16(dst[dst_base .. dst_base + channels], src_pixels, width, height, channels, sample.x, sample.y);
+                samplePixelBilinearU16(dst[dst_base .. dst_base + dst_channels], src_pixels, width, height, src_channels, dst_channels, sample.x, sample.y);
             }
-            dst_base += channels;
+            dst_base += dst_channels;
             local_x += pano_x_step_x;
             local_y += pano_x_step_y;
             local_z += pano_x_step_z;
@@ -523,13 +531,14 @@ fn remapU8RowsWorker(
     src_pixels: []const u8,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     roi: Rect,
     cache: optimize.InverseTransformCache,
     out_width: u32,
     range: RemapRowRange,
 ) void {
-    remapU8Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, range.start, range.end);
+    remapU8Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, range.start, range.end);
 }
 
 fn remapU16RowsWorker(
@@ -537,13 +546,14 @@ fn remapU16RowsWorker(
     src_pixels: []const u16,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     roi: Rect,
     cache: optimize.InverseTransformCache,
     out_width: u32,
     range: RemapRowRange,
 ) void {
-    remapU16Rows(dst, src_pixels, width, height, channels, roi, cache, out_width, range.start, range.end);
+    remapU16Rows(dst, src_pixels, width, height, src_channels, dst_channels, roi, cache, out_width, range.start, range.end);
 }
 
 pub const Rect = struct {
@@ -683,56 +693,29 @@ fn lineIntersection(p1: Vec2, p2: Vec2, q1: Vec2, q2: Vec2) Vec2 {
     };
 }
 
-fn bilinearSampleU8(
-    pixels: []const u8,
-    width: u32,
-    height: u32,
-    channels: usize,
-    x: f64,
-    y: f64,
-    channel: usize,
-) u8 {
-    if (x < 0 or y < 0 or x > @as(f64, @floatFromInt(width - 1)) or y > @as(f64, @floatFromInt(height - 1))) {
-        return 0;
-    }
-    const x0 = @as(u32, @intFromFloat(@floor(x)));
-    const y0 = @as(u32, @intFromFloat(@floor(y)));
-    const x1 = @min(x0 + 1, width - 1);
-    const y1 = @min(y0 + 1, height - 1);
-    const fx = x - @as(f64, @floatFromInt(x0));
-    const fy = y - @as(f64, @floatFromInt(y0));
-
-    const p00 = sampleU8(pixels, width, channels, x0, y0, channel);
-    const p10 = sampleU8(pixels, width, channels, x1, y0, channel);
-    const p01 = sampleU8(pixels, width, channels, x0, y1, channel);
-    const p11 = sampleU8(pixels, width, channels, x1, y1, channel);
-
-    const top = lerp(@floatFromInt(p00), @floatFromInt(p10), fx);
-    const bottom = lerp(@floatFromInt(p01), @floatFromInt(p11), fx);
-    return @as(u8, @intFromFloat(@round(lerp(top, bottom, fy))));
-}
-
 fn samplePixelBilinearU8(
     dst: []u8,
     pixels: []const u8,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     x: f64,
     y: f64,
 ) void {
     const prof = profiler.scope("remap.samplePixelBilinearU8");
     defer prof.end();
 
-    if (x < 0 or y < 0 or x > @as(f64, @floatFromInt(width - 1)) or y > @as(f64, @floatFromInt(height - 1))) {
-        @memset(dst[0..channels], 0);
+    const support = bilinearSupport(width, height, x, y);
+    if (support <= 0) {
+        @memset(dst[0..dst_channels], 0);
         return;
     }
 
-    const x0 = @as(u32, @intFromFloat(@floor(x)));
-    const y0 = @as(u32, @intFromFloat(@floor(y)));
-    const x1 = @min(x0 + 1, width - 1);
-    const y1 = @min(y0 + 1, height - 1);
+    const x0 = @as(i32, @intFromFloat(@floor(x)));
+    const y0 = @as(i32, @intFromFloat(@floor(y)));
+    const x1 = x0 + 1;
+    const y1 = y0 + 1;
     const fx = x - @as(f64, @floatFromInt(x0));
     const fy = y - @as(f64, @floatFromInt(y0));
     const one_minus_fx = 1.0 - fx;
@@ -742,28 +725,11 @@ fn samplePixelBilinearU8(
     const w01 = one_minus_fx * fy;
     const w11 = fx * fy;
 
-    const width_usize = @as(usize, width);
-    const x0_off = @as(usize, x0) * channels;
-    const x1_off = @as(usize, x1) * channels;
-    const row0 = @as(usize, y0) * width_usize * channels;
-    const row1 = @as(usize, y1) * width_usize * channels;
-    const p00 = pixels[row0 + x0_off ..];
-    const p10 = pixels[row0 + x1_off ..];
-    const p01 = pixels[row1 + x0_off ..];
-    const p11 = pixels[row1 + x1_off ..];
-
-    switch (channels) {
-        1 => dst[0] = bilinearChannelU8(p00[0], p10[0], p01[0], p11[0], w00, w10, w01, w11),
-        3 => {
-            inline for (0..3) |channel| {
-                dst[channel] = bilinearChannelU8(p00[channel], p10[channel], p01[channel], p11[channel], w00, w10, w01, w11);
-            }
-        },
-        else => {
-            for (0..channels) |channel| {
-                dst[channel] = bilinearChannelU8(p00[channel], p10[channel], p01[channel], p11[channel], w00, w10, w01, w11);
-            }
-        },
+    for (0..src_channels) |channel| {
+        dst[channel] = bilinearChannelU8Soft(pixels, width, height, src_channels, x0, y0, x1, y1, channel, w00, w10, w01, w11, support);
+    }
+    if (dst_channels > src_channels) {
+        dst[src_channels] = @as(u8, @intFromFloat(@round(support * 255.0)));
     }
 }
 
@@ -800,56 +766,29 @@ fn undistortSourcePoint(cache: optimize.InverseTransformCache, dx: f64, dy: f64)
     };
 }
 
-fn bilinearSampleU16(
-    pixels: []const u16,
-    width: u32,
-    height: u32,
-    channels: usize,
-    x: f64,
-    y: f64,
-    channel: usize,
-) u16 {
-    if (x < 0 or y < 0 or x > @as(f64, @floatFromInt(width - 1)) or y > @as(f64, @floatFromInt(height - 1))) {
-        return 0;
-    }
-    const x0 = @as(u32, @intFromFloat(@floor(x)));
-    const y0 = @as(u32, @intFromFloat(@floor(y)));
-    const x1 = @min(x0 + 1, width - 1);
-    const y1 = @min(y0 + 1, height - 1);
-    const fx = x - @as(f64, @floatFromInt(x0));
-    const fy = y - @as(f64, @floatFromInt(y0));
-
-    const p00 = sampleU16(pixels, width, channels, x0, y0, channel);
-    const p10 = sampleU16(pixels, width, channels, x1, y0, channel);
-    const p01 = sampleU16(pixels, width, channels, x0, y1, channel);
-    const p11 = sampleU16(pixels, width, channels, x1, y1, channel);
-
-    const top = lerp(@floatFromInt(p00), @floatFromInt(p10), fx);
-    const bottom = lerp(@floatFromInt(p01), @floatFromInt(p11), fx);
-    return @as(u16, @intFromFloat(@round(lerp(top, bottom, fy))));
-}
-
 fn samplePixelBilinearU16(
     dst: []u16,
     pixels: []const u16,
     width: u32,
     height: u32,
-    channels: usize,
+    src_channels: usize,
+    dst_channels: usize,
     x: f64,
     y: f64,
 ) void {
     const prof = profiler.scope("remap.samplePixelBilinearU16");
     defer prof.end();
 
-    if (x < 0 or y < 0 or x > @as(f64, @floatFromInt(width - 1)) or y > @as(f64, @floatFromInt(height - 1))) {
-        @memset(dst[0..channels], 0);
+    const support = bilinearSupport(width, height, x, y);
+    if (support <= 0) {
+        @memset(dst[0..dst_channels], 0);
         return;
     }
 
-    const x0 = @as(u32, @intFromFloat(@floor(x)));
-    const y0 = @as(u32, @intFromFloat(@floor(y)));
-    const x1 = @min(x0 + 1, width - 1);
-    const y1 = @min(y0 + 1, height - 1);
+    const x0 = @as(i32, @intFromFloat(@floor(x)));
+    const y0 = @as(i32, @intFromFloat(@floor(y)));
+    const x1 = x0 + 1;
+    const y1 = y0 + 1;
     const fx = x - @as(f64, @floatFromInt(x0));
     const fy = y - @as(f64, @floatFromInt(y0));
     const one_minus_fx = 1.0 - fx;
@@ -859,47 +798,82 @@ fn samplePixelBilinearU16(
     const w01 = one_minus_fx * fy;
     const w11 = fx * fy;
 
-    const width_usize = @as(usize, width);
-    const x0_off = @as(usize, x0) * channels;
-    const x1_off = @as(usize, x1) * channels;
-    const row0 = @as(usize, y0) * width_usize * channels;
-    const row1 = @as(usize, y1) * width_usize * channels;
-    const p00 = pixels[row0 + x0_off ..];
-    const p10 = pixels[row0 + x1_off ..];
-    const p01 = pixels[row1 + x0_off ..];
-    const p11 = pixels[row1 + x1_off ..];
-
-    switch (channels) {
-        1 => dst[0] = bilinearChannelU16(p00[0], p10[0], p01[0], p11[0], w00, w10, w01, w11),
-        3 => {
-            inline for (0..3) |channel| {
-                dst[channel] = bilinearChannelU16(p00[channel], p10[channel], p01[channel], p11[channel], w00, w10, w01, w11);
-            }
-        },
-        else => {
-            for (0..channels) |channel| {
-                dst[channel] = bilinearChannelU16(p00[channel], p10[channel], p01[channel], p11[channel], w00, w10, w01, w11);
-            }
-        },
+    for (0..src_channels) |channel| {
+        dst[channel] = bilinearChannelU16Soft(pixels, width, height, src_channels, x0, y0, x1, y1, channel, w00, w10, w01, w11, support);
+    }
+    if (dst_channels > src_channels) {
+        dst[src_channels] = @as(u16, @intFromFloat(@round(support * 65535.0)));
     }
 }
 
-fn bilinearChannelU8(p00: u8, p10: u8, p01: u8, p11: u8, w00: f64, w10: f64, w01: f64, w11: f64) u8 {
-    const value =
-        @as(f64, @floatFromInt(p00)) * w00 +
-        @as(f64, @floatFromInt(p10)) * w10 +
-        @as(f64, @floatFromInt(p01)) * w01 +
-        @as(f64, @floatFromInt(p11)) * w11;
-    return @as(u8, @intFromFloat(@round(value)));
+fn bilinearSupport(width: u32, height: u32, x: f64, y: f64) f64 {
+    const x0 = @as(i32, @intFromFloat(@floor(x)));
+    const y0 = @as(i32, @intFromFloat(@floor(y)));
+    const x1 = x0 + 1;
+    const y1 = y0 + 1;
+    const fx = x - @as(f64, @floatFromInt(x0));
+    const fy = y - @as(f64, @floatFromInt(y0));
+    const one_minus_fx = 1.0 - fx;
+    const one_minus_fy = 1.0 - fy;
+
+    var support: f64 = 0.0;
+    if (inBounds(x0, y0, width, height)) support += one_minus_fx * one_minus_fy;
+    if (inBounds(x1, y0, width, height)) support += fx * one_minus_fy;
+    if (inBounds(x0, y1, width, height)) support += one_minus_fx * fy;
+    if (inBounds(x1, y1, width, height)) support += fx * fy;
+    return support;
 }
 
-fn bilinearChannelU16(p00: u16, p10: u16, p01: u16, p11: u16, w00: f64, w10: f64, w01: f64, w11: f64) u16 {
-    const value =
-        @as(f64, @floatFromInt(p00)) * w00 +
-        @as(f64, @floatFromInt(p10)) * w10 +
-        @as(f64, @floatFromInt(p01)) * w01 +
-        @as(f64, @floatFromInt(p11)) * w11;
-    return @as(u16, @intFromFloat(@round(value)));
+fn bilinearChannelU8Soft(
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    channels: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    channel: usize,
+    w00: f64,
+    w10: f64,
+    w01: f64,
+    w11: f64,
+    support: f64,
+) u8 {
+    var value: f64 = 0.0;
+    if (inBounds(x0, y0, width, height)) value += @as(f64, @floatFromInt(sampleU8(pixels, width, channels, @intCast(x0), @intCast(y0), channel))) * w00;
+    if (inBounds(x1, y0, width, height)) value += @as(f64, @floatFromInt(sampleU8(pixels, width, channels, @intCast(x1), @intCast(y0), channel))) * w10;
+    if (inBounds(x0, y1, width, height)) value += @as(f64, @floatFromInt(sampleU8(pixels, width, channels, @intCast(x0), @intCast(y1), channel))) * w01;
+    if (inBounds(x1, y1, width, height)) value += @as(f64, @floatFromInt(sampleU8(pixels, width, channels, @intCast(x1), @intCast(y1), channel))) * w11;
+    return @as(u8, @intFromFloat(@round(value / support)));
+}
+
+fn bilinearChannelU16Soft(
+    pixels: []const u16,
+    width: u32,
+    height: u32,
+    channels: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    channel: usize,
+    w00: f64,
+    w10: f64,
+    w01: f64,
+    w11: f64,
+    support: f64,
+) u16 {
+    var value: f64 = 0.0;
+    if (inBounds(x0, y0, width, height)) value += @as(f64, @floatFromInt(sampleU16(pixels, width, channels, @intCast(x0), @intCast(y0), channel))) * w00;
+    if (inBounds(x1, y0, width, height)) value += @as(f64, @floatFromInt(sampleU16(pixels, width, channels, @intCast(x1), @intCast(y0), channel))) * w10;
+    if (inBounds(x0, y1, width, height)) value += @as(f64, @floatFromInt(sampleU16(pixels, width, channels, @intCast(x0), @intCast(y1), channel))) * w01;
+    if (inBounds(x1, y1, width, height)) value += @as(f64, @floatFromInt(sampleU16(pixels, width, channels, @intCast(x1), @intCast(y1), channel))) * w11;
+    return @as(u16, @intFromFloat(@round(value / support)));
+}
+
+fn inBounds(x: i32, y: i32, width: u32, height: u32) bool {
+    return x >= 0 and y >= 0 and x < @as(i32, @intCast(width)) and y < @as(i32, @intCast(height));
 }
 
 fn sampleU8(pixels: []const u8, width: u32, channels: usize, x: u32, y: u32, channel: usize) u8 {
@@ -917,7 +891,7 @@ fn lerp(a: f64, b: f64, t: f64) f64 {
 }
 
 fn pixelCount(info: image_io.ImageInfo) usize {
-    return @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels);
+    return @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels + info.extra_channels);
 }
 
 test "identity remap preserves interior grayscale pixels" {
@@ -950,9 +924,15 @@ test "identity remap preserves interior grayscale pixels" {
 
     try std.testing.expectEqual(@as(u32, 5), remapped.info.width);
     try std.testing.expectEqual(@as(u32, 5), remapped.info.height);
-    try std.testing.expectEqual(@as(u8, 13), remapped.pixels.u8[2 * 5 + 2]);
-    try std.testing.expectEqual(@as(u8, 18), remapped.pixels.u8[3 * 5 + 2]);
-    try std.testing.expectEqual(@as(u8, 14), remapped.pixels.u8[2 * 5 + 3]);
+    try std.testing.expectEqual(@as(u8, 1), remapped.info.color_channels);
+    try std.testing.expectEqual(@as(u8, 1), remapped.info.extra_channels);
+    const stride: usize = remapped.info.color_channels + remapped.info.extra_channels;
+    try std.testing.expectEqual(@as(u8, 13), remapped.pixels.u8[(2 * 5 + 2) * stride]);
+    try std.testing.expectEqual(@as(u8, 255), remapped.pixels.u8[(2 * 5 + 2) * stride + 1]);
+    try std.testing.expectEqual(@as(u8, 18), remapped.pixels.u8[(3 * 5 + 2) * stride]);
+    try std.testing.expectEqual(@as(u8, 255), remapped.pixels.u8[(3 * 5 + 2) * stride + 1]);
+    try std.testing.expectEqual(@as(u8, 14), remapped.pixels.u8[(2 * 5 + 3) * stride]);
+    try std.testing.expectEqual(@as(u8, 255), remapped.pixels.u8[(2 * 5 + 3) * stride + 1]);
 }
 
 test "common overlap roi for identical images is non-empty and bounded" {

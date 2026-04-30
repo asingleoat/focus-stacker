@@ -323,7 +323,7 @@ fn loadJpegImage(allocator: std.mem.Allocator, path_z: [:0]const u8) (LoadError 
     const pixels = try allocator.alloc(u8, pixelCount(source_info));
     errdefer allocator.free(pixels);
 
-    const row_stride = @as(usize, source_info.width) * @as(usize, source_info.color_channels);
+    const row_stride = @as(usize, source_info.width) * @as(usize, source_info.color_channels + source_info.extra_channels);
     while (decompress.output_scanline < decompress.output_height) {
         const offset = @as(usize, decompress.output_scanline) * row_stride;
         var row_ptr = [_]c.JSAMPROW{
@@ -559,7 +559,7 @@ fn readTiffInfo(path_z: [:0]const u8, tiff: ?*c.TIFF) LoadError!ImageInfo {
 fn readTiffRowsU8(tiff: ?*c.TIFF, info: ImageInfo, scanline: []u8, out_pixels: []u8) LoadError!void {
     const samples_per_pixel = info.color_channels + info.extra_channels;
     const width = @as(usize, info.width);
-    const out_channels = @as(usize, info.color_channels);
+    const out_channels = @as(usize, samples_per_pixel);
     const photometric = getTiffU16(tiff, c.TIFFTAG_PHOTOMETRIC, c.PHOTOMETRIC_MINISBLACK);
 
     for (0..info.height) |row| {
@@ -571,10 +571,13 @@ fn readTiffRowsU8(tiff: ?*c.TIFF, info: ImageInfo, scanline: []u8, out_pixels: [
         for (0..width) |x| {
             const src = scanline[x * samples_per_pixel ..][0..samples_per_pixel];
             const dst = dst_row[x * out_channels ..][0..out_channels];
-            if (out_channels == 1) {
+            if (info.color_channels == 1) {
                 dst[0] = if (photometric == c.PHOTOMETRIC_MINISWHITE) 0xff - src[0] else src[0];
+                if (out_channels > 1) {
+                    @memcpy(dst[1..out_channels], src[1..out_channels]);
+                }
             } else {
-                @memcpy(dst, src[0..3]);
+                @memcpy(dst, src[0..out_channels]);
             }
         }
     }
@@ -583,7 +586,7 @@ fn readTiffRowsU8(tiff: ?*c.TIFF, info: ImageInfo, scanline: []u8, out_pixels: [
 fn readTiffRowsU16(tiff: ?*c.TIFF, info: ImageInfo, scanline: []u16, out_pixels: []u16) LoadError!void {
     const samples_per_pixel = info.color_channels + info.extra_channels;
     const width = @as(usize, info.width);
-    const out_channels = @as(usize, info.color_channels);
+    const out_channels = @as(usize, samples_per_pixel);
     const photometric = getTiffU16(tiff, c.TIFFTAG_PHOTOMETRIC, c.PHOTOMETRIC_MINISBLACK);
 
     for (0..info.height) |row| {
@@ -595,10 +598,13 @@ fn readTiffRowsU16(tiff: ?*c.TIFF, info: ImageInfo, scanline: []u16, out_pixels:
         for (0..width) |x| {
             const src = scanline[x * samples_per_pixel ..][0..samples_per_pixel];
             const dst = dst_row[x * out_channels ..][0..out_channels];
-            if (out_channels == 1) {
+            if (info.color_channels == 1) {
                 dst[0] = if (photometric == c.PHOTOMETRIC_MINISWHITE) 0xffff - src[0] else src[0];
+                if (out_channels > 1) {
+                    @memcpy(dst[1..out_channels], src[1..out_channels]);
+                }
             } else {
-                @memcpy(dst, src[0..3]);
+                @memcpy(dst, src[0..out_channels]);
             }
         }
     }
@@ -613,7 +619,7 @@ fn getTiffU16(tiff: ?*c.TIFF, tag: c.ttag_t, default_value: u16) u16 {
 }
 
 fn pixelCount(info: ImageInfo) usize {
-    return @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels);
+    return @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels + info.extra_channels);
 }
 
 const ExifSummary = struct {
@@ -737,13 +743,15 @@ test "png metadata and decode use vendored upstream icon" {
     try std.testing.expectEqual(@as(u32, 16), info.width);
     try std.testing.expectEqual(@as(u32, 16), info.height);
     try std.testing.expectEqual(ColorModel.rgb, info.color_model);
+    try std.testing.expectEqual(@as(u8, 1), info.extra_channels);
 
     var image = try loadImage(allocator, "upstream/hugin-2025.0.1/platforms/linux/icons/hugin_16.png");
     defer image.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 16), image.info.width);
+    try std.testing.expectEqual(@as(u8, 1), image.info.extra_channels);
     switch (image.pixels) {
-        .u8 => |pixels| try std.testing.expectEqual(@as(usize, 16 * 16 * 3), pixels.len),
+        .u8 => |pixels| try std.testing.expectEqual(@as(usize, 16 * 16 * 4), pixels.len),
         .u16 => |_| return error.UnsupportedPixelFormat,
     }
 }
