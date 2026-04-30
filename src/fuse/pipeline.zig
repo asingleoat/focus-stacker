@@ -8,6 +8,7 @@ const config = @import("config.zig");
 const contrast = @import("contrast.zig");
 const io = @import("io.zig");
 const masks = @import("masks.zig");
+const pyramid = @import("pyramid.zig");
 
 pub const RunError = io.LoadError || image_io.SaveError || std.mem.Allocator.Error || std.Thread.SpawnError;
 
@@ -26,24 +27,79 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
     defer smoothed_weight_buffer.deinit(allocator);
     var soft_blend: ?blend.SoftBlendState = null;
     defer if (soft_blend) |*state| state.deinit(allocator);
+    var norm_weight_sums = std.ArrayListUnmanaged(f32){};
+    defer norm_weight_sums.deinit(allocator);
+    var pyramid_accumulator: ?pyramid.Accumulator = null;
+    defer if (pyramid_accumulator) |*value| value.deinit(allocator);
 
     var output: ?image_io.Image = null;
     defer if (output) |*image| image.deinit(allocator);
 
+    switch (cfg.method) {
+        .hardmask_contrast, .softmask_contrast => {
+            try runSinglePass(
+                allocator,
+                cfg,
+                jobs,
+                &best_weights,
+                &gray_buffer,
+                &weight_buffer,
+                &smoothed_weight_buffer,
+                &soft_blend,
+                &output,
+            );
+            switch (cfg.method) {
+                .hardmask_contrast => {},
+                .softmask_contrast => blend.finalizeSoft(&soft_blend.?, &output.?),
+                .pyramid_contrast => unreachable,
+            }
+        },
+        .pyramid_contrast => {
+            try runPyramidPass(
+                allocator,
+                cfg,
+                jobs,
+                &gray_buffer,
+                &weight_buffer,
+                &norm_weight_sums,
+                &output,
+                &pyramid_accumulator,
+            );
+            const collapsed_info = fusedOutputInfo(output.?.info);
+            output.?.deinit(allocator);
+            output = try pyramid.collapseToImage(allocator, collapsed_info, &pyramid_accumulator.?);
+        },
+    }
+
+    if (cfg.verbose > 0) {
+        std.debug.print("focus fuse: writing {s}\n", .{cfg.output_path.?});
+    }
+    try image_io.writeTiff(cfg.output_path.?, &output.?);
+}
+
+fn runSinglePass(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    jobs: usize,
+    best_weights: *std.ArrayListUnmanaged(f32),
+    gray_buffer: *std.ArrayListUnmanaged(f32),
+    weight_buffer: *std.ArrayListUnmanaged(f32),
+    smoothed_weight_buffer: *std.ArrayListUnmanaged(f32),
+    soft_blend: *?blend.SoftBlendState,
+    output: *?image_io.Image,
+) RunError!void {
     var expected: ?io.StackInfo = null;
     const input_count = cfg.input_files.items.len;
-
     for (cfg.input_files.items, 0..) |path, index| {
         if (cfg.verbose > 0) {
             std.debug.print("focus fuse: [{d}/{d}] loading {s}\n", .{ index + 1, input_count, path });
         }
-
         var image = try io.loadAndValidateImage(allocator, path, expected);
         defer image.deinit(allocator);
 
         if (expected == null) {
             expected = io.stackInfoFromImage(&image);
-            output = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
+            output.* = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
             const count = @as(usize, image.info.width) * @as(usize, image.info.height);
             try gray_buffer.resize(allocator, count);
             try weight_buffer.resize(allocator, count);
@@ -54,62 +110,104 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 },
                 .softmask_contrast => {
                     try smoothed_weight_buffer.resize(allocator, count);
-                    soft_blend = try blend.SoftBlendState.init(allocator, output.?.info);
+                    soft_blend.* = try blend.SoftBlendState.init(allocator, output.*.?.info);
                 },
+                .pyramid_contrast => unreachable,
             }
         }
 
-        gray.fillFromLoaded(gray_buffer.items, &image);
-        var gray_image = gray.GrayImage{
+        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+        var weights = contrast.WeightMap{
             .width = image.info.width,
             .height = image.info.height,
-            .pixels = gray_buffer.items,
-            .sample_scale = switch (image.info.sample_type) {
-                .u8 => 255.0,
-                .u16 => 65535.0,
-            },
-        };
-        try contrast.computeLocalContrastWeightsInto(&gray_image, cfg.contrast_window_size, jobs, weight_buffer.items);
-        var weights = contrast.WeightMap{
-            .width = gray_image.width,
-            .height = gray_image.height,
             .pixels = weight_buffer.items,
         };
-
         if (cfg.verbose > 1) {
             const stats = weightStats(&weights);
             std.debug.print("  local contrast: mean={d:.4} max={d:.4}\n", .{ stats.mean, stats.max });
         }
-
         switch (cfg.method) {
-            .hardmask_contrast => {
-                try blend.updateWinners(allocator, &image, &weights, best_weights.items, &output.?, jobs);
-            },
+            .hardmask_contrast => try blend.updateWinners(allocator, &image, &weights, best_weights.items, &output.*.?, jobs),
             .softmask_contrast => {
                 masks.applySupportInto(&image, weight_buffer.items);
-                try masks.blurFiveTapInto(
-                    allocator,
-                    image.info.width,
-                    image.info.height,
-                    jobs,
-                    weight_buffer.items,
-                    smoothed_weight_buffer.items,
-                    weight_buffer.items,
-                );
-                try blend.accumulateSoft(allocator, &image, weight_buffer.items, &soft_blend.?, jobs);
+                try masks.blurFiveTapInto(allocator, image.info.width, image.info.height, jobs, weight_buffer.items, smoothed_weight_buffer.items, weight_buffer.items);
+                try blend.accumulateSoft(allocator, &image, weight_buffer.items, &soft_blend.*.?, jobs);
             },
+            .pyramid_contrast => unreachable,
         }
     }
+}
 
-    switch (cfg.method) {
-        .hardmask_contrast => {},
-        .softmask_contrast => blend.finalizeSoft(&soft_blend.?, &output.?),
+fn runPyramidPass(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    jobs: usize,
+    gray_buffer: *std.ArrayListUnmanaged(f32),
+    weight_buffer: *std.ArrayListUnmanaged(f32),
+    norm_weight_sums: *std.ArrayListUnmanaged(f32),
+    output: *?image_io.Image,
+    accumulator: *?pyramid.Accumulator,
+) RunError!void {
+    const prof = profiler.scope("fuse.pipeline.runPyramidPass");
+    defer prof.end();
+
+    var expected: ?io.StackInfo = null;
+    const input_count = cfg.input_files.items.len;
+
+    for (cfg.input_files.items, 0..) |path, index| {
+        if (cfg.verbose > 0) {
+            std.debug.print("focus fuse: [{d}/{d}] loading {s} for weight normalization\n", .{ index + 1, input_count, path });
+        }
+        var image = try io.loadAndValidateImage(allocator, path, expected);
+        defer image.deinit(allocator);
+        if (expected == null) {
+            expected = io.stackInfoFromImage(&image);
+            output.* = try blend.allocateOutput(allocator, fusedOutputInfo(image.info));
+            const count = @as(usize, image.info.width) * @as(usize, image.info.height);
+            try gray_buffer.resize(allocator, count);
+            try weight_buffer.resize(allocator, count);
+            try norm_weight_sums.resize(allocator, count);
+            @memset(norm_weight_sums.items, 0);
+            accumulator.* = try pyramid.Accumulator.init(allocator, image.info.width, image.info.height);
+        }
+        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+        masks.applySupportInto(&image, weight_buffer.items);
+        for (norm_weight_sums.items, weight_buffer.items) |*sum, weight| sum.* += weight;
     }
 
-    if (cfg.verbose > 0) {
-        std.debug.print("focus fuse: writing {s}\n", .{cfg.output_path.?});
+    try gray_buffer.resize(allocator, norm_weight_sums.items.len);
+
+    for (cfg.input_files.items, 0..) |path, index| {
+        if (cfg.verbose > 0) {
+            std.debug.print("focus fuse: [{d}/{d}] loading {s} for pyramid blend\n", .{ index + 1, input_count, path });
+        }
+        var image = try io.loadAndValidateImage(allocator, path, expected);
+        defer image.deinit(allocator);
+        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+        masks.applySupportInto(&image, weight_buffer.items);
+        pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+        try pyramid.accumulateImage(allocator, &image, gray_buffer.items, &accumulator.*.?);
     }
-    try image_io.writeTiff(cfg.output_path.?, &output.?);
+}
+
+fn computeWeightMapForImage(
+    cfg: *const config.Config,
+    jobs: usize,
+    image: *const image_io.Image,
+    gray_pixels: []f32,
+    weights: []f32,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    gray.fillFromLoaded(gray_pixels, image);
+    var gray_image = gray.GrayImage{
+        .width = image.info.width,
+        .height = image.info.height,
+        .pixels = gray_pixels,
+        .sample_scale = switch (image.info.sample_type) {
+            .u8 => 255.0,
+            .u16 => 65535.0,
+        },
+    };
+    try contrast.computeLocalContrastWeightsInto(&gray_image, cfg.contrast_window_size, jobs, weights);
 }
 
 fn fusedOutputInfo(info: image_io.ImageInfo) image_io.ImageInfo {

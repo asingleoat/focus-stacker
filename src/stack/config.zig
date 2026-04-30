@@ -198,6 +198,7 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\  --fuse-method method       Fusion method:
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
+        \\                               pyramid-contrast
         \\  --hard-mask                Keep hard-mask winner selection
         \\  -h, --help                 Display this help text
         \\

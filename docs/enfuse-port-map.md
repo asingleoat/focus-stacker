@@ -33,12 +33,22 @@ Current alternate Zig fusion method:
 - applies a separable 5-tap Burt-Adelson-style blur to the masks before blending
 - still stops short of a full Gaussian-mask / Laplacian-image pyramid port
 
+Current first multiresolution Zig fusion method:
+- `pyramid-contrast`
+- keeps the same support-weighted local-contrast masks
+- normalizes weights across the whole stack
+- builds Gaussian mask pyramids and Laplacian RGB image pyramids
+- accumulates one image at a time into a result pyramid and collapses at the end
+- this is closer to upstream structure, but still a narrower port than full `enfuse`
+
 On the same clean aligned 10-frame full-resolution `S004_0020..0029` stack:
 - external `enfuse`: about `27849 ms`
 - `focus_fuse_zig --method hardmask-contrast --threads 32`: about `2611 ms`
 - normalized RMSE vs external `enfuse` output: about `0.02305`
 - `focus_fuse_zig --method softmask-contrast --threads 32`: about `3601 ms`
 - normalized RMSE vs external `enfuse` output: about `0.00589`
+- `focus_fuse_zig --method pyramid-contrast --threads 32`: about `21139 ms`
+- normalized RMSE vs external `enfuse` output: about `0.00535`
 
 **Upstream Snapshot**
 Vendored reference source:
@@ -200,4 +210,5 @@ That first goal is now partially met:
 - there is a fast standalone Zig fusion binary
 - it is already wired into the practical stack script
 - the soft-mask checkpoint confirms that mask softness is a major part of the remaining visual delta
-- the next fidelity target is still the pyramid path, not more CLI work
+- the first pyramid checkpoint confirms that multiresolution blending can improve fidelity slightly again
+- the next fidelity target is tighter upstream pyramid semantics and less expensive in-process normalization/remap reuse

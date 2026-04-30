@@ -8,11 +8,13 @@ pub const Action = enum {
 pub const Method = enum {
     hardmask_contrast,
     softmask_contrast,
+    pyramid_contrast,
 
     pub fn cliName(self: Method) []const u8 {
         return switch (self) {
             .hardmask_contrast => "hardmask-contrast",
             .softmask_contrast => "softmask-contrast",
+            .pyramid_contrast => "pyramid-contrast",
         };
     }
 };
@@ -158,13 +160,14 @@ pub fn renderUsage(
         \\  --method method            Fusion implementation:
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
+        \\                               pyramid-contrast
         \\  --contrast-window-size n   Local contrast window size (default: 5)
         \\  --hard-mask                Keep upstream-style hard-mask winner selection
         \\  -h, --help                 Display this help text
         \\
         \\Status: pure-Zig focus-stack fusion path based on enfuse local-contrast weighting,
-        \\with both hard-mask and soft-mask blend variants. Full multiresolution pyramid
-        \\blending is not ported yet.
+        \\with hard-mask, soft-mask, and first-pass multiresolution pyramid variants.
+        \\The full enfuse pyramid stack is not ported yet.
         \\
     ,
         .{ exe_name, exe_name },
@@ -208,6 +211,7 @@ pub fn renderSummary(
 pub fn parseMethod(value: []const u8) ParseError!Method {
     if (std.mem.eql(u8, value, "hardmask-contrast")) return .hardmask_contrast;
     if (std.mem.eql(u8, value, "softmask-contrast")) return .softmask_contrast;
+    if (std.mem.eql(u8, value, "pyramid-contrast")) return .pyramid_contrast;
     return error.InvalidValue;
 }
 

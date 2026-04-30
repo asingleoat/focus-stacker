@@ -13,6 +13,7 @@ This repository now includes:
 - A switchable in-tree Zig fusion subsystem for focus stacking:
   - `hardmask-contrast`: fast contrast-weight winner selection
   - `softmask-contrast`: soft-mask blend using a 5-tap Burt-Adelson-style blur on contrast masks
+  - `pyramid-contrast`: first-pass multiresolution blend with Gaussian mask pyramids and Laplacian image pyramids
 
 Useful commands:
 

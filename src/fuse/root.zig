@@ -10,9 +10,11 @@ pub const contrast = @import("contrast.zig");
 pub const io = @import("io.zig");
 pub const masks = @import("masks.zig");
 pub const pipeline = @import("pipeline.zig");
+pub const pyramid = @import("pyramid.zig");
 
 test {
     _ = @import("contrast.zig");
     _ = @import("blend.zig");
     _ = @import("masks.zig");
+    _ = @import("pyramid.zig");
 }

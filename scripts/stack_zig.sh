@@ -136,7 +136,7 @@ usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
   --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
-  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast
+  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast
 
 Environment overrides:
   ALIGN_THREADS
@@ -174,8 +174,8 @@ EOF
     fi
     [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded|phasecorr-locked)$ ]] || \
         die "--pair-align must be one of: hugin-ncc, phasecorr-seeded, phasecorr-locked"
-    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast)$ ]] || \
-        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast, zig-softmask-contrast"
+    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast|zig-pyramid-contrast)$ ]] || \
+        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast"
 
     [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or manifests...>"
 
