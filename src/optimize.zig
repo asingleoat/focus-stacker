@@ -2855,6 +2855,9 @@ pub fn inverseTransformPoint(pose: ImagePose, out_x: f64, out_y: f64, width: u32
 }
 
 pub fn inverseTransformPointCached(cache: InverseTransformCache, out_x: f64, out_y: f64) Point2 {
+    const prof = profiler.scope("optimize.inverseTransformPointCached");
+    defer prof.end();
+
     if (cache.basic_rectilinear) {
         var p = Point2{
             .x = out_x - cache.dest_center_x,
@@ -3113,6 +3116,9 @@ fn imagePlaneFromWorldRay(pose: ImagePose, world_ray: Vec3, width: u32) Point2 {
 }
 
 fn imagePlaneFromWorldRayCached(cache: InverseTransformCache, world_ray: Vec3) Point2 {
+    const prof = profiler.scope("optimize.imagePlaneFromWorldRayCached");
+    defer prof.end();
+
     const local_ray = matrixMul(cache.world_to_local, world_ray);
     const denom = -local_ray.z;
     if (@abs(denom) < 1e-12) return .{ .x = -1.0, .y = -1.0 };
@@ -3249,6 +3255,9 @@ fn rayFromTranslationPlaneCached(cache: InverseTransformCache, pano_ray: Vec3) ?
 }
 
 fn rayFromTranslationPlaneCachedUnnormalized(cache: InverseTransformCache, pano_ray: Vec3) ?Vec3 {
+    const prof = profiler.scope("optimize.rayFromTranslationPlaneCachedUnnormalized");
+    defer prof.end();
+
     const plane_hit = linePlaneIntersection(
         cache.translation_plane_normal,
         .{ .x = 0.0, .y = 0.0, .z = 0.0 },
@@ -3262,6 +3271,9 @@ fn rayFromTranslationPlaneCachedUnnormalized(cache: InverseTransformCache, pano_
 }
 
 fn linePlaneIntersection(normal: Vec3, p1: Vec3, p2: Vec3) ?Vec3 {
+    const prof = profiler.scope("optimize.linePlaneIntersection");
+    defer prof.end();
+
     const direction = Vec3{
         .x = p2.x - p1.x,
         .y = p2.y - p1.y,
@@ -3423,6 +3435,7 @@ fn invertRadialDistortion(pose: ImagePose, dx: f64, dy: f64, width: u32, height:
             2.0 * pose.radial_b * normalized_r2 +
             3.0 * pose.radial_c * normalized_r4;
         const f = radius * factor - q_radius;
+        if (@abs(f) <= 1e-9) break;
         const df = factor + 2.0 * radius * radius * inv_norm * factor_derivative;
         if (@abs(df) < 1e-12) break;
         radius -= f / df;
@@ -3437,6 +3450,9 @@ fn invertRadialDistortion(pose: ImagePose, dx: f64, dy: f64, width: u32, height:
 }
 
 fn invertRadialDistortionCached(cache: InverseTransformCache, dx: f64, dy: f64) Point2 {
+    const prof = profiler.scope("optimize.invertRadialDistortionCached");
+    defer prof.end();
+
     const q_radius = @sqrt(dx * dx + dy * dy);
     if (q_radius < 1e-12) {
         return .{ .x = dx, .y = dy };
@@ -3452,6 +3468,7 @@ fn invertRadialDistortionCached(cache: InverseTransformCache, dx: f64, dy: f64) 
             2.0 * cache.radial_b * normalized_r2 +
             3.0 * cache.radial_c * normalized_r4;
         const f = radius * factor - q_radius;
+        if (@abs(f) <= 1e-9) break;
         const df = factor + 2.0 * radius * radius * cache.radial_inv_norm * factor_derivative;
         if (@abs(df) < 1e-12) break;
         radius -= f / df;

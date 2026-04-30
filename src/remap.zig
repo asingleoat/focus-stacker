@@ -584,6 +584,9 @@ fn samplePixelBilinearU8(
     x: f64,
     y: f64,
 ) void {
+    const prof = profiler.scope("remap.samplePixelBilinearU8");
+    defer prof.end();
+
     if (x < 0 or y < 0 or x > @as(f64, @floatFromInt(width - 1)) or y > @as(f64, @floatFromInt(height - 1))) {
         @memset(dst[0..channels], 0);
         return;
@@ -665,6 +668,9 @@ fn samplePixelBilinearU16(
     x: f64,
     y: f64,
 ) void {
+    const prof = profiler.scope("remap.samplePixelBilinearU16");
+    defer prof.end();
+
     if (x < 0 or y < 0 or x > @as(f64, @floatFromInt(width - 1)) or y > @as(f64, @floatFromInt(height - 1))) {
         @memset(dst[0..channels], 0);
         return;
