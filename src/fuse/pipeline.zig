@@ -201,7 +201,7 @@ fn runPyramidPass(
             try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, weight_buffer.items);
             masks.applySupportInto(image, weight_buffer.items);
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-        try pyramid.accumulateImage(allocator, image, gray_buffer.items, &accumulator.*.?);
+            try pyramid.accumulateImage(allocator, image, gray_buffer.items, &accumulator.*.?);
         }
     } else {
         for (cfg.input_files.items, 0..) |path, index| {

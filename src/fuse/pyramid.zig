@@ -189,7 +189,7 @@ pub fn buildMaskGaussianPyramid(
         const next_w = nextLevelSize(prev.width);
         const next_h = nextLevelSize(prev.height);
         const next_pixels = try allocator.alloc(f32, @as(usize, next_w) * @as(usize, next_h));
-        reduceScalar(prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels);
+        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels);
         levels[built] = .{ .width = next_w, .height = next_h, .pixels = next_pixels };
     }
     return levels;
@@ -223,7 +223,7 @@ pub fn buildImageLaplacianPyramid(
         const next_w = nextLevelSize(prev.width);
         const next_h = nextLevelSize(prev.height);
         const next_pixels = try allocator.alloc(f32, @as(usize, next_w) * @as(usize, next_h) * 3);
-        reduceRgb(prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels);
+        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels);
         gaussians[built] = .{ .width = next_w, .height = next_h, .pixels = next_pixels };
     }
 
@@ -246,7 +246,7 @@ pub fn buildImageLaplacianPyramid(
         const current = gaussians[i];
         const expanded = try allocator.alloc(f32, current.pixels.len);
         defer allocator.free(expanded);
-        expandRgb(current.width, current.height, next.width, next.height, next.pixels, expanded);
+        try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded);
         for (laps[i].pixels, expanded) |*dst, value| {
             dst.* -= value;
         }
@@ -310,33 +310,237 @@ fn fillRgbBase(image: *const image_io.Image, dst: []f32) void {
     }
 }
 
-fn reduceScalar(src_w: u32, src_h: u32, src: []const f32, dst_w: u32, dst_h: u32, dst: []f32) void {
+fn reduceScalar(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []const f32, dst_w: u32, dst_h: u32, dst: []f32) std.mem.Allocator.Error!void {
+    const invalid_y = std.math.maxInt(u32);
+    var cache_y = [_]u32{ invalid_y, invalid_y, invalid_y, invalid_y, invalid_y };
+    var cache_rows: [5][]f32 = undefined;
+    const storage = try allocator.alloc(f32, 5 * @as(usize, dst_w));
+    defer allocator.free(storage);
+    for (0..5) |i| {
+        cache_rows[i] = storage[i * @as(usize, dst_w) .. (i + 1) * @as(usize, dst_w)];
+    }
+    var replace_index: usize = 0;
+
     for (0..dst_h) |dy| {
+        const center_y = @as(i32, @intCast(dy * 2));
+        var needed_slots: [5]usize = undefined;
+        for (0..5) |ky| {
+            const y = clampCoord(center_y + @as(i32, @intCast(ky)) - 2, src_h);
+            needed_slots[ky] = ensureReducedScalarRow(src_w, src_h, src, dst_w, y, &cache_y, &cache_rows, &replace_index);
+        }
+        const row0 = cache_rows[needed_slots[0]];
+        const row1 = cache_rows[needed_slots[1]];
+        const row2 = cache_rows[needed_slots[2]];
+        const row3 = cache_rows[needed_slots[3]];
+        const row4 = cache_rows[needed_slots[4]];
         for (0..dst_w) |dx| {
-            const sx = @as(i32, @intCast(dx * 2));
-            const sy = @as(i32, @intCast(dy * 2));
-            dst[@as(usize, dy) * @as(usize, dst_w) + @as(usize, dx)] = sampleScalarFiveTap(src_w, src_h, src, sx, sy);
+            dst[@as(usize, dy) * @as(usize, dst_w) + @as(usize, dx)] =
+                (row0[dx] + 4.0 * row1[dx] + 6.0 * row2[dx] + 4.0 * row3[dx] + row4[dx]) * (1.0 / 16.0);
         }
     }
 }
 
-fn reduceRgb(src_w: u32, src_h: u32, src: []const f32, dst_w: u32, dst_h: u32, dst: []f32) void {
+fn reduceRgb(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []const f32, dst_w: u32, dst_h: u32, dst: []f32) std.mem.Allocator.Error!void {
+    const invalid_y = std.math.maxInt(u32);
+    var cache_y = [_]u32{ invalid_y, invalid_y, invalid_y, invalid_y, invalid_y };
+    var cache_rows: [5][]f32 = undefined;
+    const row_len = @as(usize, dst_w) * 3;
+    const storage = try allocator.alloc(f32, 5 * row_len);
+    defer allocator.free(storage);
+    for (0..5) |i| {
+        cache_rows[i] = storage[i * row_len .. (i + 1) * row_len];
+    }
+    var replace_index: usize = 0;
+
     for (0..dst_h) |dy| {
+        const center_y = @as(i32, @intCast(dy * 2));
+        var needed_slots: [5]usize = undefined;
+        for (0..5) |ky| {
+            const y = clampCoord(center_y + @as(i32, @intCast(ky)) - 2, src_h);
+            needed_slots[ky] = ensureReducedRgbRow(src_w, src_h, src, dst_w, y, &cache_y, &cache_rows, &replace_index);
+        }
+        const row0 = cache_rows[needed_slots[0]];
+        const row1 = cache_rows[needed_slots[1]];
+        const row2 = cache_rows[needed_slots[2]];
+        const row3 = cache_rows[needed_slots[3]];
+        const row4 = cache_rows[needed_slots[4]];
         for (0..dst_w) |dx| {
-            const sx = @as(i32, @intCast(dx * 2));
-            const sy = @as(i32, @intCast(dy * 2));
             const dst_base = (@as(usize, dy) * @as(usize, dst_w) + @as(usize, dx)) * 3;
-            sampleRgbFiveTap(src_w, src_h, src, sx, sy, dst[dst_base .. dst_base + 3]);
+            const src_base = @as(usize, dx) * 3;
+            dst[dst_base + 0] = (row0[src_base + 0] + 4.0 * row1[src_base + 0] + 6.0 * row2[src_base + 0] + 4.0 * row3[src_base + 0] + row4[src_base + 0]) * (1.0 / 16.0);
+            dst[dst_base + 1] = (row0[src_base + 1] + 4.0 * row1[src_base + 1] + 6.0 * row2[src_base + 1] + 4.0 * row3[src_base + 1] + row4[src_base + 1]) * (1.0 / 16.0);
+            dst[dst_base + 2] = (row0[src_base + 2] + 4.0 * row1[src_base + 2] + 6.0 * row2[src_base + 2] + 4.0 * row3[src_base + 2] + row4[src_base + 2]) * (1.0 / 16.0);
         }
     }
 }
 
-fn expandRgb(dst_w: u32, dst_h: u32, src_w: u32, src_h: u32, src: []const f32, dst: []f32) void {
+fn expandRgb(allocator: std.mem.Allocator, dst_w: u32, dst_h: u32, src_w: u32, src_h: u32, src: []const f32, dst: []f32) std.mem.Allocator.Error!void {
+    const invalid_y = std.math.maxInt(u32);
+    var cache_y = [_]u32{ invalid_y, invalid_y, invalid_y, invalid_y };
+    var cache_rows: [4][]f32 = undefined;
+    const row_len = @as(usize, dst_w) * 3;
+    const storage = try allocator.alloc(f32, 4 * row_len);
+    defer allocator.free(storage);
+    for (0..4) |i| {
+        cache_rows[i] = storage[i * row_len .. (i + 1) * row_len];
+    }
+    var replace_index: usize = 0;
     const dst_width = @as(usize, dst_w);
     for (0..dst_h) |dy| {
+        const even_y = (dy & 1) == 0;
+        const base_y = @as(u32, @intCast(dy / 2));
+        const y0 = if (even_y) clampCoord(@as(i32, @intCast(base_y)) - 1, src_h) else clampCoord(@as(i32, @intCast(base_y)), src_h);
+        const y1 = clampCoord(@as(i32, @intCast(base_y)), src_h);
+        const y2 = if (even_y) clampCoord(@as(i32, @intCast(base_y)) + 1, src_h) else clampCoord(@as(i32, @intCast(base_y + 1)), src_h);
+        const slot0 = ensureExpandedRgbRow(src_w, src_h, src, dst_w, y0, &cache_y, &cache_rows, &replace_index);
+        const slot1 = ensureExpandedRgbRow(src_w, src_h, src, dst_w, y1, &cache_y, &cache_rows, &replace_index);
+        const row0 = cache_rows[slot0];
+        const row1 = cache_rows[slot1];
+        const row2 = if (even_y) cache_rows[ensureExpandedRgbRow(src_w, src_h, src, dst_w, y2, &cache_y, &cache_rows, &replace_index)] else row1;
         for (0..dst_w) |dx| {
             const dst_base = (@as(usize, dy) * dst_width + @as(usize, dx)) * 3;
-            sampleExpandedRgb(src_w, src_h, src, @as(i32, @intCast(dx)), @as(i32, @intCast(dy)), dst[dst_base .. dst_base + 3]);
+            const src_base = @as(usize, dx) * 3;
+            if (even_y) {
+                dst[dst_base + 0] = (row0[src_base + 0] + 6.0 * row1[src_base + 0] + row2[src_base + 0]) * (1.0 / 8.0);
+                dst[dst_base + 1] = (row0[src_base + 1] + 6.0 * row1[src_base + 1] + row2[src_base + 1]) * (1.0 / 8.0);
+                dst[dst_base + 2] = (row0[src_base + 2] + 6.0 * row1[src_base + 2] + row2[src_base + 2]) * (1.0 / 8.0);
+            } else {
+                dst[dst_base + 0] = (row0[src_base + 0] + row1[src_base + 0]) * 0.5;
+                dst[dst_base + 1] = (row0[src_base + 1] + row1[src_base + 1]) * 0.5;
+                dst[dst_base + 2] = (row0[src_base + 2] + row1[src_base + 2]) * 0.5;
+            }
+        }
+    }
+}
+
+fn ensureReducedScalarRow(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    src_y: u32,
+    cache_y: *[5]u32,
+    cache_rows: *[5][]f32,
+    replace_index: *usize,
+) usize {
+    _ = src_h;
+    for (cache_y, 0..) |cached_y, i| {
+        if (cached_y == src_y) return i;
+    }
+    const slot = replace_index.*;
+    replace_index.* = (replace_index.* + 1) % cache_rows.len;
+    cache_y[slot] = src_y;
+    horizontalReduceScalarRow(src_w, src, src_y, dst_w, cache_rows[slot]);
+    return slot;
+}
+
+fn ensureReducedRgbRow(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    src_y: u32,
+    cache_y: *[5]u32,
+    cache_rows: *[5][]f32,
+    replace_index: *usize,
+) usize {
+    _ = src_h;
+    for (cache_y, 0..) |cached_y, i| {
+        if (cached_y == src_y) return i;
+    }
+    const slot = replace_index.*;
+    replace_index.* = (replace_index.* + 1) % cache_rows.len;
+    cache_y[slot] = src_y;
+    horizontalReduceRgbRow(src_w, src, src_y, dst_w, cache_rows[slot]);
+    return slot;
+}
+
+fn ensureExpandedRgbRow(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    src_y: u32,
+    cache_y: *[4]u32,
+    cache_rows: *[4][]f32,
+    replace_index: *usize,
+) usize {
+    _ = src_h;
+    for (cache_y, 0..) |cached_y, i| {
+        if (cached_y == src_y) return i;
+    }
+    const slot = replace_index.*;
+    replace_index.* = (replace_index.* + 1) % cache_rows.len;
+    cache_y[slot] = src_y;
+    horizontalExpandRgbRow(src_w, src, src_y, dst_w, cache_rows[slot]);
+    return slot;
+}
+
+fn horizontalReduceScalarRow(src_w: u32, src: []const f32, src_y: u32, dst_w: u32, dst_row: []f32) void {
+    const src_base = @as(usize, src_y) * @as(usize, src_w);
+    for (0..dst_w) |dx| {
+        const sx = @as(i32, @intCast(dx * 2));
+        const x0 = clampCoord(sx - 2, src_w);
+        const x1 = clampCoord(sx - 1, src_w);
+        const x2 = clampCoord(sx, src_w);
+        const x3 = clampCoord(sx + 1, src_w);
+        const x4 = clampCoord(sx + 2, src_w);
+        dst_row[dx] =
+            (src[src_base + @as(usize, x0)] +
+            4.0 * src[src_base + @as(usize, x1)] +
+            6.0 * src[src_base + @as(usize, x2)] +
+            4.0 * src[src_base + @as(usize, x3)] +
+            src[src_base + @as(usize, x4)]) * (1.0 / 16.0);
+    }
+}
+
+fn horizontalReduceRgbRow(src_w: u32, src: []const f32, src_y: u32, dst_w: u32, dst_row: []f32) void {
+    const src_width = @as(usize, src_w);
+    const src_row_base = @as(usize, src_y) * src_width * 3;
+    for (0..dst_w) |dx| {
+        const sx = @as(i32, @intCast(dx * 2));
+        const x0 = @as(usize, clampCoord(sx - 2, src_w));
+        const x1 = @as(usize, clampCoord(sx - 1, src_w));
+        const x2 = @as(usize, clampCoord(sx, src_w));
+        const x3 = @as(usize, clampCoord(sx + 1, src_w));
+        const x4 = @as(usize, clampCoord(sx + 2, src_w));
+        const dst_base = @as(usize, dx) * 3;
+        const b0 = src_row_base + x0 * 3;
+        const b1 = src_row_base + x1 * 3;
+        const b2 = src_row_base + x2 * 3;
+        const b3 = src_row_base + x3 * 3;
+        const b4 = src_row_base + x4 * 3;
+        dst_row[dst_base + 0] = (src[b0 + 0] + 4.0 * src[b1 + 0] + 6.0 * src[b2 + 0] + 4.0 * src[b3 + 0] + src[b4 + 0]) * (1.0 / 16.0);
+        dst_row[dst_base + 1] = (src[b0 + 1] + 4.0 * src[b1 + 1] + 6.0 * src[b2 + 1] + 4.0 * src[b3 + 1] + src[b4 + 1]) * (1.0 / 16.0);
+        dst_row[dst_base + 2] = (src[b0 + 2] + 4.0 * src[b1 + 2] + 6.0 * src[b2 + 2] + 4.0 * src[b3 + 2] + src[b4 + 2]) * (1.0 / 16.0);
+    }
+}
+
+fn horizontalExpandRgbRow(src_w: u32, src: []const f32, src_y: u32, dst_w: u32, dst_row: []f32) void {
+    const src_width = @as(usize, src_w);
+    const src_row_base = @as(usize, src_y) * src_width * 3;
+    for (0..dst_w) |dx| {
+        const dst_base = @as(usize, dx) * 3;
+        if ((dx & 1) == 0) {
+            const sx = @as(i32, @intCast(dx / 2));
+            const x0 = @as(usize, clampCoord(sx - 1, src_w));
+            const x1 = @as(usize, clampCoord(sx, src_w));
+            const x2 = @as(usize, clampCoord(sx + 1, src_w));
+            const b0 = src_row_base + x0 * 3;
+            const b1 = src_row_base + x1 * 3;
+            const b2 = src_row_base + x2 * 3;
+            dst_row[dst_base + 0] = (src[b0 + 0] + 6.0 * src[b1 + 0] + src[b2 + 0]) * (1.0 / 8.0);
+            dst_row[dst_base + 1] = (src[b0 + 1] + 6.0 * src[b1 + 1] + src[b2 + 1]) * (1.0 / 8.0);
+            dst_row[dst_base + 2] = (src[b0 + 2] + 6.0 * src[b1 + 2] + src[b2 + 2]) * (1.0 / 8.0);
+        } else {
+            const sx = @as(i32, @intCast(dx / 2));
+            const x0 = @as(usize, clampCoord(sx, src_w));
+            const x1 = @as(usize, clampCoord(sx + 1, src_w));
+            const b0 = src_row_base + x0 * 3;
+            const b1 = src_row_base + x1 * 3;
+            dst_row[dst_base + 0] = (src[b0 + 0] + src[b1 + 0]) * 0.5;
+            dst_row[dst_base + 1] = (src[b0 + 1] + src[b1 + 1]) * 0.5;
+            dst_row[dst_base + 2] = (src[b0 + 2] + src[b1 + 2]) * 0.5;
         }
     }
 }
@@ -442,8 +646,8 @@ test "five tap reduce and expand preserve uniform rgb image" {
     defer allocator.free(reduced);
     const expanded = try allocator.alloc(f32, 4 * 4 * 3);
     defer allocator.free(expanded);
-    reduceRgb(4, 4, src, 2, 2, reduced);
-    expandRgb(4, 4, 2, 2, reduced, expanded);
+    try reduceRgb(allocator, 4, 4, src, 2, 2, reduced);
+    try expandRgb(allocator, 4, 4, 2, 2, reduced, expanded);
     for (expanded, 0..) |value, index| {
         const expected = src[index];
         try std.testing.expectApproxEqAbs(expected, value, 1e-5);
