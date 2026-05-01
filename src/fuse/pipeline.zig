@@ -222,7 +222,7 @@ fn runPyramidPass(
                 masks.applySupportInto(image, weight_buffer.items);
             }
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-            try pyramid.accumulateImageWithWorkspace(allocator, image, gray_buffer.items, &accumulator.*.?, &workspace.?);
+            try pyramid.accumulateImageWithWorkspace(allocator, image, gray_buffer.items, &accumulator.*.?, &workspace.?, jobs);
         }
     } else {
         for (cfg.input_files.items, 0..) |path, index| {
@@ -234,7 +234,7 @@ fn runPyramidPass(
             try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
             masks.applySupportInto(&image, weight_buffer.items);
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-            try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, &accumulator.*.?, &workspace.?);
+            try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, &accumulator.*.?, &workspace.?, jobs);
         }
     }
 }

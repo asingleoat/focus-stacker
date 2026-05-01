@@ -268,7 +268,7 @@ fn runPyramidStackFusion(
             try computeWeightMapForRemapped(cfg, jobs, remapped, gray_buffer.items, weight_buffer.items);
             fuse.masks.applySupportInto(remapped, weight_buffer.items);
             fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?);
+            try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
         }
     } else {
         for (active_indices.items, 0..) |image_index, active_i| {
@@ -283,7 +283,7 @@ fn runPyramidStackFusion(
             try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items);
             fuse.masks.applySupportInto(&remapped, weight_buffer.items);
             fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?);
+            try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
         }
     }
 }

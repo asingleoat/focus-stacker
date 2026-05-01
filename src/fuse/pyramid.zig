@@ -159,10 +159,10 @@ pub fn accumulateImage(
     image: *const image_io.Image,
     normalized_mask: []const f32,
     result: *Accumulator,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     var workspace = try Workspace.init(allocator, image.info.width, image.info.height);
     defer workspace.deinit(allocator);
-    return accumulateImageWithWorkspace(allocator, image, normalized_mask, result, &workspace);
+    return accumulateImageWithWorkspace(allocator, image, normalized_mask, result, &workspace, 1);
 }
 
 pub fn accumulateImageWithWorkspace(
@@ -171,13 +171,16 @@ pub fn accumulateImageWithWorkspace(
     normalized_mask: []const f32,
     result: *Accumulator,
     workspace: *Workspace,
-) std.mem.Allocator.Error!void {
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     const prof = profiler.scope("fuse.pyramid.accumulateImage");
     defer prof.end();
 
-    try buildMaskGaussianPyramidInto(allocator, normalized_mask, workspace.mask_levels);
-    try buildImageLaplacianPyramidInto(allocator, image, workspace.gaussian_levels, workspace.laplacian_levels, workspace.expanded_levels);
+    try buildMaskGaussianPyramidInto(allocator, normalized_mask, workspace.mask_levels, jobs);
+    try buildImageLaplacianPyramidInto(allocator, image, workspace.gaussian_levels, workspace.laplacian_levels, workspace.expanded_levels, jobs);
 
+    const blend_prof = profiler.scope("fuse.pyramid.accumulateLevels");
+    defer blend_prof.end();
     for (result.levels, workspace.laplacian_levels, workspace.mask_levels) |*dst, src_level, mask_level| {
         const pixel_count = @as(usize, dst.width) * @as(usize, dst.height);
         for (0..pixel_count) |pixel_index| {
@@ -208,7 +211,9 @@ pub fn collapseToImage(
         const parent = &collapsed[level_index - 1];
         const expanded = try allocator.alloc(f32, @as(usize, parent.width) * @as(usize, parent.height) * 3);
         defer allocator.free(expanded);
-        try expandRgb(allocator, parent.width, parent.height, child.width, child.height, child.pixels, expanded);
+        const storage = try allocator.alloc(f32, 4 * @as(usize, parent.width) * 3);
+        defer allocator.free(storage);
+        expandRgbRowsSequential(parent.width, parent.height, child.width, child.height, child.pixels, expanded, 0, parent.height, storage);
         for (parent.pixels, expanded) |*dst, value| {
             dst.* += value;
         }
@@ -254,7 +259,7 @@ pub fn buildMaskGaussianPyramid(
     height: u32,
     base_mask: []const f32,
     level_count: usize,
-) std.mem.Allocator.Error![]ScalarLevel {
+) (std.mem.Allocator.Error || std.Thread.SpawnError)![]ScalarLevel {
     const prof = profiler.scope("fuse.pyramid.buildMaskGaussianPyramid");
     defer prof.end();
 
@@ -278,7 +283,7 @@ pub fn buildMaskGaussianPyramid(
         const next_w = nextLevelSize(prev.width);
         const next_h = nextLevelSize(prev.height);
         const next_pixels = try allocator.alloc(f32, @as(usize, next_w) * @as(usize, next_h));
-        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels);
+        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels, 1);
         levels[built] = .{ .width = next_w, .height = next_h, .pixels = next_pixels };
     }
     return levels;
@@ -288,13 +293,17 @@ fn buildMaskGaussianPyramidInto(
     allocator: std.mem.Allocator,
     base_mask: []const f32,
     levels: []ScalarLevel,
-) std.mem.Allocator.Error!void {
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const prof = profiler.scope("fuse.pyramid.buildMaskGaussianPyramidInto");
+    defer prof.end();
+
     @memcpy(levels[0].pixels, base_mask);
     var built: usize = 1;
     while (built < levels.len) : (built += 1) {
         const prev = levels[built - 1];
         const next = levels[built];
-        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels);
+        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels, jobs);
     }
 }
 
@@ -302,7 +311,7 @@ pub fn buildImageLaplacianPyramid(
     allocator: std.mem.Allocator,
     image: *const image_io.Image,
     level_count: usize,
-) std.mem.Allocator.Error![]RgbLevel {
+) (std.mem.Allocator.Error || std.Thread.SpawnError)![]RgbLevel {
     const prof = profiler.scope("fuse.pyramid.buildImageLaplacianPyramid");
     defer prof.end();
 
@@ -326,7 +335,7 @@ pub fn buildImageLaplacianPyramid(
         const next_w = nextLevelSize(prev.width);
         const next_h = nextLevelSize(prev.height);
         const next_pixels = try allocator.alloc(f32, @as(usize, next_w) * @as(usize, next_h) * 3);
-        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels);
+        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next_w, next_h, next_pixels, 1);
         gaussians[built] = .{ .width = next_w, .height = next_h, .pixels = next_pixels };
     }
 
@@ -344,7 +353,7 @@ pub fn buildImageLaplacianPyramid(
         errdefer allocator.free(lap_pixels);
         const expanded = try allocator.alloc(f32, current.pixels.len);
         defer allocator.free(expanded);
-        try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded);
+        try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded, 1);
         for (lap_pixels, current.pixels, expanded) |*dst, base_value, expanded_value| {
             dst.* = base_value - expanded_value;
         }
@@ -375,20 +384,24 @@ fn buildImageLaplacianPyramidInto(
     gaussians: []RgbLevel,
     laps: []RgbLevel,
     expanded_levels: []RgbLevel,
-) std.mem.Allocator.Error!void {
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const prof = profiler.scope("fuse.pyramid.buildImageLaplacianPyramidInto");
+    defer prof.end();
+
     fillRgbBase(image, gaussians[0].pixels);
     var built: usize = 1;
     while (built < gaussians.len) : (built += 1) {
         const prev = gaussians[built - 1];
         const next = gaussians[built];
-        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels);
+        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels, jobs);
     }
 
     for (0..gaussians.len - 1) |i| {
         const current = gaussians[i];
         const next = gaussians[i + 1];
         const expanded = expanded_levels[i];
-        try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded.pixels);
+        try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded.pixels, jobs);
         for (laps[i].pixels, current.pixels, expanded.pixels) |*dst, base_value, expanded_value| {
             dst.* = base_value - expanded_value;
         }
@@ -449,18 +462,203 @@ fn fillRgbBase(image: *const image_io.Image, dst: []f32) void {
     }
 }
 
-fn reduceScalar(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []const f32, dst_w: u32, dst_h: u32, dst: []f32) std.mem.Allocator.Error!void {
+fn reduceScalar(
+    allocator: std.mem.Allocator,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCount(jobs, dst_h);
+    if (worker_count == 1) {
+        const storage = try allocator.alloc(f32, 5 * @as(usize, dst_w));
+        defer allocator.free(storage);
+        reduceScalarRowsSequential(src_w, src_h, src, dst_w, dst_h, dst, 0, dst_h, storage);
+        return;
+    }
+    const row_storage_len = 5 * @as(usize, dst_w);
+    const storage = try allocator.alloc(f32, row_storage_len * worker_count);
+    defer allocator.free(storage);
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(ReduceScalarTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
+        tasks[i] = .{
+            .src_w = src_w,
+            .src_h = src_h,
+            .src = src,
+            .dst_w = dst_w,
+            .dst_h = dst_h,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+            .storage = storage[(i + 1) * row_storage_len .. (i + 2) * row_storage_len],
+        };
+        thread.* = try std.Thread.spawn(.{}, reduceScalarThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    reduceScalarRowsSequential(
+        src_w,
+        src_h,
+        src,
+        dst_w,
+        dst_h,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))),
+        storage[0..row_storage_len],
+    );
+    for (threads) |thread| thread.join();
+}
+
+fn reduceRgb(
+    allocator: std.mem.Allocator,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCount(jobs, dst_h);
+    if (worker_count == 1) {
+        const storage = try allocator.alloc(f32, 5 * @as(usize, dst_w) * 3);
+        defer allocator.free(storage);
+        reduceRgbRowsSequential(src_w, src_h, src, dst_w, dst_h, dst, 0, dst_h, storage);
+        return;
+    }
+    const row_storage_len = 5 * @as(usize, dst_w) * 3;
+    const storage = try allocator.alloc(f32, row_storage_len * worker_count);
+    defer allocator.free(storage);
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(ReduceRgbTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
+        tasks[i] = .{
+            .src_w = src_w,
+            .src_h = src_h,
+            .src = src,
+            .dst_w = dst_w,
+            .dst_h = dst_h,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+            .storage = storage[(i + 1) * row_storage_len .. (i + 2) * row_storage_len],
+        };
+        thread.* = try std.Thread.spawn(.{}, reduceRgbThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    reduceRgbRowsSequential(
+        src_w,
+        src_h,
+        src,
+        dst_w,
+        dst_h,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))),
+        storage[0..row_storage_len],
+    );
+    for (threads) |thread| thread.join();
+}
+
+fn expandRgb(
+    allocator: std.mem.Allocator,
+    dst_w: u32,
+    dst_h: u32,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCount(jobs, dst_h);
+    if (worker_count == 1) {
+        const storage = try allocator.alloc(f32, 4 * @as(usize, dst_w) * 3);
+        defer allocator.free(storage);
+        expandRgbRowsSequential(dst_w, dst_h, src_w, src_h, src, dst, 0, dst_h, storage);
+        return;
+    }
+    const row_storage_len = 4 * @as(usize, dst_w) * 3;
+    const storage = try allocator.alloc(f32, row_storage_len * worker_count);
+    defer allocator.free(storage);
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(ExpandRgbTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
+        tasks[i] = .{
+            .dst_w = dst_w,
+            .dst_h = dst_h,
+            .src_w = src_w,
+            .src_h = src_h,
+            .src = src,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+            .storage = storage[(i + 1) * row_storage_len .. (i + 2) * row_storage_len],
+        };
+        thread.* = try std.Thread.spawn(.{}, expandRgbThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    expandRgbRowsSequential(
+        dst_w,
+        dst_h,
+        src_w,
+        src_h,
+        src,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))),
+        storage[0..row_storage_len],
+    );
+    for (threads) |thread| thread.join();
+}
+
+fn reduceScalarRowsSequential(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+    storage: []f32,
+) void {
+    _ = dst_h;
     const invalid_y = std.math.maxInt(u32);
     var cache_y = [_]u32{ invalid_y, invalid_y, invalid_y, invalid_y, invalid_y };
     var cache_rows: [5][]f32 = undefined;
-    const storage = try allocator.alloc(f32, 5 * @as(usize, dst_w));
-    defer allocator.free(storage);
+    std.debug.assert(storage.len >= 5 * @as(usize, dst_w));
     for (0..5) |i| {
         cache_rows[i] = storage[i * @as(usize, dst_w) .. (i + 1) * @as(usize, dst_w)];
     }
     var replace_index: usize = 0;
 
-    for (0..dst_h) |dy| {
+    var dy: u32 = start_row;
+    while (dy < end_row) : (dy += 1) {
         const center_y = @as(i32, @intCast(dy * 2));
         var needed_slots: [5]usize = undefined;
         for (0..5) |ky| {
@@ -479,19 +677,30 @@ fn reduceScalar(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []con
     }
 }
 
-fn reduceRgb(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []const f32, dst_w: u32, dst_h: u32, dst: []f32) std.mem.Allocator.Error!void {
+fn reduceRgbRowsSequential(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+    storage: []f32,
+) void {
+    _ = dst_h;
     const invalid_y = std.math.maxInt(u32);
     var cache_y = [_]u32{ invalid_y, invalid_y, invalid_y, invalid_y, invalid_y };
     var cache_rows: [5][]f32 = undefined;
     const row_len = @as(usize, dst_w) * 3;
-    const storage = try allocator.alloc(f32, 5 * row_len);
-    defer allocator.free(storage);
+    std.debug.assert(storage.len >= 5 * row_len);
     for (0..5) |i| {
         cache_rows[i] = storage[i * row_len .. (i + 1) * row_len];
     }
     var replace_index: usize = 0;
 
-    for (0..dst_h) |dy| {
+    var dy: u32 = start_row;
+    while (dy < end_row) : (dy += 1) {
         const center_y = @as(i32, @intCast(dy * 2));
         var needed_slots: [5]usize = undefined;
         for (0..5) |ky| {
@@ -513,19 +722,30 @@ fn reduceRgb(allocator: std.mem.Allocator, src_w: u32, src_h: u32, src: []const 
     }
 }
 
-fn expandRgb(allocator: std.mem.Allocator, dst_w: u32, dst_h: u32, src_w: u32, src_h: u32, src: []const f32, dst: []f32) std.mem.Allocator.Error!void {
+fn expandRgbRowsSequential(
+    dst_w: u32,
+    dst_h: u32,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+    storage: []f32,
+) void {
+    _ = dst_h;
     const invalid_y = std.math.maxInt(u32);
     var cache_y = [_]u32{ invalid_y, invalid_y, invalid_y, invalid_y };
     var cache_rows: [4][]f32 = undefined;
     const row_len = @as(usize, dst_w) * 3;
-    const storage = try allocator.alloc(f32, 4 * row_len);
-    defer allocator.free(storage);
+    std.debug.assert(storage.len >= 4 * row_len);
     for (0..4) |i| {
         cache_rows[i] = storage[i * row_len .. (i + 1) * row_len];
     }
     var replace_index: usize = 0;
     const dst_width = @as(usize, dst_w);
-    for (0..dst_h) |dy| {
+    var dy: u32 = start_row;
+    while (dy < end_row) : (dy += 1) {
         const even_y = (dy & 1) == 0;
         const base_y = @as(u32, @intCast(dy / 2));
         const y0 = if (even_y) clampCoord(@as(i32, @intCast(base_y)) - 1, src_h) else clampCoord(@as(i32, @intCast(base_y)), src_h);
@@ -550,6 +770,58 @@ fn expandRgb(allocator: std.mem.Allocator, dst_w: u32, dst_h: u32, src_w: u32, s
             }
         }
     }
+}
+
+const ReduceScalarTask = struct {
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+    storage: []f32,
+};
+
+const ReduceRgbTask = struct {
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+    storage: []f32,
+};
+
+const ExpandRgbTask = struct {
+    dst_w: u32,
+    dst_h: u32,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+    storage: []f32,
+};
+
+fn reduceScalarThread(task: *const ReduceScalarTask) void {
+    reduceScalarRowsSequential(task.src_w, task.src_h, task.src, task.dst_w, task.dst_h, task.dst, task.start_row, task.end_row, task.storage);
+}
+
+fn reduceRgbThread(task: *const ReduceRgbTask) void {
+    reduceRgbRowsSequential(task.src_w, task.src_h, task.src, task.dst_w, task.dst_h, task.dst, task.start_row, task.end_row, task.storage);
+}
+
+fn expandRgbThread(task: *const ExpandRgbTask) void {
+    expandRgbRowsSequential(task.dst_w, task.dst_h, task.src_w, task.src_h, task.src, task.dst, task.start_row, task.end_row, task.storage);
+}
+
+fn effectiveWorkerCount(jobs: usize, rows: u32) usize {
+    return @min(@max(jobs, 1), @as(usize, rows));
 }
 
 fn ensureReducedScalarRow(
@@ -779,8 +1051,8 @@ test "five tap reduce and expand preserve uniform rgb image" {
     defer allocator.free(reduced);
     const expanded = try allocator.alloc(f32, 4 * 4 * 3);
     defer allocator.free(expanded);
-    try reduceRgb(allocator, 4, 4, src, 2, 2, reduced);
-    try expandRgb(allocator, 4, 4, 2, 2, reduced, expanded);
+    try reduceRgb(allocator, 4, 4, src, 2, 2, reduced, 1);
+    try expandRgb(allocator, 4, 4, 2, 2, reduced, expanded, 1);
     for (expanded, 0..) |value, index| {
         const expected = src[index];
         try std.testing.expectApproxEqAbs(expected, value, 1e-5);
