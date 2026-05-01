@@ -1090,6 +1090,16 @@ fn refinePosesIteratively(
     else
         null;
     defer if (grouped_jacobian) |*workspace| workspace.deinit(allocator);
+    var sequential_chain = if (grouped_jacobian != null)
+        try SequentialChainStructure.init(allocator, layout, pair_matches)
+    else
+        null;
+    defer if (sequential_chain) |*chain| chain.deinit(allocator);
+    var sequential_chain_workspace = if (sequential_chain) |*chain|
+        try SequentialChainWorkspace.init(allocator, chain, variable_count)
+    else
+        null;
+    defer if (sequential_chain_workspace) |*workspace| workspace.deinit(allocator);
     var dense_jacobian = switch (jacobian_mode) {
         .dense_custom => try DenseJacobianWorkspace.init(allocator, variable_count, residual_count),
         else => null,
@@ -1136,7 +1146,17 @@ fn refinePosesIteratively(
             .{ strategyLabel(strategy), variable_count, residual_count, jacobianModeLabel(jacobian_mode, ctx.grouped_jacobian != null, ctx.dense_jacobian != null) },
         );
     }
-    const solve_result = if (ctx.grouped_jacobian != null)
+    const solve_result = if (sequential_chain != null and sequential_chain_workspace != null)
+        refinePosesIterativelyChainDistance(
+            allocator,
+            &ctx,
+            solve_x,
+            residual_count,
+            params,
+            &sequential_chain.?,
+            &sequential_chain_workspace.?,
+        )
+    else if (ctx.grouped_jacobian != null)
         if (jacobian_mode == .grouped or (jacobian_mode == .auto and pair_matches.len > 1))
             minpack_mod.lmdifWithJacobian(
                 SolveContext,
@@ -1391,6 +1411,199 @@ const DenseJacobianWorkspace = struct {
     }
 };
 
+const SequentialChainStructure = struct {
+    image_to_block: []i32,
+    block_images: []usize,
+    block_starts: []usize,
+    block_sizes: []usize,
+    parameter_to_block: []usize,
+    parameter_to_local: []usize,
+    max_block_size: usize,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        layout: []const SolveLayout,
+        pair_matches: []const match_mod.PairMatches,
+    ) !?SequentialChainStructure {
+        if (pair_matches.len == 0) return null;
+        for (pair_matches, 0..) |pair_match, pair_index| {
+            if (pair_match.pair.right_index != pair_match.pair.left_index + 1) return null;
+            if (pair_index > 0 and pair_match.pair.left_index != pair_matches[pair_index - 1].pair.left_index + 1) return null;
+        }
+
+        const variable_count = countLayoutVariables(layout);
+        const image_to_block = try allocator.alloc(i32, layout.len);
+        errdefer allocator.free(image_to_block);
+        @memset(image_to_block, -1);
+
+        var block_count: usize = 0;
+        var max_block_size: usize = 0;
+        for (layout, 0..) |entry, image_index| {
+            const block_size = countLayoutEntryVariables(entry);
+            if (block_size == 0) continue;
+            image_to_block[image_index] = @as(i32, @intCast(block_count));
+            block_count += 1;
+            max_block_size = @max(max_block_size, block_size);
+        }
+        if (block_count == 0) {
+            allocator.free(image_to_block);
+            return null;
+        }
+
+        const block_images = try allocator.alloc(usize, block_count);
+        errdefer allocator.free(block_images);
+        const block_starts = try allocator.alloc(usize, block_count);
+        errdefer allocator.free(block_starts);
+        const block_sizes = try allocator.alloc(usize, block_count);
+        errdefer allocator.free(block_sizes);
+        const parameter_to_block = try allocator.alloc(usize, variable_count);
+        errdefer allocator.free(parameter_to_block);
+        const parameter_to_local = try allocator.alloc(usize, variable_count);
+        errdefer allocator.free(parameter_to_local);
+
+        var block_index: usize = 0;
+        for (layout, 0..) |entry, image_index| {
+            const block_size = countLayoutEntryVariables(entry);
+            if (block_size == 0) continue;
+            block_images[block_index] = image_index;
+            block_sizes[block_index] = block_size;
+            block_starts[block_index] = firstLayoutEntryVariable(entry).?;
+            const block_start = block_starts[block_index];
+            for (0..block_size) |local_index| {
+                parameter_to_block[block_start + local_index] = block_index;
+                parameter_to_local[block_start + local_index] = local_index;
+            }
+            block_index += 1;
+        }
+
+        return .{
+            .image_to_block = image_to_block,
+            .block_images = block_images,
+            .block_starts = block_starts,
+            .block_sizes = block_sizes,
+            .parameter_to_block = parameter_to_block,
+            .parameter_to_local = parameter_to_local,
+            .max_block_size = max_block_size,
+        };
+    }
+
+    fn deinit(self: *SequentialChainStructure, allocator: std.mem.Allocator) void {
+        allocator.free(self.image_to_block);
+        allocator.free(self.block_images);
+        allocator.free(self.block_starts);
+        allocator.free(self.block_sizes);
+        allocator.free(self.parameter_to_block);
+        allocator.free(self.parameter_to_local);
+        self.* = undefined;
+    }
+
+    fn blockCount(self: *const SequentialChainStructure) usize {
+        return self.block_images.len;
+    }
+
+    fn blockOfImage(self: *const SequentialChainStructure, image_index: usize) ?usize {
+        const value = self.image_to_block[image_index];
+        return if (value >= 0) @as(usize, @intCast(value)) else null;
+    }
+};
+
+const SequentialChainWorkspace = struct {
+    diag_offsets: []usize,
+    offdiag_offsets: []usize,
+    diag_blocks: []f64,
+    schur_diag_blocks: []f64,
+    offdiag_blocks: []f64,
+    forward_blocks: []f64,
+    rhs: []f64,
+    forward_rhs: []f64,
+    step: []f64,
+    temp_matrix: []f64,
+    temp_rhs: []f64,
+    column_norms: []f64,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        chain: *const SequentialChainStructure,
+        variable_count: usize,
+    ) !SequentialChainWorkspace {
+        const block_count = chain.blockCount();
+        const diag_offsets = try allocator.alloc(usize, block_count + 1);
+        errdefer allocator.free(diag_offsets);
+        const offdiag_offsets = try allocator.alloc(usize, block_count);
+        errdefer allocator.free(offdiag_offsets);
+
+        diag_offsets[0] = 0;
+        for (0..block_count) |block_index| {
+            diag_offsets[block_index + 1] = diag_offsets[block_index] + chain.block_sizes[block_index] * chain.block_sizes[block_index];
+        }
+        offdiag_offsets[0] = 0;
+        for (1..block_count) |block_index| {
+            offdiag_offsets[block_index] = offdiag_offsets[block_index - 1] +
+                chain.block_sizes[block_index - 1] * chain.block_sizes[block_index];
+        }
+        const offdiag_total = if (block_count > 0)
+            offdiag_offsets[block_count - 1]
+        else
+            0;
+        const temp_rhs_width = chain.max_block_size + 1;
+
+        return .{
+            .diag_offsets = diag_offsets,
+            .offdiag_offsets = offdiag_offsets,
+            .diag_blocks = try allocator.alloc(f64, diag_offsets[block_count]),
+            .schur_diag_blocks = try allocator.alloc(f64, diag_offsets[block_count]),
+            .offdiag_blocks = try allocator.alloc(f64, offdiag_total),
+            .forward_blocks = try allocator.alloc(f64, offdiag_total),
+            .rhs = try allocator.alloc(f64, variable_count),
+            .forward_rhs = try allocator.alloc(f64, variable_count),
+            .step = try allocator.alloc(f64, variable_count),
+            .temp_matrix = try allocator.alloc(f64, chain.max_block_size * chain.max_block_size),
+            .temp_rhs = try allocator.alloc(f64, chain.max_block_size * temp_rhs_width),
+            .column_norms = try allocator.alloc(f64, variable_count),
+        };
+    }
+
+    fn deinit(self: *SequentialChainWorkspace, allocator: std.mem.Allocator) void {
+        allocator.free(self.diag_offsets);
+        allocator.free(self.offdiag_offsets);
+        allocator.free(self.diag_blocks);
+        allocator.free(self.schur_diag_blocks);
+        allocator.free(self.offdiag_blocks);
+        allocator.free(self.forward_blocks);
+        allocator.free(self.rhs);
+        allocator.free(self.forward_rhs);
+        allocator.free(self.step);
+        allocator.free(self.temp_matrix);
+        allocator.free(self.temp_rhs);
+        allocator.free(self.column_norms);
+        self.* = undefined;
+    }
+
+    fn diagBlock(self: *SequentialChainWorkspace, chain: *const SequentialChainStructure, block_index: usize) []f64 {
+        const start = self.diag_offsets[block_index];
+        const size = chain.block_sizes[block_index] * chain.block_sizes[block_index];
+        return self.diag_blocks[start .. start + size];
+    }
+
+    fn schurDiagBlock(self: *SequentialChainWorkspace, chain: *const SequentialChainStructure, block_index: usize) []f64 {
+        const start = self.diag_offsets[block_index];
+        const size = chain.block_sizes[block_index] * chain.block_sizes[block_index];
+        return self.schur_diag_blocks[start .. start + size];
+    }
+
+    fn offdiagBlock(self: *SequentialChainWorkspace, chain: *const SequentialChainStructure, left_block: usize) []f64 {
+        const start = self.offdiag_offsets[left_block];
+        const size = chain.block_sizes[left_block] * chain.block_sizes[left_block + 1];
+        return self.offdiag_blocks[start .. start + size];
+    }
+
+    fn forwardBlock(self: *SequentialChainWorkspace, chain: *const SequentialChainStructure, left_block: usize) []f64 {
+        const start = self.offdiag_offsets[left_block];
+        const size = chain.block_sizes[left_block] * chain.block_sizes[left_block + 1];
+        return self.forward_blocks[start .. start + size];
+    }
+};
+
 fn evaluateSolveVector(ctx: *SolveContext, x: []const f64, fvec: []f64) anyerror!void {
     const prof = profiler.scope("optimize.evaluateSolveVector");
     defer prof.end();
@@ -1512,6 +1725,475 @@ fn evaluateSolveJacobianDense(
     return n;
 }
 
+fn refinePosesIterativelyChainDistance(
+    allocator: std.mem.Allocator,
+    ctx: *SolveContext,
+    solve_x: []f64,
+    residual_count: usize,
+    params: minpack_mod.Params,
+    chain: *const SequentialChainStructure,
+    workspace: *SequentialChainWorkspace,
+) SolveError!minpack_mod.Result {
+    const fvec = try allocator.alloc(f64, residual_count);
+    defer allocator.free(fvec);
+    evaluateSolveVector(ctx, solve_x, fvec) catch unreachable;
+
+    var fnorm = minpackNorm(fvec);
+    var lambda: f64 = 1.0e-3;
+    var nfev: usize = 1;
+    var outer_iterations: usize = 0;
+    var trial_steps: usize = 0;
+    var accepted_steps: usize = 0;
+    var jacobian_evaluations: usize = 0;
+    var lmpar_iterations: usize = 0;
+
+    const fjac = try allocator.alloc(f64, residual_count * solve_x.len);
+    defer allocator.free(fjac);
+    const trial_x = try allocator.alloc(f64, solve_x.len);
+    defer allocator.free(trial_x);
+    const trial_fvec = try allocator.alloc(f64, residual_count);
+    defer allocator.free(trial_fvec);
+
+    const max_outer_iterations: usize = 12;
+    const max_trial_iterations: usize = 8;
+    const variable_count = solve_x.len;
+
+    while (outer_iterations < max_outer_iterations) : (outer_iterations += 1) {
+        if (params.progress_label) |progress_label| {
+            std.debug.print(
+                "optimizer {s}: outer iteration {d} (nfev={d}, accepted={d}, trial_steps={d}, mode=chain)\n",
+                .{ progress_label, outer_iterations + 1, nfev, accepted_steps, trial_steps },
+            );
+        }
+
+        if (params.progress_label) |progress_label| {
+            if (params.progress_detailed) {
+                std.debug.print("optimizer {s}: building jacobian for outer iteration {d}\n", .{ progress_label, outer_iterations + 1 });
+            }
+        }
+        const jacobian_start_ms = if (params.progress_detailed) std.time.milliTimestamp() else 0;
+        const added = evaluateSolveJacobianGrouped(ctx, solve_x, fvec, fjac, residual_count, variable_count, params.epsfcn) catch unreachable;
+        nfev += added;
+        jacobian_evaluations += added;
+        if (params.progress_label) |progress_label| {
+            if (params.progress_detailed) {
+                std.debug.print(
+                    "optimizer {s}: jacobian ready for outer iteration {d} (+{d} evals, elapsed={d:.3}s)\n",
+                    .{ progress_label, outer_iterations + 1, added, progressSecondsSince(jacobian_start_ms) },
+                );
+            }
+        }
+
+        computeColumnNorms(workspace.column_norms, fjac, residual_count, variable_count);
+        for (workspace.column_norms) |*norm| {
+            norm.* = if (norm.* == 0.0) 1.0 else norm.*;
+        }
+
+        var accepted = false;
+        var step_norm: f64 = 0.0;
+        var best_fnorm = fnorm;
+        for (0..max_trial_iterations) |_| {
+            trial_steps += 1;
+            lmpar_iterations += 1;
+            if (params.progress_label) |progress_label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: trial step {d} start (outer={d}, nfev={d}, accepted={d}, lambda={d:.6}, mode=chain)\n",
+                        .{ progress_label, trial_steps, outer_iterations + 1, nfev, accepted_steps, lambda },
+                    );
+                }
+            }
+
+            const lmpar_start_ms = if (params.progress_detailed) std.time.milliTimestamp() else 0;
+            step_norm = try solveSequentialChainNormalEquations(
+                chain,
+                workspace,
+                ctx,
+                fjac,
+                fvec,
+                residual_count,
+                workspace.column_norms,
+                lambda,
+            );
+            if (params.progress_label) |progress_label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: trial step {d} lmpar ready (lambda={d:.6}, step_norm={d:.6}, elapsed={d:.3}s, mode=chain)\n",
+                        .{ progress_label, trial_steps, lambda, step_norm, progressSecondsSince(lmpar_start_ms) },
+                    );
+                }
+            }
+
+            for (solve_x, workspace.step, 0..) |value, delta, idx| {
+                trial_x[idx] = value + delta;
+            }
+
+            const eval_start_ms = if (params.progress_detailed) std.time.milliTimestamp() else 0;
+            evaluateSolveVector(ctx, trial_x, trial_fvec) catch unreachable;
+            nfev += 1;
+            const fnorm1 = minpackNorm(trial_fvec);
+            if (params.progress_label) |progress_label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: trial step {d} residuals ready (fnorm1={d:.6}, elapsed={d:.3}s, mode=chain)\n",
+                        .{ progress_label, trial_steps, fnorm1, progressSecondsSince(eval_start_ms) },
+                    );
+                }
+            }
+
+            if (fnorm1 < best_fnorm) {
+                best_fnorm = fnorm1;
+                @memcpy(solve_x, trial_x);
+                @memcpy(fvec, trial_fvec);
+                fnorm = fnorm1;
+                accepted_steps += 1;
+                accepted = true;
+                lambda = @max(lambda * 0.3, 1.0e-12);
+                if (params.progress_label) |progress_label| {
+                    if (params.progress_detailed) {
+                        std.debug.print(
+                            "optimizer {s}: trial step {d} done (accepted=yes, fnorm={d:.6}, lambda={d:.6}, mode=chain)\n",
+                            .{ progress_label, trial_steps, fnorm, lambda },
+                        );
+                    }
+                }
+                break;
+            }
+
+            lambda = @min(lambda * 10.0, 1.0e12);
+            if (params.progress_label) |progress_label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: trial step {d} done (accepted=no, fnorm1={d:.6}, next_lambda={d:.6}, mode=chain)\n",
+                        .{ progress_label, trial_steps, fnorm1, lambda },
+                    );
+                }
+            }
+        }
+
+        if (!accepted) {
+            return .{
+                .info = 5,
+                .nfev = nfev,
+                .outer_iterations = outer_iterations + 1,
+                .trial_steps = trial_steps,
+                .lmpar_iterations = lmpar_iterations,
+                .accepted_steps = accepted_steps,
+                .jacobian_evaluations = jacobian_evaluations,
+            };
+        }
+
+        if (step_norm <= params.xtol * @max(1.0, minpackNorm(solve_x))) {
+            break;
+        }
+    }
+
+    return .{
+        .info = 1,
+        .nfev = nfev,
+        .outer_iterations = outer_iterations,
+        .trial_steps = trial_steps,
+        .lmpar_iterations = lmpar_iterations,
+        .accepted_steps = accepted_steps,
+        .jacobian_evaluations = jacobian_evaluations,
+    };
+}
+
+fn progressSecondsSince(start_ms: i64) f64 {
+    return @as(f64, @floatFromInt(std.time.milliTimestamp() - start_ms)) / 1000.0;
+}
+
+fn minpackNorm(values: []const f64) f64 {
+    var sum: f64 = 0.0;
+    for (values) |value| sum += value * value;
+    return @sqrt(sum);
+}
+
+fn computeColumnNorms(out: []f64, fjac: []const f64, m: usize, n: usize) void {
+    for (0..n) |col| {
+        var sum: f64 = 0.0;
+        for (0..m) |row| {
+            const value = fjac[row + m * col];
+            sum += value * value;
+        }
+        out[col] = @sqrt(sum);
+    }
+}
+
+fn solveSequentialChainNormalEquations(
+    chain: *const SequentialChainStructure,
+    workspace: *SequentialChainWorkspace,
+    ctx: *const SolveContext,
+    fjac: []const f64,
+    fvec: []const f64,
+    residual_count: usize,
+    diag: []const f64,
+    lambda: f64,
+) SolveError!f64 {
+    @memset(workspace.diag_blocks, 0.0);
+    @memset(workspace.offdiag_blocks, 0.0);
+    @memset(workspace.rhs, 0.0);
+    @memset(workspace.step, 0.0);
+
+    const residual_rows_per_cp = residualRowsPerControlPoint(ctx.strategy);
+    var row_index: usize = 0;
+    for (ctx.pair_matches) |pair_match| {
+        const left_block = chain.blockOfImage(pair_match.pair.left_index);
+        const right_block = chain.blockOfImage(pair_match.pair.right_index);
+        for (pair_match.control_points) |_| {
+            for (0..residual_rows_per_cp) |row_offset| {
+                const residual_row = row_index + row_offset;
+                const residual = fvec[residual_row];
+                if (left_block) |block_index| {
+                    accumulateBlockNormalTerms(
+                        chain,
+                        workspace.diagBlock(chain, block_index),
+                        workspace.rhs,
+                        block_index,
+                        residual,
+                        fjac,
+                        residual_count,
+                        residual_row,
+                    );
+                }
+                if (right_block) |block_index| {
+                    accumulateBlockNormalTerms(
+                        chain,
+                        workspace.diagBlock(chain, block_index),
+                        workspace.rhs,
+                        block_index,
+                        residual,
+                        fjac,
+                        residual_count,
+                        residual_row,
+                    );
+                }
+                if (left_block != null and right_block != null) {
+                    const block_index = left_block.?;
+                    std.debug.assert(right_block.? == block_index + 1);
+                    accumulateOffdiagNormalTerms(
+                        chain,
+                        workspace.offdiagBlock(chain, block_index),
+                        block_index,
+                        residual,
+                        fjac,
+                        residual_count,
+                        residual_row,
+                    );
+                }
+            }
+            row_index += residual_rows_per_cp;
+        }
+    }
+
+    for (0..chain.blockCount()) |block_index| {
+        const block_start = chain.block_starts[block_index];
+        const block_size = chain.block_sizes[block_index];
+        const diag_block = workspace.diagBlock(chain, block_index);
+        for (0..block_size) |local_index| {
+            const global_index = block_start + local_index;
+            diag_block[local_index * block_size + local_index] += lambda * diag[global_index] * diag[global_index] + 1.0e-9;
+        }
+    }
+
+    return solveSequentialChainBlockSystem(chain, workspace);
+}
+
+fn residualRowsPerControlPoint(strategy: SolveStrategy) usize {
+    return switch (strategy) {
+        .distance_only => 1,
+        .componentwise => 2,
+    };
+}
+
+fn accumulateBlockNormalTerms(
+    chain: *const SequentialChainStructure,
+    diag_block: []f64,
+    rhs: []f64,
+    block_index: usize,
+    residual: f64,
+    fjac: []const f64,
+    residual_count: usize,
+    row_index: usize,
+) void {
+    const block_start = chain.block_starts[block_index];
+    const block_size = chain.block_sizes[block_index];
+    for (0..block_size) |i| {
+        const global_i = block_start + i;
+        const value_i = fjac[row_index + residual_count * global_i];
+        rhs[global_i] += -value_i * residual;
+        for (0..block_size) |j| {
+            const global_j = block_start + j;
+            diag_block[i * block_size + j] += value_i * fjac[row_index + residual_count * global_j];
+        }
+    }
+}
+
+fn accumulateOffdiagNormalTerms(
+    chain: *const SequentialChainStructure,
+    offdiag_block: []f64,
+    left_block_index: usize,
+    residual: f64,
+    fjac: []const f64,
+    residual_count: usize,
+    row_index: usize,
+) void {
+    _ = residual;
+    const left_start = chain.block_starts[left_block_index];
+    const left_size = chain.block_sizes[left_block_index];
+    const right_start = chain.block_starts[left_block_index + 1];
+    const right_size = chain.block_sizes[left_block_index + 1];
+    for (0..left_size) |i| {
+        const global_i = left_start + i;
+        const value_i = fjac[row_index + residual_count * global_i];
+        for (0..right_size) |j| {
+            const global_j = right_start + j;
+            offdiag_block[i * right_size + j] += value_i * fjac[row_index + residual_count * global_j];
+        }
+    }
+}
+
+fn solveSequentialChainBlockSystem(
+    chain: *const SequentialChainStructure,
+    workspace: *SequentialChainWorkspace,
+) SolveError!f64 {
+    @memcpy(workspace.schur_diag_blocks, workspace.diag_blocks);
+    @memcpy(workspace.forward_rhs, workspace.rhs);
+
+    const block_count = chain.blockCount();
+    for (0..block_count) |block_index| {
+        const block_size = chain.block_sizes[block_index];
+        const diag_block = workspace.schurDiagBlock(chain, block_index);
+        const rhs_slice = workspace.forward_rhs[chain.block_starts[block_index] .. chain.block_starts[block_index] + block_size];
+
+        if (block_index + 1 < block_count) {
+            const next_size = chain.block_sizes[block_index + 1];
+            const offdiag_block = workspace.offdiagBlock(chain, block_index);
+            const forward_block = workspace.forwardBlock(chain, block_index);
+            try solveBlockWithTrailingColumns(
+                workspace.temp_matrix,
+                workspace.temp_rhs,
+                diag_block,
+                block_size,
+                offdiag_block,
+                next_size,
+                rhs_slice,
+                forward_block,
+            );
+
+            const next_diag = workspace.schurDiagBlock(chain, block_index + 1);
+            const next_rhs = workspace.forward_rhs[chain.block_starts[block_index + 1] .. chain.block_starts[block_index + 1] + next_size];
+            subtractBlockProductTranspose(next_diag, next_size, offdiag_block, block_size, forward_block);
+            subtractBlockVectorTranspose(next_rhs, offdiag_block, block_size, next_size, rhs_slice);
+        } else {
+            try solveDenseSystemInPlace(workspace.temp_matrix, diag_block, workspace.temp_rhs, rhs_slice, block_size);
+        }
+    }
+
+    const last_block = block_count - 1;
+    {
+        const block_size = chain.block_sizes[last_block];
+        const start = chain.block_starts[last_block];
+        @memcpy(workspace.step[start .. start + block_size], workspace.forward_rhs[start .. start + block_size]);
+    }
+
+    if (block_count > 1) {
+        var rev: usize = block_count - 1;
+        while (rev > 0) {
+            const block_index = rev - 1;
+            const block_size = chain.block_sizes[block_index];
+            const next_size = chain.block_sizes[block_index + 1];
+            const start = chain.block_starts[block_index];
+            const next_start = chain.block_starts[block_index + 1];
+            const forward_block = workspace.forwardBlock(chain, block_index);
+            for (0..block_size) |row| {
+                var value = workspace.forward_rhs[start + row];
+                for (0..next_size) |col| {
+                    value -= forward_block[row * next_size + col] * workspace.step[next_start + col];
+                }
+                workspace.step[start + row] = value;
+            }
+            rev -= 1;
+        }
+    }
+
+    return minpackNorm(workspace.step);
+}
+
+fn solveBlockWithTrailingColumns(
+    temp_matrix: []f64,
+    temp_rhs: []f64,
+    diag_block: []f64,
+    block_size: usize,
+    offdiag_block: []const f64,
+    next_size: usize,
+    rhs_slice: []f64,
+    out_forward_block: []f64,
+) SolveError!void {
+    const rhs_width = next_size + 1;
+    @memcpy(temp_matrix[0 .. block_size * block_size], diag_block);
+    for (0..block_size) |row| {
+        for (0..next_size) |col| {
+            temp_rhs[row * rhs_width + col] = offdiag_block[row * next_size + col];
+        }
+        temp_rhs[row * rhs_width + next_size] = rhs_slice[row];
+    }
+    try solveLinearSystemMultipleInPlace(temp_matrix, temp_rhs, block_size, rhs_width);
+    for (0..block_size) |row| {
+        for (0..next_size) |col| {
+            out_forward_block[row * next_size + col] = temp_rhs[row * rhs_width + col];
+        }
+        rhs_slice[row] = temp_rhs[row * rhs_width + next_size];
+    }
+}
+
+fn solveDenseSystemInPlace(
+    temp_matrix: []f64,
+    diag_block: []const f64,
+    temp_rhs: []f64,
+    rhs_slice: []f64,
+    block_size: usize,
+) SolveError!void {
+    @memcpy(temp_matrix[0 .. block_size * block_size], diag_block);
+    @memcpy(temp_rhs[0..block_size], rhs_slice);
+    try solveLinearSystemInPlace(temp_matrix, temp_rhs[0..block_size], block_size);
+    @memcpy(rhs_slice, temp_rhs[0..block_size]);
+}
+
+fn subtractBlockProductTranspose(
+    target: []f64,
+    target_size: usize,
+    offdiag: []const f64,
+    left_size: usize,
+    solved_forward: []const f64,
+) void {
+    for (0..target_size) |row| {
+        for (0..target_size) |col| {
+            var sum: f64 = 0.0;
+            for (0..left_size) |k| {
+                sum += offdiag[k * target_size + row] * solved_forward[k * target_size + col];
+            }
+            target[row * target_size + col] -= sum;
+        }
+    }
+}
+
+fn subtractBlockVectorTranspose(
+    target: []f64,
+    offdiag: []const f64,
+    left_size: usize,
+    target_size: usize,
+    solved_rhs: []const f64,
+) void {
+    for (0..target_size) |row| {
+        var sum: f64 = 0.0;
+        for (0..left_size) |k| {
+            sum += offdiag[k * target_size + row] * solved_rhs[k];
+        }
+        target[row] -= sum;
+    }
+}
+
 fn updateSolveContextState(ctx: *SolveContext, x: []const f64) void {
     const prof = profiler.scope("optimize.updateSolveContextState");
     defer prof.end();
@@ -1610,6 +2292,24 @@ fn countLayoutEntryVariables(entry: SolveLayout) usize {
     if (entry.center_shift_x_index) |_| count += 1;
     if (entry.center_shift_y_index) |_| count += 1;
     return count;
+}
+
+fn firstLayoutEntryVariable(entry: SolveLayout) ?usize {
+    if (entry.yaw_index) |idx| return idx;
+    if (entry.pitch_index) |idx| return idx;
+    if (entry.roll_index) |idx| return idx;
+    if (entry.hfov_index) |idx| return idx;
+    if (entry.trans_x_index) |idx| return idx;
+    if (entry.trans_y_index) |idx| return idx;
+    if (entry.trans_z_index) |idx| return idx;
+    if (entry.translation_plane_yaw_index) |idx| return idx;
+    if (entry.translation_plane_pitch_index) |idx| return idx;
+    if (entry.radial_a_index) |idx| return idx;
+    if (entry.radial_b_index) |idx| return idx;
+    if (entry.radial_c_index) |idx| return idx;
+    if (entry.center_shift_x_index) |idx| return idx;
+    if (entry.center_shift_y_index) |idx| return idx;
+    return null;
 }
 
 fn appendRowParameterIndices(entry: SolveLayout, out: []usize, write_index: *usize) void {
@@ -3736,6 +4436,53 @@ fn solveLinearSystemInPlace(a: []f64, b: []f64, n: usize) SolveError!void {
                 a[row * n + col] -= factor * a[pivot_index * n + col];
             }
             b[row] -= factor * b[pivot_index];
+        }
+    }
+}
+
+fn solveLinearSystemMultipleInPlace(a: []f64, rhs: []f64, n: usize, rhs_width: usize) SolveError!void {
+    for (0..n) |pivot_index| {
+        var best_row = pivot_index;
+        var best_value = @abs(a[pivot_index * n + pivot_index]);
+        for ((pivot_index + 1)..n) |row| {
+            const value = @abs(a[row * n + pivot_index]);
+            if (value > best_value) {
+                best_value = value;
+                best_row = row;
+            }
+        }
+
+        if (best_value < 1e-9) {
+            return error.SingularSystem;
+        }
+
+        if (best_row != pivot_index) {
+            for (0..n) |col| {
+                std.mem.swap(f64, &a[pivot_index * n + col], &a[best_row * n + col]);
+            }
+            for (0..rhs_width) |col| {
+                std.mem.swap(f64, &rhs[pivot_index * rhs_width + col], &rhs[best_row * rhs_width + col]);
+            }
+        }
+
+        const pivot = a[pivot_index * n + pivot_index];
+        for (pivot_index..n) |col| {
+            a[pivot_index * n + col] /= pivot;
+        }
+        for (0..rhs_width) |col| {
+            rhs[pivot_index * rhs_width + col] /= pivot;
+        }
+
+        for (0..n) |row| {
+            if (row == pivot_index) continue;
+            const factor = a[row * n + pivot_index];
+            if (@abs(factor) < 1e-12) continue;
+            for (pivot_index..n) |col| {
+                a[row * n + col] -= factor * a[pivot_index * n + col];
+            }
+            for (0..rhs_width) |col| {
+                rhs[row * rhs_width + col] -= factor * rhs[pivot_index * rhs_width + col];
+            }
         }
     }
 }
