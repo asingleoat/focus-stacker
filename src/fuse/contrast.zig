@@ -13,11 +13,6 @@ pub const WeightMap = struct {
     }
 };
 
-const ScratchPad = struct {
-    sum: f64 = 0,
-    sum_sqr: f64 = 0,
-};
-
 pub fn computeLocalContrastWeights(
     allocator: std.mem.Allocator,
     image: *const gray.GrayImage,
@@ -109,8 +104,10 @@ fn computeRange(
     const last_row_exclusive = @min(end_row, image.height - border);
     if (first_row >= last_row_exclusive) return;
 
-    const scratch = try std.heap.page_allocator.alloc(ScratchPad, @as(usize, image.width));
-    defer std.heap.page_allocator.free(scratch);
+    const sums = try std.heap.page_allocator.alloc(f64, @as(usize, image.width));
+    defer std.heap.page_allocator.free(sums);
+    const sums_sqr = try std.heap.page_allocator.alloc(f64, @as(usize, image.width));
+    defer std.heap.page_allocator.free(sums_sqr);
 
     const width = @as(i32, @intCast(image.width));
     const width_usize = @as(usize, image.width);
@@ -131,10 +128,8 @@ fn computeRange(
                 col_sum += value;
                 col_sum_sqr += value * value;
             }
-            scratch[column_usize] = .{
-                .sum = col_sum,
-                .sum_sqr = col_sum_sqr,
-            };
+            sums[column_usize] = col_sum;
+            sums_sqr[column_usize] = col_sum_sqr;
         }
     }
 
@@ -145,9 +140,9 @@ fn computeRange(
 
         var column: i32 = 0;
         while (column < window_size_i) : (column += 1) {
-            const slot = scratch[@as(usize, @intCast(column))];
-            sum += slot.sum;
-            sum_sqr += slot.sum_sqr;
+            const idx = @as(usize, @intCast(column));
+            sum += sums[idx];
+            sum_sqr += sums_sqr[idx];
         }
 
         var x: i32 = border_i;
@@ -157,10 +152,10 @@ fn computeRange(
             if (x == width - border_i - 1) break;
 
             const next_column = x + border_i + 1;
-            const old_slot = &scratch[@as(usize, @intCast(x - border_i))];
-            const next_slot = scratch[@as(usize, @intCast(next_column))];
-            sum += next_slot.sum - old_slot.sum;
-            sum_sqr += next_slot.sum_sqr - old_slot.sum_sqr;
+            const old_idx = @as(usize, @intCast(x - border_i));
+            const next_idx = @as(usize, @intCast(next_column));
+            sum += sums[next_idx] - sums[old_idx];
+            sum_sqr += sums_sqr[next_idx] - sums_sqr[old_idx];
 
             x += 1;
         }
@@ -173,11 +168,10 @@ fn computeRange(
         const add_row_base = @as(usize, @intCast(add_y)) * width_usize;
         var column_update: usize = 0;
         while (column_update < width_usize) : (column_update += 1) {
-            const slot = &scratch[column_update];
             const removed = pixels[remove_row_base + column_update];
             const added = pixels[add_row_base + column_update];
-            slot.sum += added - removed;
-            slot.sum_sqr += added * added - removed * removed;
+            sums[column_update] += added - removed;
+            sums_sqr[column_update] += added * added - removed * removed;
         }
     }
 }
