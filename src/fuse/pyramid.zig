@@ -305,7 +305,7 @@ pub fn buildImageLaplacianPyramid(
         .pixels = try allocator.alloc(f32, @as(usize, image.info.width) * @as(usize, image.info.height) * 3),
     };
     errdefer gaussians[0].deinit(allocator);
-    fillRgbBase(image, gaussians[0].pixels);
+    try fillRgbBase(image, gaussians[0].pixels, 1);
 
     var built: usize = 1;
     errdefer {
@@ -371,7 +371,7 @@ fn buildAndAccumulateImagePyramidInto(
     const prof = profiler.scope("fuse.pyramid.buildImageLaplacianPyramidInto");
     defer prof.end();
 
-    fillRgbBase(image, gaussians[0].pixels);
+    try fillRgbBase(image, gaussians[0].pixels, jobs);
     var built: usize = 1;
     while (built < gaussians.len) : (built += 1) {
         const prev = gaussians[built - 1];
@@ -427,26 +427,70 @@ fn cloneRgbLevels(allocator: std.mem.Allocator, levels: []const RgbLevel) std.me
     return cloned;
 }
 
-fn fillRgbBase(image: *const image_io.Image, dst: []f32) void {
+fn fillRgbBase(image: *const image_io.Image, dst: []f32, jobs: usize) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCountForFill(jobs, image.info.width, image.info.height);
+    if (worker_count == 1) {
+        fillRgbBaseRows(image, dst, 0, image.info.height);
+        return;
+    }
+    const threads = try std.heap.page_allocator.alloc(std.Thread, worker_count - 1);
+    defer std.heap.page_allocator.free(threads);
+    var tasks = try std.heap.page_allocator.alloc(FillRgbBaseTask, worker_count - 1);
+    defer std.heap.page_allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, image.info.height), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, image.info.height));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, image.info.height));
+        tasks[i] = .{
+            .image = image,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+        };
+        thread.* = try std.Thread.spawn(.{}, fillRgbBaseThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    fillRgbBaseRows(
+        image,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, image.info.height)))),
+    );
+    for (threads) |thread| thread.join();
+}
+
+fn fillRgbBaseRows(image: *const image_io.Image, dst: []f32, start_row: u32, end_row: u32) void {
     const src_channels = @as(usize, image.info.color_channels + image.info.extra_channels);
-    const pixel_count = @as(usize, image.info.width) * @as(usize, image.info.height);
+    const row_width = @as(usize, image.info.width);
     switch (image.pixels) {
         .u8 => |src| {
-            for (0..pixel_count) |pixel_index| {
-                const src_base = pixel_index * src_channels;
-                const dst_base = pixel_index * 3;
-                dst[dst_base + 0] = @as(f32, @floatFromInt(src[src_base + 0]));
-                dst[dst_base + 1] = @as(f32, @floatFromInt(src[src_base + 1]));
-                dst[dst_base + 2] = @as(f32, @floatFromInt(src[src_base + 2]));
+            var row = start_row;
+            while (row < end_row) : (row += 1) {
+                const pixel_row_base = @as(usize, row) * row_width;
+                for (0..row_width) |column| {
+                    const pixel_index = pixel_row_base + column;
+                    const src_base = pixel_index * src_channels;
+                    const dst_base = pixel_index * 3;
+                    dst[dst_base + 0] = @as(f32, @floatFromInt(src[src_base + 0]));
+                    dst[dst_base + 1] = @as(f32, @floatFromInt(src[src_base + 1]));
+                    dst[dst_base + 2] = @as(f32, @floatFromInt(src[src_base + 2]));
+                }
             }
         },
         .u16 => |src| {
-            for (0..pixel_count) |pixel_index| {
-                const src_base = pixel_index * src_channels;
-                const dst_base = pixel_index * 3;
-                dst[dst_base + 0] = @as(f32, @floatFromInt(src[src_base + 0]));
-                dst[dst_base + 1] = @as(f32, @floatFromInt(src[src_base + 1]));
-                dst[dst_base + 2] = @as(f32, @floatFromInt(src[src_base + 2]));
+            var row = start_row;
+            while (row < end_row) : (row += 1) {
+                const pixel_row_base = @as(usize, row) * row_width;
+                for (0..row_width) |column| {
+                    const pixel_index = pixel_row_base + column;
+                    const src_base = pixel_index * src_channels;
+                    const dst_base = pixel_index * 3;
+                    dst[dst_base + 0] = @as(f32, @floatFromInt(src[src_base + 0]));
+                    dst[dst_base + 1] = @as(f32, @floatFromInt(src[src_base + 1]));
+                    dst[dst_base + 2] = @as(f32, @floatFromInt(src[src_base + 2]));
+                }
             }
         },
     }
@@ -798,6 +842,13 @@ const ExpandRgbTask = struct {
     storage: []f32,
 };
 
+const FillRgbBaseTask = struct {
+    image: *const image_io.Image,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+};
+
 const AccumulateLapTask = struct {
     width: u32,
     current: []const f32,
@@ -829,6 +880,10 @@ fn expandRgbThread(task: *const ExpandRgbTask) void {
     expandRgbRowsSequential(task.dst_w, task.dst_h, task.src_w, task.src_h, task.src, task.dst, task.start_row, task.end_row, task.storage);
 }
 
+fn fillRgbBaseThread(task: *const FillRgbBaseTask) void {
+    fillRgbBaseRows(task.image, task.dst, task.start_row, task.end_row);
+}
+
 fn accumulateLapThread(task: *const AccumulateLapTask) void {
     accumulateLapRowsSequential(task.width, task.current, task.expanded, task.mask, task.dst, task.start_row, task.end_row);
 }
@@ -842,6 +897,12 @@ fn effectiveWorkerCount(jobs: usize, rows: u32) usize {
 }
 
 fn effectiveWorkerCountForAccumulation(jobs: usize, width: u32, height: u32) usize {
+    const pixel_count = @as(usize, width) * @as(usize, height);
+    if (pixel_count < 262_144) return 1;
+    return effectiveWorkerCount(jobs, height);
+}
+
+fn effectiveWorkerCountForFill(jobs: usize, width: u32, height: u32) usize {
     const pixel_count = @as(usize, width) * @as(usize, height);
     if (pixel_count < 262_144) return 1;
     return effectiveWorkerCount(jobs, height);
