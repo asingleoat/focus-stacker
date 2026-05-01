@@ -389,31 +389,14 @@ fn buildAndAccumulateImagePyramidInto(
         const mask_level = masks[i];
         const dst_level = &dst_levels[i];
         try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded.pixels, jobs);
-        const pixel_count = @as(usize, current.width) * @as(usize, current.height);
-        for (0..pixel_count) |pixel_index| {
-            const weight = mask_level.pixels[pixel_index];
-            const base = pixel_index * 3;
-            const lap0: f32 = current.pixels[base + 0] - expanded.pixels[base + 0];
-            const lap1: f32 = current.pixels[base + 1] - expanded.pixels[base + 1];
-            const lap2: f32 = current.pixels[base + 2] - expanded.pixels[base + 2];
-            dst_level.pixels[base + 0] += lap0 * weight;
-            dst_level.pixels[base + 1] += lap1 * weight;
-            dst_level.pixels[base + 2] += lap2 * weight;
-        }
+        try accumulateLapWeighted(allocator, current.width, current.height, current.pixels, expanded.pixels, mask_level.pixels, dst_level.pixels, jobs);
     }
 
     const last_index = gaussians.len - 1;
     const last_gaussian = gaussians[last_index];
     const last_mask = masks[last_index];
     const last_dst = &dst_levels[last_index];
-    const last_pixel_count = @as(usize, last_gaussian.width) * @as(usize, last_gaussian.height);
-    for (0..last_pixel_count) |pixel_index| {
-        const weight = last_mask.pixels[pixel_index];
-        const base = pixel_index * 3;
-        last_dst.pixels[base + 0] += last_gaussian.pixels[base + 0] * weight;
-        last_dst.pixels[base + 1] += last_gaussian.pixels[base + 1] * weight;
-        last_dst.pixels[base + 2] += last_gaussian.pixels[base + 2] * weight;
-    }
+    try accumulateGaussianWeighted(allocator, last_gaussian.width, last_gaussian.height, last_gaussian.pixels, last_mask.pixels, last_dst.pixels, jobs);
 }
 
 fn deinitScalarLevels(allocator: std.mem.Allocator, levels: []ScalarLevel) void {
@@ -815,6 +798,25 @@ const ExpandRgbTask = struct {
     storage: []f32,
 };
 
+const AccumulateLapTask = struct {
+    width: u32,
+    current: []const f32,
+    expanded: []const f32,
+    mask: []const f32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+};
+
+const AccumulateGaussianTask = struct {
+    width: u32,
+    gaussian: []const f32,
+    mask: []const f32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+};
+
 fn reduceScalarThread(task: *const ReduceScalarTask) void {
     reduceScalarRowsSequential(task.src_w, task.src_h, task.src, task.dst_w, task.dst_h, task.dst, task.start_row, task.end_row, task.storage);
 }
@@ -827,8 +829,167 @@ fn expandRgbThread(task: *const ExpandRgbTask) void {
     expandRgbRowsSequential(task.dst_w, task.dst_h, task.src_w, task.src_h, task.src, task.dst, task.start_row, task.end_row, task.storage);
 }
 
+fn accumulateLapThread(task: *const AccumulateLapTask) void {
+    accumulateLapRowsSequential(task.width, task.current, task.expanded, task.mask, task.dst, task.start_row, task.end_row);
+}
+
+fn accumulateGaussianThread(task: *const AccumulateGaussianTask) void {
+    accumulateGaussianRowsSequential(task.width, task.gaussian, task.mask, task.dst, task.start_row, task.end_row);
+}
+
 fn effectiveWorkerCount(jobs: usize, rows: u32) usize {
     return @min(@max(jobs, 1), @as(usize, rows));
+}
+
+fn effectiveWorkerCountForAccumulation(jobs: usize, width: u32, height: u32) usize {
+    const pixel_count = @as(usize, width) * @as(usize, height);
+    if (pixel_count < 262_144) return 1;
+    return effectiveWorkerCount(jobs, height);
+}
+
+fn accumulateLapRowsSequential(
+    width: u32,
+    current: []const f32,
+    expanded: []const f32,
+    mask: []const f32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+) void {
+    const row_stride = @as(usize, width) * 3;
+    var row = start_row;
+    while (row < end_row) : (row += 1) {
+        const pixel_row_base = @as(usize, row) * @as(usize, width);
+        const channel_row_base = @as(usize, row) * row_stride;
+        for (0..@as(usize, width)) |column| {
+            const weight = mask[pixel_row_base + column];
+            const base = channel_row_base + column * 3;
+            const lap0: f32 = current[base + 0] - expanded[base + 0];
+            const lap1: f32 = current[base + 1] - expanded[base + 1];
+            const lap2: f32 = current[base + 2] - expanded[base + 2];
+            dst[base + 0] += lap0 * weight;
+            dst[base + 1] += lap1 * weight;
+            dst[base + 2] += lap2 * weight;
+        }
+    }
+}
+
+fn accumulateGaussianRowsSequential(
+    width: u32,
+    gaussian: []const f32,
+    mask: []const f32,
+    dst: []f32,
+    start_row: u32,
+    end_row: u32,
+) void {
+    const row_stride = @as(usize, width) * 3;
+    var row = start_row;
+    while (row < end_row) : (row += 1) {
+        const pixel_row_base = @as(usize, row) * @as(usize, width);
+        const channel_row_base = @as(usize, row) * row_stride;
+        for (0..@as(usize, width)) |column| {
+            const weight = mask[pixel_row_base + column];
+            const base = channel_row_base + column * 3;
+            dst[base + 0] += gaussian[base + 0] * weight;
+            dst[base + 1] += gaussian[base + 1] * weight;
+            dst[base + 2] += gaussian[base + 2] * weight;
+        }
+    }
+}
+
+fn accumulateLapWeighted(
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    current: []const f32,
+    expanded: []const f32,
+    mask: []const f32,
+    dst: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCountForAccumulation(jobs, width, height);
+    if (worker_count == 1) {
+        accumulateLapRowsSequential(width, current, expanded, mask, dst, 0, height);
+        return;
+    }
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(AccumulateLapTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, height), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, height));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, height));
+        tasks[i] = .{
+            .width = width,
+            .current = current,
+            .expanded = expanded,
+            .mask = mask,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+        };
+        thread.* = try std.Thread.spawn(.{}, accumulateLapThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    accumulateLapRowsSequential(
+        width,
+        current,
+        expanded,
+        mask,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, height)))),
+    );
+    for (threads) |thread| thread.join();
+}
+
+fn accumulateGaussianWeighted(
+    allocator: std.mem.Allocator,
+    width: u32,
+    height: u32,
+    gaussian: []const f32,
+    mask: []const f32,
+    dst: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCountForAccumulation(jobs, width, height);
+    if (worker_count == 1) {
+        accumulateGaussianRowsSequential(width, gaussian, mask, dst, 0, height);
+        return;
+    }
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(AccumulateGaussianTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, height), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, height));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, height));
+        tasks[i] = .{
+            .width = width,
+            .gaussian = gaussian,
+            .mask = mask,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+        };
+        thread.* = try std.Thread.spawn(.{}, accumulateGaussianThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    accumulateGaussianRowsSequential(
+        width,
+        gaussian,
+        mask,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, height)))),
+    );
+    for (threads) |thread| thread.join();
 }
 
 fn ensureReducedScalarRow(
