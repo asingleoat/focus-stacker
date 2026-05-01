@@ -805,13 +805,33 @@ fn samplePixelBilinearU8Interior(
     const base11 = base01 + src_channels;
     const support = w00 + w10 + w01 + w11;
 
-    for (0..src_channels) |channel| {
-        const value =
-            @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
-            @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
-            @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
-            @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
-        dst[channel] = @as(u8, @intFromFloat(@round(value / support)));
+    switch (src_channels) {
+        1 => {
+            const value =
+                @as(f64, @floatFromInt(pixels[base00])) * w00 +
+                @as(f64, @floatFromInt(pixels[base10])) * w10 +
+                @as(f64, @floatFromInt(pixels[base01])) * w01 +
+                @as(f64, @floatFromInt(pixels[base11])) * w11;
+            dst[0] = @as(u8, @intFromFloat(@round(value / support)));
+        },
+        3 => {
+            inline for (0..3) |channel| {
+                const value =
+                    @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
+                    @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
+                    @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
+                    @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
+                dst[channel] = @as(u8, @intFromFloat(@round(value / support)));
+            }
+        },
+        else => for (0..src_channels) |channel| {
+            const value =
+                @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
+                @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
+                @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
+                @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
+            dst[channel] = @as(u8, @intFromFloat(@round(value / support)));
+        },
     }
     if (dst_channels > src_channels) {
         dst[src_channels] = 255;
@@ -883,13 +903,33 @@ fn samplePixelBilinearU16Interior(
     const base11 = base01 + src_channels;
     const support = w00 + w10 + w01 + w11;
 
-    for (0..src_channels) |channel| {
-        const value =
-            @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
-            @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
-            @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
-            @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
-        dst[channel] = @as(u16, @intFromFloat(@round(value / support)));
+    switch (src_channels) {
+        1 => {
+            const value =
+                @as(f64, @floatFromInt(pixels[base00])) * w00 +
+                @as(f64, @floatFromInt(pixels[base10])) * w10 +
+                @as(f64, @floatFromInt(pixels[base01])) * w01 +
+                @as(f64, @floatFromInt(pixels[base11])) * w11;
+            dst[0] = @as(u16, @intFromFloat(@round(value / support)));
+        },
+        3 => {
+            inline for (0..3) |channel| {
+                const value =
+                    @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
+                    @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
+                    @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
+                    @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
+                dst[channel] = @as(u16, @intFromFloat(@round(value / support)));
+            }
+        },
+        else => for (0..src_channels) |channel| {
+            const value =
+                @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
+                @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
+                @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
+                @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
+            dst[channel] = @as(u16, @intFromFloat(@round(value / support)));
+        },
     }
     if (dst_channels > src_channels) {
         dst[src_channels] = 65535;
