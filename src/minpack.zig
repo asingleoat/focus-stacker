@@ -10,6 +10,7 @@ pub const Params = struct {
     factor: f64,
     progress_label: ?[]const u8 = null,
     progress_trial_step_interval: usize = 0,
+    progress_detailed: bool = false,
 };
 
 pub const Result = struct {
@@ -28,6 +29,14 @@ pub fn JacobianFn(comptime Context: type) type {
 
 const machep: f64 = std.math.floatEps(f64);
 const dwarf: f64 = std.math.floatMin(f64);
+
+fn progressNowMs() i64 {
+    return std.time.milliTimestamp();
+}
+
+fn progressElapsedSeconds(start_ms: i64) f64 {
+    return @as(f64, @floatFromInt(progressNowMs() - start_ms)) / 1000.0;
+}
 
 pub fn lmdif(
     comptime Context: type,
@@ -150,20 +159,59 @@ fn lmdifAdvanced(
                 );
             }
 
+            const iteration_start_ms = if (params.progress_detailed) progressNowMs() else 0;
+            if (params.progress_label) |label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: building jacobian for outer iteration {d}\n",
+                        .{ label, outer_iterations },
+                    );
+                }
+            }
+
+            const jacobian_start_ms = if (params.progress_detailed) progressNowMs() else 0;
+            var added_jacobian_evals: usize = 0;
             if (jacobianFn) |buildJacobian| {
                 const added = try buildJacobian(ctx, x, fvec, fjac, m, n, params.epsfcn);
                 nfev += added;
                 jacobian_evaluations += added;
+                added_jacobian_evals = added;
             } else {
                 try fdjac2(Context, ctx, evalFn, x, fvec, fjac, m, n, params.epsfcn, wa4);
                 nfev += n;
                 jacobian_evaluations += n;
+                added_jacobian_evals = n;
+            }
+            if (params.progress_label) |label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: jacobian ready for outer iteration {d} (+{d} evals, elapsed={d:.3}s)\n",
+                        .{ label, outer_iterations, added_jacobian_evals, progressElapsedSeconds(jacobian_start_ms) },
+                    );
+                }
             }
             if (sparse_style_lm) |*workspace| {
                 @memcpy(workspace.jacobian, fjac);
             }
 
+            const factor_start_ms = if (params.progress_detailed) progressNowMs() else 0;
+            if (params.progress_label) |label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: factoring jacobian for outer iteration {d}\n",
+                        .{ label, outer_iterations },
+                    );
+                }
+            }
             qrfac(fjac, m, n, true, ipvt, wa1, wa2, wa3);
+            if (params.progress_label) |label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: factorization ready for outer iteration {d} (elapsed={d:.3}s)\n",
+                        .{ label, outer_iterations, progressElapsedSeconds(factor_start_ms) },
+                    );
+                }
+            }
 
             if (iter == 1) {
                 for (0..n) |j| {
@@ -216,6 +264,15 @@ fn lmdifAdvanced(
                 return makeResult(4, nfev, outer_iterations, trial_steps, lmpar_iterations, accepted_steps, jacobian_evaluations);
             }
 
+            if (params.progress_label) |label| {
+                if (params.progress_detailed) {
+                    std.debug.print(
+                        "optimizer {s}: model ready for outer iteration {d} (gnorm={d:.6}, elapsed={d:.3}s)\n",
+                        .{ label, outer_iterations, gnorm, progressElapsedSeconds(iteration_start_ms) },
+                    );
+                }
+            }
+
             while (true) {
                 {
                     const trial_prof = profiler.scope("minpack.lmdif.trial_step");
@@ -223,7 +280,12 @@ fn lmdifAdvanced(
                     trial_steps += 1;
 
                     if (params.progress_label) |label| {
-                        if (params.progress_trial_step_interval > 0 and
+                        if (params.progress_detailed) {
+                            std.debug.print(
+                                "optimizer {s}: trial step {d} start (outer={d}, nfev={d}, accepted={d}, lmpar_iters={d})\n",
+                                .{ label, trial_steps, outer_iterations, nfev, accepted_steps, lmpar_iterations },
+                            );
+                        } else if (params.progress_trial_step_interval > 0 and
                             trial_steps % params.progress_trial_step_interval == 0)
                         {
                             std.debug.print(
@@ -233,6 +295,8 @@ fn lmdifAdvanced(
                         }
                     }
 
+                    const trial_start_ms = if (params.progress_detailed) progressNowMs() else 0;
+                    const lmpar_start_ms = if (params.progress_detailed) progressNowMs() else 0;
                     lmpar_iterations += if (sparse_style_lm) |*workspace|
                         try lmparSparseStyleDense(
                             workspace,
@@ -251,6 +315,14 @@ fn lmdifAdvanced(
                         )
                     else
                         try lmpar(allocator, fjac, m, n, ipvt, diag, qtf, delta, &par, wa1, wa2, wa3, wa4);
+                    if (params.progress_label) |label| {
+                        if (params.progress_detailed) {
+                            std.debug.print(
+                                "optimizer {s}: trial step {d} lmpar ready (par={d:.6}, delta={d:.6}, elapsed={d:.3}s)\n",
+                                .{ label, trial_steps, par, delta, progressElapsedSeconds(lmpar_start_ms) },
+                            );
+                        }
+                    }
 
                     for (0..n) |j| {
                         wa1[j] = -wa1[j];
@@ -262,9 +334,18 @@ fn lmdifAdvanced(
                         delta = @min(delta, pnorm);
                     }
 
+                    const eval_start_ms = if (params.progress_detailed) progressNowMs() else 0;
                     try evalFn(ctx, wa2, wa4);
                     nfev += 1;
                     const fnorm1 = enorm(wa4);
+                    if (params.progress_label) |label| {
+                        if (params.progress_detailed) {
+                            std.debug.print(
+                                "optimizer {s}: trial step {d} residuals ready (fnorm1={d:.6}, elapsed={d:.3}s)\n",
+                                .{ label, trial_steps, fnorm1, progressElapsedSeconds(eval_start_ms) },
+                            );
+                        }
+                    }
 
                     var actred: f64 = -1.0;
                     if (0.1 * fnorm1 < fnorm) {
@@ -308,6 +389,23 @@ fn lmdifAdvanced(
                         xnorm = enorm(wa2);
                         iter += 1;
                         accepted_steps += 1;
+                    }
+
+                    if (params.progress_label) |label| {
+                        if (params.progress_detailed) {
+                            std.debug.print(
+                                "optimizer {s}: trial step {d} done (ratio={d:.6}, actred={d:.6}, prered={d:.6}, accepted={s}, elapsed={d:.3}s)\n",
+                                .{
+                                    label,
+                                    trial_steps,
+                                    ratio,
+                                    actred,
+                                    prered,
+                                    if (ratio >= 1.0e-4) "yes" else "no",
+                                    progressElapsedSeconds(trial_start_ms),
+                                },
+                            );
+                        }
                     }
 
                     const info1 = @abs(actred) <= params.ftol and prered <= params.ftol and 0.5 * ratio <= 1.0;

@@ -1128,6 +1128,7 @@ fn refinePosesIteratively(
         .factor = 100.0,
         .progress_label = if (verbose > 0) strategyLabel(strategy) else null,
         .progress_trial_step_interval = if (verbose > 0) 25 else 0,
+        .progress_detailed = verbose > 0 and (variable_count >= 256 or residual_count >= 10000),
     };
     if (verbose > 0) {
         std.debug.print(
