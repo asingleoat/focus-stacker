@@ -398,6 +398,7 @@ fn remapU8RowsNoTranslationLens(
     const pano_x_step_z = cache.world_to_local[2][0];
     const constant_z = -cache.dest_focal;
     const base_x = roi_left - cache.dest_center_x;
+    const has_radial_distortion = cache.radial_a != 0.0 or cache.radial_b != 0.0 or cache.radial_c != 0.0;
 
     for (row_start..row_end) |y| {
         const pano_y = (roi_top + @as(f64, @floatFromInt(y))) - cache.dest_center_y;
@@ -422,7 +423,13 @@ fn remapU8RowsNoTranslationLens(
             } else {
                 const radial_x = cache.image_focal * (local_x / denom) + cache.center_shift_x;
                 const radial_y = cache.image_focal * (local_y / denom) + cache.center_shift_y;
-                const sample = undistortSourcePoint(cache, radial_x, radial_y);
+                const sample = if (has_radial_distortion)
+                    undistortSourcePoint(cache, radial_x, radial_y)
+                else
+                    optimize.Point2{
+                        .x = cache.src_center_x + radial_x,
+                        .y = cache.src_center_y + radial_y,
+                    };
                 samplePixelBilinearU8(dst[dst_base .. dst_base + dst_channels], src_pixels, width, height, src_channels, dst_channels, sample.x, sample.y);
             }
             dst_base += dst_channels;
@@ -491,6 +498,7 @@ fn remapU16RowsNoTranslationLens(
     const pano_x_step_z = cache.world_to_local[2][0];
     const constant_z = -cache.dest_focal;
     const base_x = roi_left - cache.dest_center_x;
+    const has_radial_distortion = cache.radial_a != 0.0 or cache.radial_b != 0.0 or cache.radial_c != 0.0;
 
     for (row_start..row_end) |y| {
         const pano_y = (roi_top + @as(f64, @floatFromInt(y))) - cache.dest_center_y;
@@ -515,7 +523,13 @@ fn remapU16RowsNoTranslationLens(
             } else {
                 const radial_x = cache.image_focal * (local_x / denom) + cache.center_shift_x;
                 const radial_y = cache.image_focal * (local_y / denom) + cache.center_shift_y;
-                const sample = undistortSourcePoint(cache, radial_x, radial_y);
+                const sample = if (has_radial_distortion)
+                    undistortSourcePoint(cache, radial_x, radial_y)
+                else
+                    optimize.Point2{
+                        .x = cache.src_center_x + radial_x,
+                        .y = cache.src_center_y + radial_y,
+                    };
                 samplePixelBilinearU16(dst[dst_base .. dst_base + dst_channels], src_pixels, width, height, src_channels, dst_channels, sample.x, sample.y);
             }
             dst_base += dst_channels;
@@ -706,12 +720,6 @@ fn samplePixelBilinearU8(
     const prof = profiler.scope("remap.samplePixelBilinearU8");
     defer prof.end();
 
-    const support = bilinearSupport(width, height, x, y);
-    if (support <= 0) {
-        @memset(dst[0..dst_channels], 0);
-        return;
-    }
-
     const x0 = @as(i32, @intFromFloat(@floor(x)));
     const y0 = @as(i32, @intFromFloat(@floor(y)));
     const x1 = x0 + 1;
@@ -724,6 +732,17 @@ fn samplePixelBilinearU8(
     const w10 = fx * one_minus_fy;
     const w01 = one_minus_fx * fy;
     const w11 = fx * fy;
+
+    if (x0 >= 0 and y0 >= 0 and x1 < @as(i32, @intCast(width)) and y1 < @as(i32, @intCast(height))) {
+        samplePixelBilinearU8Interior(dst, pixels, width, src_channels, dst_channels, @intCast(x0), @intCast(y0), w00, w10, w01, w11);
+        return;
+    }
+
+    const support = supportFromWeights(width, height, x0, y0, x1, y1, w00, w10, w01, w11);
+    if (support <= 0.0) {
+        @memset(dst[0..dst_channels], 0);
+        return;
+    }
 
     for (0..src_channels) |channel| {
         dst[channel] = bilinearChannelU8Soft(pixels, width, height, src_channels, x0, y0, x1, y1, channel, w00, w10, w01, w11, support);
@@ -766,6 +785,39 @@ fn undistortSourcePoint(cache: optimize.InverseTransformCache, dx: f64, dy: f64)
     };
 }
 
+fn samplePixelBilinearU8Interior(
+    dst: []u8,
+    pixels: []const u8,
+    width: u32,
+    src_channels: usize,
+    dst_channels: usize,
+    x0: u32,
+    y0: u32,
+    w00: f64,
+    w10: f64,
+    w01: f64,
+    w11: f64,
+) void {
+    const row_stride = @as(usize, width) * src_channels;
+    const base00 = @as(usize, y0) * row_stride + @as(usize, x0) * src_channels;
+    const base10 = base00 + src_channels;
+    const base01 = base00 + row_stride;
+    const base11 = base01 + src_channels;
+    const support = w00 + w10 + w01 + w11;
+
+    for (0..src_channels) |channel| {
+        const value =
+            @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
+            @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
+            @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
+            @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
+        dst[channel] = @as(u8, @intFromFloat(@round(value / support)));
+    }
+    if (dst_channels > src_channels) {
+        dst[src_channels] = 255;
+    }
+}
+
 fn samplePixelBilinearU16(
     dst: []u16,
     pixels: []const u16,
@@ -778,12 +830,6 @@ fn samplePixelBilinearU16(
 ) void {
     const prof = profiler.scope("remap.samplePixelBilinearU16");
     defer prof.end();
-
-    const support = bilinearSupport(width, height, x, y);
-    if (support <= 0) {
-        @memset(dst[0..dst_channels], 0);
-        return;
-    }
 
     const x0 = @as(i32, @intFromFloat(@floor(x)));
     const y0 = @as(i32, @intFromFloat(@floor(y)));
@@ -798,6 +844,17 @@ fn samplePixelBilinearU16(
     const w01 = one_minus_fx * fy;
     const w11 = fx * fy;
 
+    if (x0 >= 0 and y0 >= 0 and x1 < @as(i32, @intCast(width)) and y1 < @as(i32, @intCast(height))) {
+        samplePixelBilinearU16Interior(dst, pixels, width, src_channels, dst_channels, @intCast(x0), @intCast(y0), w00, w10, w01, w11);
+        return;
+    }
+
+    const support = supportFromWeights(width, height, x0, y0, x1, y1, w00, w10, w01, w11);
+    if (support <= 0.0) {
+        @memset(dst[0..dst_channels], 0);
+        return;
+    }
+
     for (0..src_channels) |channel| {
         dst[channel] = bilinearChannelU16Soft(pixels, width, height, src_channels, x0, y0, x1, y1, channel, w00, w10, w01, w11, support);
     }
@@ -806,21 +863,45 @@ fn samplePixelBilinearU16(
     }
 }
 
-fn bilinearSupport(width: u32, height: u32, x: f64, y: f64) f64 {
-    const x0 = @as(i32, @intFromFloat(@floor(x)));
-    const y0 = @as(i32, @intFromFloat(@floor(y)));
-    const x1 = x0 + 1;
-    const y1 = y0 + 1;
-    const fx = x - @as(f64, @floatFromInt(x0));
-    const fy = y - @as(f64, @floatFromInt(y0));
-    const one_minus_fx = 1.0 - fx;
-    const one_minus_fy = 1.0 - fy;
+fn samplePixelBilinearU16Interior(
+    dst: []u16,
+    pixels: []const u16,
+    width: u32,
+    src_channels: usize,
+    dst_channels: usize,
+    x0: u32,
+    y0: u32,
+    w00: f64,
+    w10: f64,
+    w01: f64,
+    w11: f64,
+) void {
+    const row_stride = @as(usize, width) * src_channels;
+    const base00 = @as(usize, y0) * row_stride + @as(usize, x0) * src_channels;
+    const base10 = base00 + src_channels;
+    const base01 = base00 + row_stride;
+    const base11 = base01 + src_channels;
+    const support = w00 + w10 + w01 + w11;
 
+    for (0..src_channels) |channel| {
+        const value =
+            @as(f64, @floatFromInt(pixels[base00 + channel])) * w00 +
+            @as(f64, @floatFromInt(pixels[base10 + channel])) * w10 +
+            @as(f64, @floatFromInt(pixels[base01 + channel])) * w01 +
+            @as(f64, @floatFromInt(pixels[base11 + channel])) * w11;
+        dst[channel] = @as(u16, @intFromFloat(@round(value / support)));
+    }
+    if (dst_channels > src_channels) {
+        dst[src_channels] = 65535;
+    }
+}
+
+fn supportFromWeights(width: u32, height: u32, x0: i32, y0: i32, x1: i32, y1: i32, w00: f64, w10: f64, w01: f64, w11: f64) f64 {
     var support: f64 = 0.0;
-    if (inBounds(x0, y0, width, height)) support += one_minus_fx * one_minus_fy;
-    if (inBounds(x1, y0, width, height)) support += fx * one_minus_fy;
-    if (inBounds(x0, y1, width, height)) support += one_minus_fx * fy;
-    if (inBounds(x1, y1, width, height)) support += fx * fy;
+    if (inBounds(x0, y0, width, height)) support += w00;
+    if (inBounds(x1, y0, width, height)) support += w10;
+    if (inBounds(x0, y1, width, height)) support += w01;
+    if (inBounds(x1, y1, width, height)) support += w11;
     return support;
 }
 
