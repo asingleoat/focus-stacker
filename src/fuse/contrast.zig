@@ -177,6 +177,7 @@ fn computeRange(
     const window_size_i = @as(i32, @intCast(window_size));
     const full_window_samples = window_size * window_size;
     const pixels = image.pixels;
+    const use_5x5 = window_size == 5;
 
     {
         var column_usize: usize = 0;
@@ -208,9 +209,12 @@ fn computeRange(
         }
 
         var x: i32 = border_i;
+        var out_index = @as(usize, @intCast(row)) * width_usize + @as(usize, @intCast(border_i));
         while (true) {
-            const out_index = @as(usize, @intCast(row)) * @as(usize, image.width) + @as(usize, @intCast(x));
-            weights[out_index] = sampleStdDev(sum, sum_sqr, full_window_samples);
+            weights[out_index] = if (use_5x5)
+                sampleStdDev5x5(sum, sum_sqr)
+            else
+                sampleStdDev(sum, sum_sqr, full_window_samples);
             if (x == width - border_i - 1) break;
 
             const next_column = x + border_i + 1;
@@ -220,6 +224,7 @@ fn computeRange(
             sum_sqr += sums_sqr[next_idx] - sums_sqr[old_idx];
 
             x += 1;
+            out_index += 1;
         }
 
         if (row + 1 >= @as(i32, @intCast(last_row_exclusive))) continue;
@@ -243,6 +248,11 @@ fn sampleStdDev(sum: f64, sum_sqr: f64, n: u32) f32 {
     const denom = @as(f64, @floatFromInt(n - 1));
     const n_f = @as(f64, @floatFromInt(n));
     const variance = @max((sum_sqr - ((sum * sum) / n_f)) / denom, 0.0);
+    return @floatCast(std.math.sqrt(variance));
+}
+
+fn sampleStdDev5x5(sum: f64, sum_sqr: f64) f32 {
+    const variance = @max((sum_sqr - ((sum * sum) / 25.0)) / 24.0, 0.0);
     return @floatCast(std.math.sqrt(variance));
 }
 
