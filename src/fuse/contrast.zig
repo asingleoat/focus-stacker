@@ -113,22 +113,25 @@ fn computeRange(
     defer std.heap.page_allocator.free(scratch);
 
     const width = @as(i32, @intCast(image.width));
+    const width_usize = @as(usize, image.width);
     const border_i = @as(i32, @intCast(border));
     const window_size_i = @as(i32, @intCast(window_size));
     const full_window_samples = window_size * window_size;
+    const pixels = image.pixels;
 
     {
-        var column: i32 = 0;
-        while (column < width) : (column += 1) {
+        var column_usize: usize = 0;
+        while (column_usize < width_usize) : (column_usize += 1) {
             var col_sum: f64 = 0;
             var col_sum_sqr: f64 = 0;
-            var yy = @as(i32, @intCast(first_row)) - border_i;
-            while (yy <= @as(i32, @intCast(first_row)) + border_i) : (yy += 1) {
-                const value = image.pixel(@intCast(column), @intCast(yy));
+            var yy = first_row - border;
+            const yy_end = first_row + border;
+            while (yy <= yy_end) : (yy += 1) {
+                const value = pixels[@as(usize, yy) * width_usize + column_usize];
                 col_sum += value;
                 col_sum_sqr += value * value;
             }
-            scratch[@as(usize, @intCast(column))] = .{
+            scratch[column_usize] = .{
                 .sum = col_sum,
                 .sum_sqr = col_sum_sqr,
             };
@@ -166,11 +169,13 @@ fn computeRange(
 
         const remove_y = row - border_i;
         const add_y = row + border_i + 1;
-        var column_update: i32 = 0;
-        while (column_update < width) : (column_update += 1) {
-            const slot = &scratch[@as(usize, @intCast(column_update))];
-            const removed = image.pixel(@intCast(column_update), @intCast(remove_y));
-            const added = image.pixel(@intCast(column_update), @intCast(add_y));
+        const remove_row_base = @as(usize, @intCast(remove_y)) * width_usize;
+        const add_row_base = @as(usize, @intCast(add_y)) * width_usize;
+        var column_update: usize = 0;
+        while (column_update < width_usize) : (column_update += 1) {
+            const slot = &scratch[column_update];
+            const removed = pixels[remove_row_base + column_update];
+            const added = pixels[add_row_base + column_update];
             slot.sum += added - removed;
             slot.sum_sqr += added * added - removed * removed;
         }
