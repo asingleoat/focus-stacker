@@ -182,7 +182,7 @@ fn fuseRemappedImages(
             try runPyramidStackFusion(allocator, cfg, images, plan, poses, roi, jobs, &gray_buffer, &weight_buffer, &norm_weight_sums, &output, &pyramid_accumulator);
             const collapsed_info = fusedOutputInfo(output.?.info);
             output.?.deinit(allocator);
-            output = try fuse.pyramid.collapseToImage(allocator, collapsed_info, &pyramid_accumulator.?);
+            output = try fuse.pyramid.collapseToImageWithJobs(allocator, collapsed_info, &pyramid_accumulator.?, jobs);
         },
     }
 
