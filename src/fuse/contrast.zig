@@ -13,6 +13,41 @@ pub const WeightMap = struct {
     }
 };
 
+pub const Workspace = struct {
+    width: u32,
+    worker_count: usize,
+    sums_storage: []f64,
+    sums_sqr_storage: []f64,
+
+    pub fn init(allocator: std.mem.Allocator, width: u32, worker_count: usize) std.mem.Allocator.Error!Workspace {
+        const worker_slots = @max(worker_count, 1);
+        const per_worker = @as(usize, width);
+        return .{
+            .width = width,
+            .worker_count = worker_slots,
+            .sums_storage = try allocator.alloc(f64, per_worker * worker_slots),
+            .sums_sqr_storage = try allocator.alloc(f64, per_worker * worker_slots),
+        };
+    }
+
+    pub fn deinit(self: *Workspace, allocator: std.mem.Allocator) void {
+        allocator.free(self.sums_storage);
+        allocator.free(self.sums_sqr_storage);
+    }
+
+    fn sumsFor(self: *Workspace, worker_index: usize) []f64 {
+        const width_usize = @as(usize, self.width);
+        const start = worker_index * width_usize;
+        return self.sums_storage[start .. start + width_usize];
+    }
+
+    fn sumsSqrFor(self: *Workspace, worker_index: usize) []f64 {
+        const width_usize = @as(usize, self.width);
+        const start = worker_index * width_usize;
+        return self.sums_sqr_storage[start .. start + width_usize];
+    }
+};
+
 pub fn computeLocalContrastWeights(
     allocator: std.mem.Allocator,
     image: *const gray.GrayImage,
@@ -40,11 +75,24 @@ pub fn computeLocalContrastWeightsInto(
     jobs: usize,
     weights: []f32,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    var workspace = try Workspace.init(std.heap.page_allocator, image.width, @min(@max(jobs, 1), @as(usize, @intCast(image.height))));
+    defer workspace.deinit(std.heap.page_allocator);
+    return computeLocalContrastWeightsWithWorkspace(image, window_size, jobs, weights, &workspace);
+}
+
+pub fn computeLocalContrastWeightsWithWorkspace(
+    image: *const gray.GrayImage,
+    window_size: u32,
+    jobs: usize,
+    weights: []f32,
+    workspace: *Workspace,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     const prof = profiler.scope("fuse.contrast.computeLocalContrastWeightsInto");
     defer prof.end();
 
     const count = @as(usize, image.width) * @as(usize, image.height);
     std.debug.assert(weights.len >= count);
+    std.debug.assert(workspace.width == image.width);
     @memset(weights[0..count], 0);
 
     if (window_size < 3 or image.width < window_size or image.height < window_size) {
@@ -53,10 +101,12 @@ pub fn computeLocalContrastWeightsInto(
 
     const worker_count = @min(@max(jobs, 1), @as(usize, @intCast(image.height)));
     if (worker_count <= 1) {
-        try computeRange(image, window_size, weights[0..count], 0, image.height);
+        try computeRange(image, window_size, weights[0..count], 0, image.height, workspace.sumsFor(0), workspace.sumsSqrFor(0));
     } else {
         var threads = try std.heap.page_allocator.alloc(std.Thread, worker_count - 1);
         defer std.heap.page_allocator.free(threads);
+        var tasks = try std.heap.page_allocator.alloc(ComputeRangeTask, worker_count - 1);
+        defer std.heap.page_allocator.free(tasks);
 
         const rows_per_worker = std.math.divCeil(usize, image.height, worker_count) catch unreachable;
         var started_threads: usize = 0;
@@ -67,24 +117,37 @@ pub fn computeLocalContrastWeightsInto(
         for (threads, 0..) |*thread, i| {
             const worker_start = @as(u32, @intCast((i + 1) * rows_per_worker));
             const worker_end = @as(u32, @intCast(@min((i + 2) * rows_per_worker, image.height)));
-            thread.* = try std.Thread.spawn(.{}, computeRangeThread, .{ image, window_size, weights[0..count], worker_start, worker_end });
+            tasks[i] = .{
+                .image = image,
+                .window_size = window_size,
+                .weights = weights[0..count],
+                .start_row = worker_start,
+                .end_row = worker_end,
+                .sums = workspace.sumsFor(i + 1),
+                .sums_sqr = workspace.sumsSqrFor(i + 1),
+            };
+            thread.* = try std.Thread.spawn(.{}, computeRangeThread, .{&tasks[i]});
             started_threads += 1;
         }
 
         const main_end = @as(u32, @intCast(@min(rows_per_worker, image.height)));
-        try computeRange(image, window_size, weights[0..count], 0, main_end);
+        try computeRange(image, window_size, weights[0..count], 0, main_end, workspace.sumsFor(0), workspace.sumsSqrFor(0));
         for (threads) |thread| thread.join();
     }
 }
 
-fn computeRangeThread(
+const ComputeRangeTask = struct {
     image: *const gray.GrayImage,
     window_size: u32,
     weights: []f32,
     start_row: u32,
     end_row: u32,
-) void {
-    computeRange(image, window_size, weights, start_row, end_row) catch @panic("OOM");
+    sums: []f64,
+    sums_sqr: []f64,
+};
+
+fn computeRangeThread(task: *const ComputeRangeTask) void {
+    computeRange(task.image, task.window_size, task.weights, task.start_row, task.end_row, task.sums, task.sums_sqr) catch @panic("OOM");
 }
 
 fn computeRange(
@@ -93,6 +156,8 @@ fn computeRange(
     weights: []f32,
     start_row: u32,
     end_row: u32,
+    sums: []f64,
+    sums_sqr: []f64,
 ) std.mem.Allocator.Error!void {
     const prof = profiler.scope("fuse.contrast.computeRange");
     defer prof.end();
@@ -104,13 +169,10 @@ fn computeRange(
     const last_row_exclusive = @min(end_row, image.height - border);
     if (first_row >= last_row_exclusive) return;
 
-    const sums = try std.heap.page_allocator.alloc(f64, @as(usize, image.width));
-    defer std.heap.page_allocator.free(sums);
-    const sums_sqr = try std.heap.page_allocator.alloc(f64, @as(usize, image.width));
-    defer std.heap.page_allocator.free(sums_sqr);
-
     const width = @as(i32, @intCast(image.width));
     const width_usize = @as(usize, image.width);
+    std.debug.assert(sums.len >= width_usize);
+    std.debug.assert(sums_sqr.len >= width_usize);
     const border_i = @as(i32, @intCast(border));
     const window_size_i = @as(i32, @intCast(window_size));
     const full_window_samples = window_size * window_size;

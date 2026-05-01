@@ -29,6 +29,8 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
     defer smoothed_weight_buffer.deinit(allocator);
     var soft_blend: ?blend.SoftBlendState = null;
     defer if (soft_blend) |*state| state.deinit(allocator);
+    var contrast_workspace: ?contrast.Workspace = null;
+    defer if (contrast_workspace) |*value| value.deinit(allocator);
     var norm_weight_sums = std.ArrayListUnmanaged(f32){};
     defer norm_weight_sums.deinit(allocator);
     var pyramid_accumulator: ?pyramid.Accumulator = null;
@@ -48,6 +50,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 &weight_buffer,
                 &smoothed_weight_buffer,
                 &soft_blend,
+                &contrast_workspace,
                 &output,
             );
             switch (cfg.method) {
@@ -63,6 +66,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 jobs,
                 &gray_buffer,
                 &weight_buffer,
+                &contrast_workspace,
                 &norm_weight_sums,
                 &output,
                 &pyramid_accumulator,
@@ -88,6 +92,7 @@ fn runSinglePass(
     weight_buffer: *std.ArrayListUnmanaged(f32),
     smoothed_weight_buffer: *std.ArrayListUnmanaged(f32),
     soft_blend: *?blend.SoftBlendState,
+    contrast_workspace: *?contrast.Workspace,
     output: *?image_io.Image,
 ) RunError!void {
     var expected: ?io.StackInfo = null;
@@ -116,9 +121,10 @@ fn runSinglePass(
                 },
                 .pyramid_contrast => unreachable,
             }
+            contrast_workspace.* = try contrast.Workspace.init(allocator, image.info.width, jobs);
         }
 
-        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
         var weights = contrast.WeightMap{
             .width = image.info.width,
             .height = image.info.height,
@@ -146,6 +152,7 @@ fn runPyramidPass(
     jobs: usize,
     gray_buffer: *std.ArrayListUnmanaged(f32),
     weight_buffer: *std.ArrayListUnmanaged(f32),
+    contrast_workspace: *?contrast.Workspace,
     norm_weight_sums: *std.ArrayListUnmanaged(f32),
     output: *?image_io.Image,
     accumulator: *?pyramid.Accumulator,
@@ -187,6 +194,7 @@ fn runPyramidPass(
             @memset(norm_weight_sums.items, 0);
             accumulator.* = try pyramid.Accumulator.init(allocator, image.info.width, image.info.height);
             workspace = try pyramid.Workspace.init(allocator, image.info.width, image.info.height);
+            contrast_workspace.* = try contrast.Workspace.init(allocator, image.info.width, jobs);
             cache_images = estimatedCacheBytes(image.info, input_count) <= max_cached_pyramid_bytes;
             cache_weights = cache_images and estimatedCacheBytes(image.info, input_count) + estimatedWeightCacheBytes(image.info.width, image.info.height, input_count) <= max_cached_pyramid_total_bytes;
             if (cfg.verbose > 0 and cache_images) {
@@ -196,7 +204,7 @@ fn runPyramidPass(
                 }
             }
         }
-        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+        try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
         masks.applySupportInto(&image, weight_buffer.items);
         for (norm_weight_sums.items, weight_buffer.items) |*sum, weight| sum.* += weight;
         if (cache_images) {
@@ -218,7 +226,7 @@ fn runPyramidPass(
             if (cache_weights) {
                 @memcpy(weight_buffer.items, cached_weights.items[index]);
             } else {
-                try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, weight_buffer.items);
+                try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
                 masks.applySupportInto(image, weight_buffer.items);
             }
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
@@ -231,7 +239,7 @@ fn runPyramidPass(
             }
             var image = try io.loadAndValidateImage(allocator, path, expected);
             defer image.deinit(allocator);
-            try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items);
+            try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
             masks.applySupportInto(&image, weight_buffer.items);
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
             try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, &accumulator.*.?, &workspace.?, jobs);
@@ -258,6 +266,7 @@ fn computeWeightMapForImage(
     image: *const image_io.Image,
     gray_pixels: []f32,
     weights: []f32,
+    workspace: *contrast.Workspace,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     gray.fillFromLoaded(gray_pixels, image);
     var gray_image = gray.GrayImage{
@@ -269,7 +278,7 @@ fn computeWeightMapForImage(
             .u16 => 65535.0,
         },
     };
-    try contrast.computeLocalContrastWeightsInto(&gray_image, cfg.contrast_window_size, jobs, weights);
+    try contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, cfg.contrast_window_size, jobs, weights, workspace);
 }
 
 fn fusedOutputInfo(info: image_io.ImageInfo) image_io.ImageInfo {
