@@ -146,6 +146,21 @@ pub fn build(b: *std.Build) void {
     configureImageDeps(remap_probe.root_module);
     configureFftDeps(b, remap_probe.root_module);
 
+    const fuse_mask_probe = b.addExecutable(.{
+        .name = "fuse_mask_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/fuse_mask_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "align_stack_core", .module = core },
+                .{ .name = "focus_fuse_core", .module = fuse_core },
+            },
+        }),
+    });
+    fuse_mask_probe.root_module.addOptions("build_options", build_options);
+    configureImageDeps(fuse_mask_probe.root_module);
+
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -202,6 +217,13 @@ pub fn build(b: *std.Build) void {
     }
     const remap_step = b.step("probe-remap", "Run the remap/output benchmark probe");
     remap_step.dependOn(&run_remap_probe.step);
+
+    const run_fuse_mask_probe = b.addRunArtifact(fuse_mask_probe);
+    if (b.args) |args| {
+        run_fuse_mask_probe.addArgs(args);
+    }
+    const fuse_mask_step = b.step("probe-fuse-masks", "Dump normalized focus-fusion masks");
+    fuse_mask_step.dependOn(&run_fuse_mask_probe.step);
 
     const core_tests = b.addTest(.{
         .root_module = core,
