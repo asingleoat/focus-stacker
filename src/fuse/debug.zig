@@ -127,6 +127,10 @@ pub fn dumpWorkspaceLevels(
         var lap_name_buf: [64]u8 = undefined;
         const lap_name = try std.fmt.bufPrint(&lap_name_buf, "lap_{d:0>2}.tif", .{level_index});
         try writeRgbMapU16SignedAuto(allocator, frame_dir, lap_name, current.width, current.height, lap);
+
+        var lap_summary_buf: [64]u8 = undefined;
+        const lap_summary = try std.fmt.bufPrint(&lap_summary_buf, "lap_{d:0>2}_profile.txt", .{level_index});
+        try writeRgbAbsProfileSummary(frame_dir, lap_summary, current.width, current.height, lap);
     }
 }
 
@@ -158,6 +162,10 @@ pub fn dumpWeightedWorkspaceLevels(
         var name_buf: [64]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "weighted_{d:0>2}.tif", .{level_index});
         try writeRgbMapU16SignedAuto(allocator, frame_dir, name, current.width, current.height, weighted);
+
+        var summary_buf: [96]u8 = undefined;
+        const summary_name = try std.fmt.bufPrint(&summary_buf, "weighted_{d:0>2}_profile.txt", .{level_index});
+        try writeRgbAbsProfileSummary(frame_dir, summary_name, current.width, current.height, weighted);
     }
 
     const last_index = workspace.mask_levels.len - 1;
@@ -176,6 +184,10 @@ pub fn dumpWeightedWorkspaceLevels(
     var name_buf: [64]u8 = undefined;
     const name = try std.fmt.bufPrint(&name_buf, "weighted_{d:0>2}.tif", .{last_index});
     try writeRgbMapU16SignedAuto(allocator, frame_dir, name, gaussian.width, gaussian.height, weighted);
+
+    var summary_buf: [96]u8 = undefined;
+    const summary_name = try std.fmt.bufPrint(&summary_buf, "weighted_{d:0>2}_profile.txt", .{last_index});
+    try writeRgbAbsProfileSummary(frame_dir, summary_name, gaussian.width, gaussian.height, weighted);
 }
 
 pub fn dumpAccumulatorLevels(
@@ -320,4 +332,81 @@ fn writePixelsRgbU16(
         .pixels = .{ .u16 = pixels },
     };
     try core.image_io.writeTiff(path, &image);
+}
+
+fn writeRgbAbsProfileSummary(
+    output_dir: []const u8,
+    filename: []const u8,
+    width: u32,
+    height: u32,
+    values: []const f32,
+) !void {
+    const row_count = @as(usize, height);
+    const col_count = @as(usize, width);
+    var row_means = try std.heap.page_allocator.alloc(f64, row_count);
+    defer std.heap.page_allocator.free(row_means);
+    var col_means = try std.heap.page_allocator.alloc(f64, col_count);
+    defer std.heap.page_allocator.free(col_means);
+    @memset(row_means, 0);
+    @memset(col_means, 0);
+
+    var global_sum: f64 = 0.0;
+    for (0..row_count) |row| {
+        const row_base = row * col_count * 3;
+        for (0..col_count) |col| {
+            const base = row_base + col * 3;
+            const magnitude = (@abs(values[base + 0]) + @abs(values[base + 1]) + @abs(values[base + 2])) / 3.0;
+            const mag64 = @as(f64, magnitude);
+            row_means[row] += mag64;
+            col_means[col] += mag64;
+            global_sum += mag64;
+        }
+    }
+    const pixel_count = @as(f64, @floatFromInt(row_count * col_count));
+    for (row_means) |*value| value.* /= @as(f64, @floatFromInt(col_count));
+    for (col_means) |*value| value.* /= @as(f64, @floatFromInt(row_count));
+    const global_mean = if (pixel_count > 0.0) global_sum / pixel_count else 0.0;
+
+    const row_stddev = stddev(row_means, global_mean);
+    const col_stddev = stddev(col_means, global_mean);
+    const row_neighbor_rms = neighborRms(row_means);
+    const col_neighbor_rms = neighborRms(col_means);
+
+    const path = try std.fs.path.join(std.heap.page_allocator, &.{ output_dir, filename });
+    defer std.heap.page_allocator.free(path);
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    var buf: [1024]u8 = undefined;
+    var writer = file.writer(&buf);
+    const w = &writer.interface;
+    try w.print("width={d}\n", .{width});
+    try w.print("height={d}\n", .{height});
+    try w.print("global_mean_abs={d:.8}\n", .{global_mean});
+    try w.print("row_mean_stddev={d:.8}\n", .{row_stddev});
+    try w.print("col_mean_stddev={d:.8}\n", .{col_stddev});
+    try w.print("row_neighbor_rms={d:.8}\n", .{row_neighbor_rms});
+    try w.print("col_neighbor_rms={d:.8}\n", .{col_neighbor_rms});
+    try w.print("stddev_ratio_row_over_col={d:.8}\n", .{if (col_stddev > 0.0) row_stddev / col_stddev else 0.0});
+    try w.print("neighbor_rms_ratio_row_over_col={d:.8}\n", .{if (col_neighbor_rms > 0.0) row_neighbor_rms / col_neighbor_rms else 0.0});
+    try w.flush();
+}
+
+fn stddev(values: []const f64, mean: f64) f64 {
+    if (values.len == 0) return 0.0;
+    var sum_sq: f64 = 0.0;
+    for (values) |value| {
+        const diff = value - mean;
+        sum_sq += diff * diff;
+    }
+    return @sqrt(sum_sq / @as(f64, @floatFromInt(values.len)));
+}
+
+fn neighborRms(values: []const f64) f64 {
+    if (values.len <= 1) return 0.0;
+    var sum_sq: f64 = 0.0;
+    for (values[1..], values[0 .. values.len - 1]) |current, prev| {
+        const diff = current - prev;
+        sum_sq += diff * diff;
+    }
+    return @sqrt(sum_sq / @as(f64, @floatFromInt(values.len - 1)));
 }
