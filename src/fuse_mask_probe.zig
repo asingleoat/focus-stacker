@@ -70,8 +70,7 @@ pub fn main() !void {
     }
 
     const info = cached_images.items[0].info;
-    try writeScalarMapU16Auto(allocator, output_dir, "norm_sum.tif", info.width, info.height, norm_weight_sums.items);
-    try writeScalarMapU16Unit(allocator, output_dir, "union_support.tif", info.width, info.height, support_buffer.items);
+    try fuse.debug.dumpPyramidScalars(allocator, output_dir, info.width, info.height, norm_weight_sums.items, support_buffer.items);
 
     for (cached_images.items, 0..) |*image, index| {
         try computeWeightMap(image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
@@ -83,11 +82,9 @@ pub fn main() !void {
             .u16 => 65535.0,
         };
         for (weight_buffer.items) |*value| value.* /= sample_scale;
-        try writeScalarMapU16Unit(allocator, output_dir, raw_filename, info.width, info.height, weight_buffer.items);
+        try fuse.debug.writeScalarMapU16Unit(allocator, output_dir, raw_filename, info.width, info.height, weight_buffer.items);
         fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, cached_images.items.len, gray_buffer.items);
-        var filename_buf: [64]u8 = undefined;
-        const filename = try std.fmt.bufPrint(&filename_buf, "mask_{d:0>4}.tif", .{index});
-        try writeScalarMapU16Unit(allocator, output_dir, filename, info.width, info.height, gray_buffer.items);
+        try fuse.debug.dumpNormalizedMask(allocator, output_dir, info.width, info.height, index, gray_buffer.items);
     }
 }
 
@@ -107,69 +104,4 @@ fn computeWeightMap(
         .sample_scale = fuse.grayscale.sampleScaleForType(image.info.sample_type),
     };
     try fuse.contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, support_pixels, 5, 1, weights, workspace);
-}
-
-fn writeScalarMapU16Unit(
-    allocator: std.mem.Allocator,
-    output_dir: []const u8,
-    filename: []const u8,
-    width: u32,
-    height: u32,
-    values: []const f32,
-) !void {
-    const count = @as(usize, width) * @as(usize, height);
-    const pixels = try allocator.alloc(u16, count);
-    defer allocator.free(pixels);
-
-    for (values[0..count], 0..) |value, i| {
-        pixels[i] = @intFromFloat(std.math.clamp(value * 65535.0 + 0.5, 0.0, 65535.0));
-    }
-    try writePixelsU16(allocator, output_dir, filename, width, height, pixels);
-}
-
-fn writeScalarMapU16Auto(
-    allocator: std.mem.Allocator,
-    output_dir: []const u8,
-    filename: []const u8,
-    width: u32,
-    height: u32,
-    values: []const f32,
-) !void {
-    const count = @as(usize, width) * @as(usize, height);
-    const pixels = try allocator.alloc(u16, count);
-    defer allocator.free(pixels);
-
-    var max_value: f32 = 0.0;
-    for (values[0..count]) |value| max_value = @max(max_value, value);
-    const scale: f32 = if (max_value > 0.0) 65535.0 / max_value else 0.0;
-    for (values[0..count], 0..) |value, i| {
-        pixels[i] = if (scale > 0.0) @intFromFloat(std.math.clamp(value * scale + 0.5, 0.0, 65535.0)) else 0;
-    }
-    try writePixelsU16(allocator, output_dir, filename, width, height, pixels);
-}
-
-fn writePixelsU16(
-    allocator: std.mem.Allocator,
-    output_dir: []const u8,
-    filename: []const u8,
-    width: u32,
-    height: u32,
-    pixels: []u16,
-) !void {
-    const path = try std.fs.path.join(allocator, &.{ output_dir, filename });
-    defer allocator.free(path);
-    var image = core.image_io.Image{
-        .info = .{
-            .format = .tiff,
-            .width = width,
-            .height = height,
-            .color_model = .grayscale,
-            .sample_type = .u16,
-            .color_channels = 1,
-            .extra_channels = 0,
-            .exposure_value = null,
-        },
-        .pixels = .{ .u16 = pixels },
-    };
-    try core.image_io.writeTiff(path, &image);
 }

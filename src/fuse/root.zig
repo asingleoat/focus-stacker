@@ -7,6 +7,7 @@ pub const profiler = core.profiler;
 pub const blend = @import("blend.zig");
 pub const config = @import("config.zig");
 pub const contrast = @import("contrast.zig");
+pub const debug = @import("debug.zig");
 pub const grayscale = @import("grayscale.zig");
 pub const io = @import("io.zig");
 pub const masks = @import("masks.zig");
@@ -19,4 +20,5 @@ test {
     _ = @import("grayscale.zig");
     _ = @import("masks.zig");
     _ = @import("pyramid.zig");
+    _ = @import("debug.zig");
 }

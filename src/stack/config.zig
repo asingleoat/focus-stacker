@@ -27,6 +27,7 @@ pub const Config = struct {
     hard_mask: bool = true,
     fuse_method: fuse_core.config.Method = .hardmask_contrast,
     output_path: ?[]const u8 = null,
+    dump_masks_dir: ?[]const u8 = null,
     input_files: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -104,10 +105,20 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) (ParseE
             cfg.output_path = arg["--output=".len..];
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--dump-masks-dir=")) {
+            cfg.dump_masks_dir = arg["--dump-masks-dir=".len..];
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
             cfg.output_path = args[i];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--dump-masks-dir")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.dump_masks_dir = args[i];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--threads=")) {
@@ -199,6 +210,7 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
         \\                               pyramid-contrast
+        \\  --dump-masks-dir dir       Dump raw/normalized masks for debugging
         \\  --hard-mask                Keep hard-mask winner selection
         \\  -h, --help                 Display this help text
         \\
@@ -233,6 +245,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
         \\  hard mask: {}
         \\  fuse method: {s}
         \\  output: {s}
+        \\  dump masks dir: {s}
         \\
     ,
         .{
@@ -247,6 +260,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
             cfg.hard_mask,
             cfg.fuse_method.cliName(),
             cfg.output_path.?,
+            cfg.dump_masks_dir orelse "(disabled)",
         },
     );
 }

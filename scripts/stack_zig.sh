@@ -6,9 +6,9 @@
 # all-in-focus composite using align_image_stack_zig and a switchable fusion stage.
 #
 # Usage:
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] image1.jpg image2.jpg ...
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] S001_manifest.json
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] S001_manifest.json S002_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] image1.jpg image2.jpg ...
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] S001_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] S001_manifest.json S002_manifest.json
 #
 # Accepts any mix of image files and manifest JSON files.
 #
@@ -25,6 +25,7 @@ ALIGN_ERROR_THRESHOLD="${ALIGN_ERROR_THRESHOLD:-5}"
 ALIGN_THREADS="${ALIGN_THREADS:-}"
 ALIGN_PAIR_ALIGN_METHOD="${ALIGN_PAIR_ALIGN_METHOD:-hugin-ncc}"
 ALIGN_FUSE_METHOD="${ALIGN_FUSE_METHOD:-enfuse}"
+ALIGN_DUMP_MASKS_DIR="${ALIGN_DUMP_MASKS_DIR:-}"
 
 CONTRAST_WINDOW_SIZE="${CONTRAST_WINDOW_SIZE:-5}"
 HARD_MASK="${HARD_MASK:-true}"
@@ -99,6 +100,7 @@ main() {
     local threads="$ALIGN_THREADS"
     local pair_align_method="$ALIGN_PAIR_ALIGN_METHOD"
     local fuse_method="$ALIGN_FUSE_METHOD"
+    local dump_masks_dir="$ALIGN_DUMP_MASKS_DIR"
     local -a positional=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -129,19 +131,30 @@ main() {
                 fuse_method="${1#--fuse-method=}"
                 shift
                 ;;
+            --dump-masks-dir)
+                [[ $# -ge 2 ]] || die "missing value for --dump-masks-dir"
+                dump_masks_dir="$2"
+                shift 2
+                ;;
+            --dump-masks-dir=*)
+                dump_masks_dir="${1#--dump-masks-dir=}"
+                shift
+                ;;
             --help|-h)
                 cat <<EOF
-usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or manifests...>
+usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] <images or manifests...>
 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
   --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
   --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast
+  --dump-masks-dir DIR Dump raw/normalized pyramid masks for debugging
 
 Environment overrides:
   ALIGN_THREADS
   ALIGN_PAIR_ALIGN_METHOD
   ALIGN_FUSE_METHOD
+  ALIGN_DUMP_MASKS_DIR
   ALIGN_CONTROL_POINTS
   ALIGN_GRID_SIZE
   ALIGN_ERROR_THRESHOLD
@@ -177,7 +190,7 @@ EOF
     [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast|zig-pyramid-contrast)$ ]] || \
         die "--fuse-method must be one of: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast"
 
-    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] <images or manifests...>"
+    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] <images or manifests...>"
 
     local name
     name="$(derive_name "${positional[0]}")"
@@ -224,6 +237,9 @@ EOF
     fi
     echo "  Pair align: $pair_align_method"
     echo "  Fuse method: $fuse_method"
+    if [[ -n "$dump_masks_dir" ]]; then
+        echo "  Dump masks dir: $dump_masks_dir"
+    fi
     echo "  Output: $OUTPUT_DIR/${name}_stacked.tif"
     echo ""
 
@@ -300,6 +316,10 @@ EOF
         fi
         if [[ "$HARD_MASK" == true && "$fuse_method" == "zig-hardmask-contrast" ]]; then
             stacker_opts+=(--hard-mask)
+        fi
+        if [[ -n "$dump_masks_dir" ]]; then
+            mkdir -p "$dump_masks_dir"
+            stacker_opts+=(--dump-masks-dir "$dump_masks_dir")
         fi
         "$stacker_bin" \
             -v \

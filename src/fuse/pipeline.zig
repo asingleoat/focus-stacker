@@ -6,12 +6,13 @@ const profiler = core.profiler;
 const blend = @import("blend.zig");
 const config = @import("config.zig");
 const contrast = @import("contrast.zig");
+const debug = @import("debug.zig");
 const grayscale = @import("grayscale.zig");
 const io = @import("io.zig");
 const masks = @import("masks.zig");
 const pyramid = @import("pyramid.zig");
 
-pub const RunError = io.LoadError || image_io.SaveError || std.mem.Allocator.Error || std.Thread.SpawnError;
+pub const RunError = anyerror;
 const max_cached_pyramid_bytes: usize = 2 * 1024 * 1024 * 1024;
 const max_cached_pyramid_total_bytes: usize = 4 * 1024 * 1024 * 1024;
 
@@ -232,6 +233,17 @@ fn runPyramidPass(
         }
     }
 
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try debug.dumpPyramidScalars(
+            allocator,
+            dump_dir,
+            output.*.?.info.width,
+            output.*.?.info.height,
+            norm_weight_sums.items,
+            union_support.items,
+        );
+    }
+
     try gray_buffer.resize(allocator, norm_weight_sums.items.len);
 
     if (cache_images) {
@@ -245,7 +257,28 @@ fn runPyramidPass(
                 try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
                 masks.applySupportInto(image, weight_buffer.items);
             }
+            if (cfg.dump_masks_dir) |dump_dir| {
+                try debug.dumpRawMask(
+                    allocator,
+                    dump_dir,
+                    image.info.width,
+                    image.info.height,
+                    index,
+                    weight_buffer.items,
+                    grayscale.sampleScaleForType(image.info.sample_type),
+                );
+            }
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                try debug.dumpNormalizedMask(
+                    allocator,
+                    dump_dir,
+                    image.info.width,
+                    image.info.height,
+                    index,
+                    gray_buffer.items,
+                );
+            }
             try pyramid.accumulateImageWithWorkspace(allocator, image, gray_buffer.items, union_support.items, &accumulator.*.?, &workspace.?, jobs);
         }
     } else {
@@ -257,7 +290,28 @@ fn runPyramidPass(
             defer image.deinit(allocator);
             try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
             masks.applySupportInto(&image, weight_buffer.items);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                try debug.dumpRawMask(
+                    allocator,
+                    dump_dir,
+                    image.info.width,
+                    image.info.height,
+                    index,
+                    weight_buffer.items,
+                    grayscale.sampleScaleForType(image.info.sample_type),
+                );
+            }
             pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                try debug.dumpNormalizedMask(
+                    allocator,
+                    dump_dir,
+                    image.info.width,
+                    image.info.height,
+                    index,
+                    gray_buffer.items,
+                );
+            }
             try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, union_support.items, &accumulator.*.?, &workspace.?, jobs);
         }
     }

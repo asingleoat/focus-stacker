@@ -1,0 +1,117 @@
+const std = @import("std");
+const core = @import("align_stack_core");
+
+pub fn writeScalarMapU16Unit(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    filename: []const u8,
+    width: u32,
+    height: u32,
+    values: []const f32,
+) !void {
+    const count = @as(usize, width) * @as(usize, height);
+    const pixels = try allocator.alloc(u16, count);
+    defer allocator.free(pixels);
+
+    for (values[0..count], 0..) |value, i| {
+        pixels[i] = @intFromFloat(std.math.clamp(value * 65535.0 + 0.5, 0.0, 65535.0));
+    }
+    try writePixelsU16(allocator, output_dir, filename, width, height, pixels);
+}
+
+pub fn writeScalarMapU16Auto(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    filename: []const u8,
+    width: u32,
+    height: u32,
+    values: []const f32,
+) !void {
+    const count = @as(usize, width) * @as(usize, height);
+    const pixels = try allocator.alloc(u16, count);
+    defer allocator.free(pixels);
+
+    var max_value: f32 = 0.0;
+    for (values[0..count]) |value| max_value = @max(max_value, value);
+    const scale: f32 = if (max_value > 0.0) 65535.0 / max_value else 0.0;
+    for (values[0..count], 0..) |value, i| {
+        pixels[i] = if (scale > 0.0) @intFromFloat(std.math.clamp(value * scale + 0.5, 0.0, 65535.0)) else 0;
+    }
+    try writePixelsU16(allocator, output_dir, filename, width, height, pixels);
+}
+
+pub fn dumpPyramidScalars(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    width: u32,
+    height: u32,
+    norm_weight_sums: []const f32,
+    union_support: []const f32,
+) !void {
+    try std.fs.cwd().makePath(output_dir);
+    try writeScalarMapU16Auto(allocator, output_dir, "norm_sum.tif", width, height, norm_weight_sums);
+    try writeScalarMapU16Unit(allocator, output_dir, "union_support.tif", width, height, union_support);
+}
+
+pub fn dumpRawMask(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    width: u32,
+    height: u32,
+    image_index: usize,
+    weights: []const f32,
+    sample_scale: f32,
+) !void {
+    const count = @as(usize, width) * @as(usize, height);
+    const scaled = try allocator.alloc(f32, count);
+    defer allocator.free(scaled);
+
+    if (sample_scale > 0.0) {
+        for (weights[0..count], 0..) |value, i| scaled[i] = value / sample_scale;
+    } else {
+        @memcpy(scaled, weights[0..count]);
+    }
+
+    var filename_buf: [64]u8 = undefined;
+    const filename = try std.fmt.bufPrint(&filename_buf, "rawmask_{d:0>4}.tif", .{image_index});
+    try writeScalarMapU16Unit(allocator, output_dir, filename, width, height, scaled);
+}
+
+pub fn dumpNormalizedMask(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    width: u32,
+    height: u32,
+    image_index: usize,
+    normalized_mask: []const f32,
+) !void {
+    var filename_buf: [64]u8 = undefined;
+    const filename = try std.fmt.bufPrint(&filename_buf, "mask_{d:0>4}.tif", .{image_index});
+    try writeScalarMapU16Unit(allocator, output_dir, filename, width, height, normalized_mask);
+}
+
+fn writePixelsU16(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    filename: []const u8,
+    width: u32,
+    height: u32,
+    pixels: []u16,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ output_dir, filename });
+    defer allocator.free(path);
+    var image = core.image_io.Image{
+        .info = .{
+            .format = .tiff,
+            .width = width,
+            .height = height,
+            .color_model = .grayscale,
+            .sample_type = .u16,
+            .color_channels = 1,
+            .extra_channels = 0,
+            .exposure_value = null,
+        },
+        .pixels = .{ .u16 = pixels },
+    };
+    try core.image_io.writeTiff(path, &image);
+}

@@ -35,6 +35,7 @@ pub const Config = struct {
     hard_mask: bool = true,
     contrast_window_size: u32 = 5,
     output_path: ?[]const u8 = null,
+    dump_masks_dir: ?[]const u8 = null,
     input_files: std.ArrayListUnmanaged([]const u8) = .{},
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
@@ -92,10 +93,22 @@ pub fn parseArgs(
             continue;
         }
 
+        if (std.mem.startsWith(u8, arg, "--dump-masks-dir=")) {
+            cfg.dump_masks_dir = arg["--dump-masks-dir=".len..];
+            continue;
+        }
+
         if (std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
             cfg.output_path = args[i];
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--dump-masks-dir")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.dump_masks_dir = args[i];
             continue;
         }
 
@@ -161,6 +174,7 @@ pub fn renderUsage(
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
         \\                               pyramid-contrast
+        \\  --dump-masks-dir dir       Dump raw/normalized masks for debugging
         \\  --contrast-window-size n   Local contrast window size (default: 5)
         \\  --hard-mask                Keep upstream-style hard-mask winner selection
         \\  -h, --help                 Display this help text
@@ -194,6 +208,7 @@ pub fn renderSummary(
         \\  hard mask: {}
         \\  contrast window size: {d}
         \\  output: {s}
+        \\  dump masks dir: {s}
         \\
     ,
         .{
@@ -204,6 +219,7 @@ pub fn renderSummary(
             cfg.hard_mask,
             cfg.contrast_window_size,
             cfg.output_path.?,
+            cfg.dump_masks_dir orelse "(disabled)",
         },
     );
 }
