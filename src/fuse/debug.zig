@@ -146,6 +146,21 @@ pub fn dumpAccumulatorLevels(
     }
 }
 
+pub fn dumpCollapsedBase(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    collapse_step: usize,
+    level: *const pyramid.RgbLevel,
+) !void {
+    const collapse_dir = try std.fs.path.join(allocator, &.{ output_dir, "collapse" });
+    defer allocator.free(collapse_dir);
+    try std.fs.cwd().makePath(collapse_dir);
+
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "base_after_{d:0>2}.tif", .{collapse_step});
+    try writeRgbMapU16Auto(allocator, collapse_dir, name, level.width, level.height, level.pixels);
+}
+
 pub fn writeRgbMapU16Auto(
     allocator: std.mem.Allocator,
     output_dir: []const u8,

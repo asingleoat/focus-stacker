@@ -3,6 +3,7 @@ const core = @import("align_stack_core");
 const image_io = core.image_io;
 const profiler = core.profiler;
 const masks = @import("masks.zig");
+const debug = @import("debug.zig");
 
 pub const ScalarLevel = struct {
     width: u32,
@@ -210,6 +211,16 @@ pub fn collapseToImageWithJobs(
     result: *const Accumulator,
     jobs: usize,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!image_io.Image {
+    return collapseToImageWithJobsAndDebug(allocator, info, result, jobs, null);
+}
+
+pub fn collapseToImageWithJobsAndDebug(
+    allocator: std.mem.Allocator,
+    info: image_io.ImageInfo,
+    result: *const Accumulator,
+    jobs: usize,
+    debug_dir: ?[]const u8,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!image_io.Image {
     const prof = profiler.scope("fuse.pyramid.collapseToImage");
     defer prof.end();
 
@@ -226,6 +237,9 @@ pub fn collapseToImageWithJobs(
         try expandRgb(allocator, parent.width, parent.height, child.width, child.height, child.pixels, expanded, jobs);
         for (parent.pixels, expanded) |*dst, value| {
             dst.* += value;
+        }
+        if (debug_dir) |dir| {
+            debug.dumpCollapsedBase(allocator, dir, level_index - 1, parent) catch {};
         }
     }
 

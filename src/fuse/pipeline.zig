@@ -82,7 +82,13 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
             );
             const collapsed_info = fusedOutputInfo(output.?.info);
             output.?.deinit(allocator);
-            output = try pyramid.collapseToImageWithJobs(allocator, collapsed_info, &pyramid_accumulator.?, jobs);
+            output = try pyramid.collapseToImageWithJobsAndDebug(
+                allocator,
+                collapsed_info,
+                &pyramid_accumulator.?,
+                jobs,
+                cfg.dump_masks_dir,
+            );
         },
     }
 
