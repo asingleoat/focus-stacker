@@ -242,6 +242,11 @@ fn runPyramidStackFusion(
     defer if (workspace) |*value| value.deinit(allocator);
     var contrast_workspace: ?fuse.contrast.Workspace = null;
     defer if (contrast_workspace) |*value| value.deinit(allocator);
+    var debug_mask_sum_levels: ?[]fuse.pyramid.ScalarLevel = null;
+    defer if (debug_mask_sum_levels) |levels| {
+        for (levels) |*level| level.deinit(allocator);
+        allocator.free(levels);
+    };
     var cache_images = false;
     const debug_level_index = active_indices.items.len / 2;
 
@@ -268,6 +273,21 @@ fn runPyramidStackFusion(
             pyramid_accumulator.* = try fuse.pyramid.Accumulator.init(allocator, remapped.info.width, remapped.info.height);
             workspace = try fuse.pyramid.Workspace.init(allocator, remapped.info.width, remapped.info.height);
             contrast_workspace = try fuse.contrast.Workspace.init(allocator, remapped.info.width, jobs);
+            if (cfg.dump_masks_dir != null) {
+                const template_levels = workspace.?.mask_levels;
+                const levels = try allocator.alloc(fuse.pyramid.ScalarLevel, template_levels.len);
+                errdefer allocator.free(levels);
+                for (template_levels, 0..) |template_level, i| {
+                    const level_count = @as(usize, template_level.width) * @as(usize, template_level.height);
+                    levels[i] = .{
+                        .width = template_level.width,
+                        .height = template_level.height,
+                        .pixels = try allocator.alloc(f32, level_count),
+                    };
+                    @memset(levels[i].pixels, 0);
+                }
+                debug_mask_sum_levels = levels;
+            }
             cache_images = estimatedCacheBytes(remapped.info, active_indices.items.len) <= max_cached_pyramid_bytes;
             if (cfg.verbose > 0 and cache_images) {
                 std.debug.print("stack fuse: caching remapped images in memory for pyramid blend\n", .{});
@@ -325,6 +345,11 @@ fn runPyramidStackFusion(
                 );
             }
             try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
+            if (debug_mask_sum_levels) |levels| {
+                for (levels, workspace.?.mask_levels) |*dst_level, src_level| {
+                    for (dst_level.pixels, src_level.pixels) |*dst, src_value| dst.* += src_value;
+                }
+            }
             if (cfg.dump_masks_dir) |dump_dir| {
                 if (active_i == debug_level_index) {
                     try fuse.debug.dumpWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
@@ -366,6 +391,11 @@ fn runPyramidStackFusion(
                 );
             }
             try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
+            if (debug_mask_sum_levels) |levels| {
+                for (levels, workspace.?.mask_levels) |*dst_level, src_level| {
+                    for (dst_level.pixels, src_level.pixels) |*dst, src_value| dst.* += src_value;
+                }
+            }
             if (cfg.dump_masks_dir) |dump_dir| {
                 if (active_i == debug_level_index) {
                     try fuse.debug.dumpWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
@@ -376,6 +406,9 @@ fn runPyramidStackFusion(
 
     if (cfg.dump_masks_dir) |dump_dir| {
         try fuse.debug.dumpAccumulatorLevels(allocator, dump_dir, &pyramid_accumulator.*.?);
+        if (debug_mask_sum_levels) |levels| {
+            try fuse.debug.dumpScalarLevels(allocator, dump_dir, "mask_sum_levels", "mask_sum", levels);
+        }
     }
 }
 

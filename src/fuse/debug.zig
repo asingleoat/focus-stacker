@@ -161,6 +161,24 @@ pub fn dumpCollapsedBase(
     try writeRgbMapU16Auto(allocator, collapse_dir, name, level.width, level.height, level.pixels);
 }
 
+pub fn dumpScalarLevels(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    subdir_name: []const u8,
+    prefix: []const u8,
+    levels: []const pyramid.ScalarLevel,
+) !void {
+    const dir = try std.fs.path.join(allocator, &.{ output_dir, subdir_name });
+    defer allocator.free(dir);
+    try std.fs.cwd().makePath(dir);
+
+    for (levels, 0..) |level, level_index| {
+        var name_buf: [96]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "{s}_{d:0>2}.tif", .{ prefix, level_index });
+        try writeScalarMapU16Unit(allocator, dir, name, level.width, level.height, level.pixels);
+    }
+}
+
 pub fn writeRgbMapU16Auto(
     allocator: std.mem.Allocator,
     output_dir: []const u8,
