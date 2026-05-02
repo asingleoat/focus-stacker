@@ -189,6 +189,7 @@ fn runPyramidPass(
     defer if (workspace) |*value| value.deinit(allocator);
     var cache_images = false;
     var cache_weights = false;
+    const debug_level_index = input_count / 2;
 
     for (cfg.input_files.items, 0..) |path, index| {
         if (cfg.verbose > 0) {
@@ -280,6 +281,11 @@ fn runPyramidPass(
                 );
             }
             try pyramid.accumulateImageWithWorkspace(allocator, image, gray_buffer.items, union_support.items, &accumulator.*.?, &workspace.?, jobs);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                if (index == debug_level_index) {
+                    try debug.dumpWorkspaceLevels(allocator, dump_dir, index, &workspace.?);
+                }
+            }
         }
     } else {
         for (cfg.input_files.items, 0..) |path, index| {
@@ -313,7 +319,16 @@ fn runPyramidPass(
                 );
             }
             try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, union_support.items, &accumulator.*.?, &workspace.?, jobs);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                if (index == debug_level_index) {
+                    try debug.dumpWorkspaceLevels(allocator, dump_dir, index, &workspace.?);
+                }
+            }
         }
+    }
+
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try debug.dumpAccumulatorLevels(allocator, dump_dir, &accumulator.*.?);
     }
 }
 

@@ -237,6 +237,7 @@ fn runPyramidStackFusion(
     var contrast_workspace: ?fuse.contrast.Workspace = null;
     defer if (contrast_workspace) |*value| value.deinit(allocator);
     var cache_images = false;
+    const debug_level_index = active_indices.items.len / 2;
 
     for (active_indices.items, 0..) |image_index, active_i| {
         if (cfg.verbose > 0) {
@@ -318,6 +319,11 @@ fn runPyramidStackFusion(
                 );
             }
             try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                if (active_i == debug_level_index) {
+                    try fuse.debug.dumpWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
+                }
+            }
         }
     } else {
         for (active_indices.items, 0..) |image_index, active_i| {
@@ -354,7 +360,16 @@ fn runPyramidStackFusion(
                 );
             }
             try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
+            if (cfg.dump_masks_dir) |dump_dir| {
+                if (active_i == debug_level_index) {
+                    try fuse.debug.dumpWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
+                }
+            }
         }
+    }
+
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try fuse.debug.dumpAccumulatorLevels(allocator, dump_dir, &pyramid_accumulator.*.?);
     }
 }
 

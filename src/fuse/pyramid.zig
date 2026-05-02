@@ -1191,6 +1191,7 @@ fn kernelWeight(index: usize) f32 {
     };
 }
 
+
 fn effectiveWorkerCount(jobs: usize, rows: u32) usize {
     return @min(@max(jobs, 1), @as(usize, rows));
 }
