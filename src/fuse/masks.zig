@@ -29,6 +29,60 @@ pub fn applySupportInto(image: *const image_io.Image, weights: []f32) void {
     }
 }
 
+pub fn fillBinarySupport(image: *const image_io.Image, output: []f32) void {
+    const count = @as(usize, image.info.width) * @as(usize, image.info.height);
+    std.debug.assert(output.len >= count);
+
+    if (image.info.extra_channels == 0) {
+        @memset(output[0..count], 1.0);
+        return;
+    }
+
+    const pixel_channels = @as(usize, image.info.color_channels + image.info.extra_channels);
+    const alpha_offset = @as(usize, image.info.color_channels);
+    switch (image.pixels) {
+        .u8 => |src| {
+            for (0..count) |index| {
+                const alpha_index = index * pixel_channels + alpha_offset;
+                output[index] = if (src[alpha_index] > 0) 1.0 else 0.0;
+            }
+        },
+        .u16 => |src| {
+            for (0..count) |index| {
+                const alpha_index = index * pixel_channels + alpha_offset;
+                output[index] = if (src[alpha_index] > 0) 1.0 else 0.0;
+            }
+        },
+    }
+}
+
+pub fn accumulateBinarySupportMax(image: *const image_io.Image, output: []f32) void {
+    const count = @as(usize, image.info.width) * @as(usize, image.info.height);
+    std.debug.assert(output.len >= count);
+
+    if (image.info.extra_channels == 0) {
+        @memset(output[0..count], 1.0);
+        return;
+    }
+
+    const pixel_channels = @as(usize, image.info.color_channels + image.info.extra_channels);
+    const alpha_offset = @as(usize, image.info.color_channels);
+    switch (image.pixels) {
+        .u8 => |src| {
+            for (0..count) |index| {
+                const alpha_index = index * pixel_channels + alpha_offset;
+                if (src[alpha_index] > 0) output[index] = 1.0;
+            }
+        },
+        .u16 => |src| {
+            for (0..count) |index| {
+                const alpha_index = index * pixel_channels + alpha_offset;
+                if (src[alpha_index] > 0) output[index] = 1.0;
+            }
+        },
+    }
+}
+
 pub fn blurFiveTapInto(
     allocator: std.mem.Allocator,
     width: u32,

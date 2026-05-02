@@ -103,6 +103,8 @@ fn fuseRemappedImages(
     defer best_weights.deinit(allocator);
     var gray_buffer = std.ArrayListUnmanaged(f32){};
     defer gray_buffer.deinit(allocator);
+    var support_buffer = std.ArrayListUnmanaged(f32){};
+    defer support_buffer.deinit(allocator);
     var weight_buffer = std.ArrayListUnmanaged(f32){};
     defer weight_buffer.deinit(allocator);
     var smoothed_weight_buffer = std.ArrayListUnmanaged(f32){};
@@ -113,6 +115,8 @@ fn fuseRemappedImages(
     defer if (contrast_workspace) |*value| value.deinit(allocator);
     var norm_weight_sums = std.ArrayListUnmanaged(f32){};
     defer norm_weight_sums.deinit(allocator);
+    var union_support = std.ArrayListUnmanaged(f32){};
+    defer union_support.deinit(allocator);
     var pyramid_accumulator: ?fuse.pyramid.Accumulator = null;
     defer if (pyramid_accumulator) |*value| value.deinit(allocator);
 
@@ -144,6 +148,7 @@ fn fuseRemappedImages(
                     output = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
                     const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
                     try gray_buffer.resize(allocator, count);
+                    try support_buffer.resize(allocator, count);
                     try weight_buffer.resize(allocator, count);
                     switch (cfg.fuse_method) {
                         .hardmask_contrast => {
@@ -159,7 +164,7 @@ fn fuseRemappedImages(
                     contrast_workspace = try fuse.contrast.Workspace.init(allocator, remapped.info.width, jobs);
                 }
 
-                try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items, &(contrast_workspace.?));
+                try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
                 var weights = fuse.contrast.WeightMap{
                     .width = remapped.info.width,
                     .height = remapped.info.height,
@@ -182,7 +187,7 @@ fn fuseRemappedImages(
             }
         },
         .pyramid_contrast => {
-            try runPyramidStackFusion(allocator, cfg, images, plan, poses, roi, jobs, &gray_buffer, &weight_buffer, &norm_weight_sums, &output, &pyramid_accumulator);
+            try runPyramidStackFusion(allocator, cfg, images, plan, poses, roi, jobs, &gray_buffer, &support_buffer, &weight_buffer, &norm_weight_sums, &union_support, &output, &pyramid_accumulator);
             const collapsed_info = fusedOutputInfo(output.?.info);
             output.?.deinit(allocator);
             output = try fuse.pyramid.collapseToImageWithJobs(allocator, collapsed_info, &pyramid_accumulator.?, jobs);
@@ -204,8 +209,10 @@ fn runPyramidStackFusion(
     roi: ?align_core.remap.Rect,
     jobs: usize,
     gray_buffer: *std.ArrayListUnmanaged(f32),
+    support_buffer: *std.ArrayListUnmanaged(f32),
     weight_buffer: *std.ArrayListUnmanaged(f32),
     norm_weight_sums: *std.ArrayListUnmanaged(f32),
+    union_support: *std.ArrayListUnmanaged(f32),
     output: *?align_core.image_io.Image,
     pyramid_accumulator: *?fuse.pyramid.Accumulator,
 ) RunError!void {
@@ -245,9 +252,12 @@ fn runPyramidStackFusion(
             output.* = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
             const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
             try gray_buffer.resize(allocator, count);
+            try support_buffer.resize(allocator, count);
             try weight_buffer.resize(allocator, count);
             try norm_weight_sums.resize(allocator, count);
+            try union_support.resize(allocator, count);
             @memset(norm_weight_sums.items, 0);
+            @memset(union_support.items, 0);
             pyramid_accumulator.* = try fuse.pyramid.Accumulator.init(allocator, remapped.info.width, remapped.info.height);
             workspace = try fuse.pyramid.Workspace.init(allocator, remapped.info.width, remapped.info.height);
             contrast_workspace = try fuse.contrast.Workspace.init(allocator, remapped.info.width, jobs);
@@ -257,8 +267,9 @@ fn runPyramidStackFusion(
             }
         }
 
-        try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items, &(contrast_workspace.?));
+        try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
         fuse.masks.applySupportInto(&remapped, weight_buffer.items);
+        fuse.masks.accumulateBinarySupportMax(&remapped, union_support.items);
         for (norm_weight_sums.items, weight_buffer.items) |*sum, weight| sum.* += weight;
         if (cache_images) {
             try cached_remapped.append(allocator, remapped);
@@ -271,10 +282,10 @@ fn runPyramidStackFusion(
             if (cfg.verbose > 0) {
                 std.debug.print("stack fuse: [{d}] pyramid blend from cached remap\n", .{ active_i + 1 });
             }
-            try computeWeightMapForRemapped(cfg, jobs, remapped, gray_buffer.items, weight_buffer.items, &(contrast_workspace.?));
+            try computeWeightMapForRemapped(cfg, jobs, remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
             fuse.masks.applySupportInto(remapped, weight_buffer.items);
             fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
+            try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
         }
     } else {
         for (active_indices.items, 0..) |image_index, active_i| {
@@ -286,10 +297,10 @@ fn runPyramidStackFusion(
             var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
             defer remapped.deinit(allocator);
 
-            try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, weight_buffer.items, &(contrast_workspace.?));
+            try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
             fuse.masks.applySupportInto(&remapped, weight_buffer.items);
             fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
+            try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
         }
     }
 }
@@ -299,10 +310,12 @@ fn computeWeightMapForRemapped(
     jobs: usize,
     remapped: *const align_core.image_io.Image,
     gray_pixels: []f32,
+    support_pixels: []f32,
     weights: []f32,
     workspace: *fuse.contrast.Workspace,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     align_core.gray.fillFromLoaded(gray_pixels, remapped);
+    fuse.masks.fillBinarySupport(remapped, support_pixels);
     var gray_image = align_core.gray.GrayImage{
         .width = remapped.info.width,
         .height = remapped.info.height,
@@ -312,7 +325,7 @@ fn computeWeightMapForRemapped(
             .u16 => 65535.0,
         },
     };
-    try fuse.contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, cfg.contrast_window_size, jobs, weights, workspace);
+    try fuse.contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, support_pixels, cfg.contrast_window_size, jobs, weights, workspace);
 }
 
 fn fusedOutputInfo(info: align_core.image_io.ImageInfo) align_core.image_io.ImageInfo {

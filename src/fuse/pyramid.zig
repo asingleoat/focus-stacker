@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("align_stack_core");
 const image_io = core.image_io;
 const profiler = core.profiler;
+const masks = @import("masks.zig");
 
 pub const ScalarLevel = struct {
     width: u32,
@@ -61,26 +62,36 @@ pub const Accumulator = struct {
 
 pub const Workspace = struct {
     mask_levels: []ScalarLevel,
+    mask_support_levels: []ScalarLevel,
     gaussian_levels: []RgbLevel,
+    image_support_levels: []ScalarLevel,
     expanded_levels: []RgbLevel,
 
     pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) std.mem.Allocator.Error!Workspace {
         const level_count = computeLevelCount(width, height);
         const mask_levels = try allocator.alloc(ScalarLevel, level_count);
         errdefer allocator.free(mask_levels);
+        const mask_support_levels = try allocator.alloc(ScalarLevel, level_count);
+        errdefer allocator.free(mask_support_levels);
         const gaussian_levels = try allocator.alloc(RgbLevel, level_count);
         errdefer allocator.free(gaussian_levels);
+        const image_support_levels = try allocator.alloc(ScalarLevel, level_count);
+        errdefer allocator.free(image_support_levels);
         const expanded_levels = try allocator.alloc(RgbLevel, level_count - 1);
         errdefer allocator.free(expanded_levels);
 
         var w = width;
         var h = height;
         var built_masks: usize = 0;
+        var built_mask_support: usize = 0;
         var built_gaussians: usize = 0;
+        var built_image_support: usize = 0;
         var built_expanded: usize = 0;
         errdefer {
             for (mask_levels[0..built_masks]) |*level| level.deinit(allocator);
+            for (mask_support_levels[0..built_mask_support]) |*level| level.deinit(allocator);
             for (gaussian_levels[0..built_gaussians]) |*level| level.deinit(allocator);
+            for (image_support_levels[0..built_image_support]) |*level| level.deinit(allocator);
             for (expanded_levels[0..built_expanded]) |*level| level.deinit(allocator);
         }
 
@@ -93,12 +104,24 @@ pub const Workspace = struct {
                 .pixels = try allocator.alloc(f32, mask_count),
             };
             built_masks += 1;
+            mask_support_levels[i] = .{
+                .width = w,
+                .height = h,
+                .pixels = try allocator.alloc(f32, mask_count),
+            };
+            built_mask_support += 1;
             gaussian_levels[i] = .{
                 .width = w,
                 .height = h,
                 .pixels = try allocator.alloc(f32, rgb_count),
             };
             built_gaussians += 1;
+            image_support_levels[i] = .{
+                .width = w,
+                .height = h,
+                .pixels = try allocator.alloc(f32, mask_count),
+            };
+            built_image_support += 1;
             if (i + 1 < level_count) {
                 expanded_levels[i] = .{
                     .width = w,
@@ -114,14 +137,18 @@ pub const Workspace = struct {
 
         return .{
             .mask_levels = mask_levels,
+            .mask_support_levels = mask_support_levels,
             .gaussian_levels = gaussian_levels,
+            .image_support_levels = image_support_levels,
             .expanded_levels = expanded_levels,
         };
     }
 
     pub fn deinit(self: *Workspace, allocator: std.mem.Allocator) void {
         deinitScalarLevels(allocator, self.mask_levels);
+        deinitScalarLevels(allocator, self.mask_support_levels);
         deinitRgbLevels(allocator, self.gaussian_levels);
+        deinitScalarLevels(allocator, self.image_support_levels);
         deinitRgbLevels(allocator, self.expanded_levels);
     }
 };
@@ -145,17 +172,19 @@ pub fn accumulateImage(
     allocator: std.mem.Allocator,
     image: *const image_io.Image,
     normalized_mask: []const f32,
+    union_support: []const f32,
     result: *Accumulator,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     var workspace = try Workspace.init(allocator, image.info.width, image.info.height);
     defer workspace.deinit(allocator);
-    return accumulateImageWithWorkspace(allocator, image, normalized_mask, result, &workspace, 1);
+    return accumulateImageWithWorkspace(allocator, image, normalized_mask, union_support, result, &workspace, 1);
 }
 
 pub fn accumulateImageWithWorkspace(
     allocator: std.mem.Allocator,
     image: *const image_io.Image,
     normalized_mask: []const f32,
+    union_support: []const f32,
     result: *Accumulator,
     workspace: *Workspace,
     jobs: usize,
@@ -163,8 +192,8 @@ pub fn accumulateImageWithWorkspace(
     const prof = profiler.scope("fuse.pyramid.accumulateImage");
     defer prof.end();
 
-    try buildMaskGaussianPyramidInto(allocator, normalized_mask, workspace.mask_levels, jobs);
-    try buildAndAccumulateImagePyramidInto(allocator, image, workspace.gaussian_levels, workspace.expanded_levels, workspace.mask_levels, result.levels, jobs);
+    try buildMaskGaussianPyramidInto(allocator, normalized_mask, union_support, workspace.mask_levels, workspace.mask_support_levels, jobs);
+    try buildAndAccumulateImagePyramidInto(allocator, image, workspace.gaussian_levels, workspace.image_support_levels, workspace.expanded_levels, workspace.mask_levels, result.levels, jobs);
 }
 
 pub fn collapseToImage(
@@ -273,18 +302,34 @@ pub fn buildMaskGaussianPyramid(
 fn buildMaskGaussianPyramidInto(
     allocator: std.mem.Allocator,
     base_mask: []const f32,
+    base_support: []const f32,
     levels: []ScalarLevel,
+    support_levels: []ScalarLevel,
     jobs: usize,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
     const prof = profiler.scope("fuse.pyramid.buildMaskGaussianPyramidInto");
     defer prof.end();
 
     @memcpy(levels[0].pixels, base_mask);
+    @memcpy(support_levels[0].pixels, base_support);
     var built: usize = 1;
     while (built < levels.len) : (built += 1) {
         const prev = levels[built - 1];
+        const prev_support = support_levels[built - 1];
         const next = levels[built];
-        try reduceScalar(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels, jobs);
+        const next_support = support_levels[built];
+        try reduceScalarWithSupport(
+            allocator,
+            prev.width,
+            prev.height,
+            prev.pixels,
+            prev_support.pixels,
+            next.width,
+            next.height,
+            next.pixels,
+            next_support.pixels,
+            jobs,
+        );
     }
 }
 
@@ -363,8 +408,9 @@ fn buildAndAccumulateImagePyramidInto(
     allocator: std.mem.Allocator,
     image: *const image_io.Image,
     gaussians: []RgbLevel,
+    support_levels: []ScalarLevel,
     expanded_levels: []RgbLevel,
-    masks: []const ScalarLevel,
+    mask_levels: []const ScalarLevel,
     dst_levels: []RgbLevel,
     jobs: usize,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
@@ -372,11 +418,25 @@ fn buildAndAccumulateImagePyramidInto(
     defer prof.end();
 
     try fillRgbBase(image, gaussians[0].pixels, jobs);
+    masks.fillBinarySupport(image, support_levels[0].pixels);
     var built: usize = 1;
     while (built < gaussians.len) : (built += 1) {
         const prev = gaussians[built - 1];
+        const prev_support = support_levels[built - 1];
         const next = gaussians[built];
-        try reduceRgb(allocator, prev.width, prev.height, prev.pixels, next.width, next.height, next.pixels, jobs);
+        const next_support = support_levels[built];
+        try reduceRgbWithSupport(
+            allocator,
+            prev.width,
+            prev.height,
+            prev.pixels,
+            prev_support.pixels,
+            next.width,
+            next.height,
+            next.pixels,
+            next_support.pixels,
+            jobs,
+        );
     }
 
     const blend_prof = profiler.scope("fuse.pyramid.accumulateLevels");
@@ -386,7 +446,7 @@ fn buildAndAccumulateImagePyramidInto(
         const current = gaussians[i];
         const next = gaussians[i + 1];
         const expanded = expanded_levels[i];
-        const mask_level = masks[i];
+        const mask_level = mask_levels[i];
         const dst_level = &dst_levels[i];
         try expandRgb(allocator, current.width, current.height, next.width, next.height, next.pixels, expanded.pixels, jobs);
         try accumulateLapWeighted(allocator, current.width, current.height, current.pixels, expanded.pixels, mask_level.pixels, dst_level.pixels, jobs);
@@ -394,7 +454,7 @@ fn buildAndAccumulateImagePyramidInto(
 
     const last_index = gaussians.len - 1;
     const last_gaussian = gaussians[last_index];
-    const last_mask = masks[last_index];
+    const last_mask = mask_levels[last_index];
     const last_dst = &dst_levels[last_index];
     try accumulateGaussianWeighted(allocator, last_gaussian.width, last_gaussian.height, last_gaussian.pixels, last_mask.pixels, last_dst.pixels, jobs);
 }
@@ -494,6 +554,98 @@ fn fillRgbBaseRows(image: *const image_io.Image, dst: []f32, start_row: u32, end
             }
         },
     }
+}
+
+fn reduceScalarWithSupport(
+    allocator: std.mem.Allocator,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    support: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    dst_support: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCount(jobs, dst_h);
+    if (worker_count == 1) {
+        reduceScalarWithSupportRowsSequential(src_w, src_h, src, support, dst_w, dst_h, dst, dst_support, 0, dst_h);
+        return;
+    }
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(ReduceScalarSupportTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
+        tasks[i] = .{
+            .src_w = src_w,
+            .src_h = src_h,
+            .src = src,
+            .support = support,
+            .dst_w = dst_w,
+            .dst_h = dst_h,
+            .dst = dst,
+            .dst_support = dst_support,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+        };
+        thread.* = try std.Thread.spawn(.{}, reduceScalarSupportThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    reduceScalarWithSupportRowsSequential(src_w, src_h, src, support, dst_w, dst_h, dst, dst_support, 0, @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))));
+    for (threads) |thread| thread.join();
+}
+
+fn reduceRgbWithSupport(
+    allocator: std.mem.Allocator,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    support: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    dst_support: []f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
+    const worker_count = effectiveWorkerCount(jobs, dst_h);
+    if (worker_count == 1) {
+        reduceRgbWithSupportRowsSequential(src_w, src_h, src, support, dst_w, dst_h, dst, dst_support, 0, dst_h);
+        return;
+    }
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(ReduceRgbSupportTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
+        tasks[i] = .{
+            .src_w = src_w,
+            .src_h = src_h,
+            .src = src,
+            .support = support,
+            .dst_w = dst_w,
+            .dst_h = dst_h,
+            .dst = dst,
+            .dst_support = dst_support,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+        };
+        thread.* = try std.Thread.spawn(.{}, reduceRgbSupportThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    reduceRgbWithSupportRowsSequential(src_w, src_h, src, support, dst_w, dst_h, dst, dst_support, 0, @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))));
+    for (threads) |thread| thread.join();
 }
 
 fn reduceScalar(
@@ -756,6 +908,110 @@ fn reduceRgbRowsSequential(
     }
 }
 
+fn reduceScalarWithSupportRowsSequential(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    support: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    dst_support: []f32,
+    start_row: u32,
+    end_row: u32,
+) void {
+    _ = dst_h;
+    var dy: u32 = start_row;
+    while (dy < end_row) : (dy += 1) {
+        const center_y = @as(i32, @intCast(dy * 2));
+        for (0..dst_w) |dx| {
+            const center_x = @as(i32, @intCast(dx * 2));
+            var value_sum: f32 = 0.0;
+            var weight_sum: f32 = 0.0;
+            for (0..5) |ky| {
+                const sy = center_y + @as(i32, @intCast(ky)) - 2;
+                if (sy < 0 or sy >= @as(i32, @intCast(src_h))) continue;
+                const wy = kernelWeight(ky);
+                for (0..5) |kx| {
+                    const sx = center_x + @as(i32, @intCast(kx)) - 2;
+                    if (sx < 0 or sx >= @as(i32, @intCast(src_w))) continue;
+                    const src_index = @as(usize, @intCast(sy)) * @as(usize, src_w) + @as(usize, @intCast(sx));
+                    const sample_support = support[src_index];
+                    if (sample_support <= 0.0) continue;
+                    const weighted = wy * kernelWeight(kx) * sample_support;
+                    value_sum += src[src_index] * weighted;
+                    weight_sum += weighted;
+                }
+            }
+            const dst_index = @as(usize, dy) * @as(usize, dst_w) + @as(usize, dx);
+            if (weight_sum > 0.0) {
+                dst[dst_index] = value_sum / weight_sum;
+                dst_support[dst_index] = 1.0;
+            } else {
+                dst[dst_index] = 0.0;
+                dst_support[dst_index] = 0.0;
+            }
+        }
+    }
+}
+
+fn reduceRgbWithSupportRowsSequential(
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    support: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    dst_support: []f32,
+    start_row: u32,
+    end_row: u32,
+) void {
+    _ = dst_h;
+    var dy: u32 = start_row;
+    while (dy < end_row) : (dy += 1) {
+        const center_y = @as(i32, @intCast(dy * 2));
+        for (0..dst_w) |dx| {
+            const center_x = @as(i32, @intCast(dx * 2));
+            var sum0: f32 = 0.0;
+            var sum1: f32 = 0.0;
+            var sum2: f32 = 0.0;
+            var weight_sum: f32 = 0.0;
+            for (0..5) |ky| {
+                const sy = center_y + @as(i32, @intCast(ky)) - 2;
+                if (sy < 0 or sy >= @as(i32, @intCast(src_h))) continue;
+                const wy = kernelWeight(ky);
+                for (0..5) |kx| {
+                    const sx = center_x + @as(i32, @intCast(kx)) - 2;
+                    if (sx < 0 or sx >= @as(i32, @intCast(src_w))) continue;
+                    const pixel_index = @as(usize, @intCast(sy)) * @as(usize, src_w) + @as(usize, @intCast(sx));
+                    const sample_support = support[pixel_index];
+                    if (sample_support <= 0.0) continue;
+                    const weighted = wy * kernelWeight(kx) * sample_support;
+                    const src_base = pixel_index * 3;
+                    sum0 += src[src_base + 0] * weighted;
+                    sum1 += src[src_base + 1] * weighted;
+                    sum2 += src[src_base + 2] * weighted;
+                    weight_sum += weighted;
+                }
+            }
+            const dst_index = @as(usize, dy) * @as(usize, dst_w) + @as(usize, dx);
+            const dst_base = dst_index * 3;
+            if (weight_sum > 0.0) {
+                dst[dst_base + 0] = sum0 / weight_sum;
+                dst[dst_base + 1] = sum1 / weight_sum;
+                dst[dst_base + 2] = sum2 / weight_sum;
+                dst_support[dst_index] = 1.0;
+            } else {
+                dst[dst_base + 0] = 0.0;
+                dst[dst_base + 1] = 0.0;
+                dst[dst_base + 2] = 0.0;
+                dst_support[dst_index] = 0.0;
+            }
+        }
+    }
+}
+
 fn expandRgbRowsSequential(
     dst_w: u32,
     dst_h: u32,
@@ -818,6 +1074,19 @@ const ReduceScalarTask = struct {
     storage: []f32,
 };
 
+const ReduceScalarSupportTask = struct {
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    support: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    dst_support: []f32,
+    start_row: u32,
+    end_row: u32,
+};
+
 const ReduceRgbTask = struct {
     src_w: u32,
     src_h: u32,
@@ -828,6 +1097,19 @@ const ReduceRgbTask = struct {
     start_row: u32,
     end_row: u32,
     storage: []f32,
+};
+
+const ReduceRgbSupportTask = struct {
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    support: []const f32,
+    dst_w: u32,
+    dst_h: u32,
+    dst: []f32,
+    dst_support: []f32,
+    start_row: u32,
+    end_row: u32,
 };
 
 const ExpandRgbTask = struct {
@@ -872,8 +1154,16 @@ fn reduceScalarThread(task: *const ReduceScalarTask) void {
     reduceScalarRowsSequential(task.src_w, task.src_h, task.src, task.dst_w, task.dst_h, task.dst, task.start_row, task.end_row, task.storage);
 }
 
+fn reduceScalarSupportThread(task: *const ReduceScalarSupportTask) void {
+    reduceScalarWithSupportRowsSequential(task.src_w, task.src_h, task.src, task.support, task.dst_w, task.dst_h, task.dst, task.dst_support, task.start_row, task.end_row);
+}
+
 fn reduceRgbThread(task: *const ReduceRgbTask) void {
     reduceRgbRowsSequential(task.src_w, task.src_h, task.src, task.dst_w, task.dst_h, task.dst, task.start_row, task.end_row, task.storage);
+}
+
+fn reduceRgbSupportThread(task: *const ReduceRgbSupportTask) void {
+    reduceRgbWithSupportRowsSequential(task.src_w, task.src_h, task.src, task.support, task.dst_w, task.dst_h, task.dst, task.dst_support, task.start_row, task.end_row);
 }
 
 fn expandRgbThread(task: *const ExpandRgbTask) void {
@@ -890,6 +1180,15 @@ fn accumulateLapThread(task: *const AccumulateLapTask) void {
 
 fn accumulateGaussianThread(task: *const AccumulateGaussianTask) void {
     accumulateGaussianRowsSequential(task.width, task.gaussian, task.mask, task.dst, task.start_row, task.end_row);
+}
+
+fn kernelWeight(index: usize) f32 {
+    return switch (index) {
+        0, 4 => 1.0,
+        1, 3 => 4.0,
+        2 => 6.0,
+        else => unreachable,
+    };
 }
 
 fn effectiveWorkerCount(jobs: usize, rows: u32) usize {
