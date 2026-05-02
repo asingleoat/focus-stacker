@@ -6,6 +6,7 @@ const profiler = core.profiler;
 const blend = @import("blend.zig");
 const config = @import("config.zig");
 const contrast = @import("contrast.zig");
+const grayscale = @import("grayscale.zig");
 const io = @import("io.zig");
 const masks = @import("masks.zig");
 const pyramid = @import("pyramid.zig");
@@ -284,16 +285,13 @@ fn computeWeightMapForImage(
     weights: []f32,
     workspace: *contrast.Workspace,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
-    gray.fillFromLoaded(gray_pixels, image);
+    grayscale.fillAverageFromLoaded(gray_pixels, image);
     masks.fillBinarySupport(image, support_pixels);
     var gray_image = gray.GrayImage{
         .width = image.info.width,
         .height = image.info.height,
         .pixels = gray_pixels,
-        .sample_scale = switch (image.info.sample_type) {
-            .u8 => 255.0,
-            .u16 => 65535.0,
-        },
+        .sample_scale = grayscale.sampleScaleForType(image.info.sample_type),
     };
     try contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, support_pixels, cfg.contrast_window_size, jobs, weights, workspace);
 }

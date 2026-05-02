@@ -98,16 +98,13 @@ fn computeWeightMap(
     weights: []f32,
     workspace: *fuse.contrast.Workspace,
 ) !void {
-    core.gray.fillFromLoaded(gray_pixels, image);
+    fuse.grayscale.fillAverageFromLoaded(gray_pixels, image);
     fuse.masks.fillBinarySupport(image, support_pixels);
     var gray_image = core.gray.GrayImage{
         .width = image.info.width,
         .height = image.info.height,
         .pixels = gray_pixels,
-        .sample_scale = switch (image.info.sample_type) {
-            .u8 => 255.0,
-            .u16 => 65535.0,
-        },
+        .sample_scale = fuse.grayscale.sampleScaleForType(image.info.sample_type),
     };
     try fuse.contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, support_pixels, 5, 1, weights, workspace);
 }

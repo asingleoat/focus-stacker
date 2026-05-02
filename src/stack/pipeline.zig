@@ -314,16 +314,13 @@ fn computeWeightMapForRemapped(
     weights: []f32,
     workspace: *fuse.contrast.Workspace,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
-    align_core.gray.fillFromLoaded(gray_pixels, remapped);
+    fuse.grayscale.fillAverageFromLoaded(gray_pixels, remapped);
     fuse.masks.fillBinarySupport(remapped, support_pixels);
     var gray_image = align_core.gray.GrayImage{
         .width = remapped.info.width,
         .height = remapped.info.height,
         .pixels = gray_pixels,
-        .sample_scale = switch (remapped.info.sample_type) {
-            .u8 => 255.0,
-            .u16 => 65535.0,
-        },
+        .sample_scale = fuse.grayscale.sampleScaleForType(remapped.info.sample_type),
     };
     try fuse.contrast.computeLocalContrastWeightsWithWorkspace(&gray_image, support_pixels, cfg.contrast_window_size, jobs, weights, workspace);
 }
