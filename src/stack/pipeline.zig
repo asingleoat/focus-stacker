@@ -353,6 +353,7 @@ fn runPyramidStackFusion(
             if (cfg.dump_masks_dir) |dump_dir| {
                 if (active_i == debug_level_index) {
                     try fuse.debug.dumpWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
+                    try fuse.debug.dumpWeightedWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
                 }
             }
         }
@@ -399,6 +400,7 @@ fn runPyramidStackFusion(
             if (cfg.dump_masks_dir) |dump_dir| {
                 if (active_i == debug_level_index) {
                     try fuse.debug.dumpWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
+                    try fuse.debug.dumpWeightedWorkspaceLevels(allocator, dump_dir, active_i, &workspace.?);
                 }
             }
         }

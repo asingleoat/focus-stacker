@@ -130,6 +130,54 @@ pub fn dumpWorkspaceLevels(
     }
 }
 
+pub fn dumpWeightedWorkspaceLevels(
+    allocator: std.mem.Allocator,
+    output_dir: []const u8,
+    image_index: usize,
+    workspace: *const pyramid.Workspace,
+) !void {
+    var dir_buf: [64]u8 = undefined;
+    const dirname = try std.fmt.bufPrint(&dir_buf, "frame_{d:0>4}", .{image_index});
+    const frame_dir = try std.fs.path.join(allocator, &.{ output_dir, dirname });
+    defer allocator.free(frame_dir);
+    try std.fs.cwd().makePath(frame_dir);
+
+    for (workspace.expanded_levels, 0..) |level, level_index| {
+        const current = workspace.gaussian_levels[level_index];
+        const mask = workspace.mask_levels[level_index];
+        const count = @as(usize, current.width) * @as(usize, current.height) * 3;
+        const weighted = try allocator.alloc(f32, count);
+        defer allocator.free(weighted);
+        for (0..count / 3) |pixel_index| {
+            const base = pixel_index * 3;
+            const weight = mask.pixels[pixel_index];
+            weighted[base + 0] = (current.pixels[base + 0] - level.pixels[base + 0]) * weight;
+            weighted[base + 1] = (current.pixels[base + 1] - level.pixels[base + 1]) * weight;
+            weighted[base + 2] = (current.pixels[base + 2] - level.pixels[base + 2]) * weight;
+        }
+        var name_buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "weighted_{d:0>2}.tif", .{level_index});
+        try writeRgbMapU16SignedAuto(allocator, frame_dir, name, current.width, current.height, weighted);
+    }
+
+    const last_index = workspace.mask_levels.len - 1;
+    const gaussian = workspace.gaussian_levels[last_index];
+    const mask = workspace.mask_levels[last_index];
+    const count = @as(usize, gaussian.width) * @as(usize, gaussian.height) * 3;
+    const weighted = try allocator.alloc(f32, count);
+    defer allocator.free(weighted);
+    for (0..count / 3) |pixel_index| {
+        const base = pixel_index * 3;
+        const weight = mask.pixels[pixel_index];
+        weighted[base + 0] = gaussian.pixels[base + 0] * weight;
+        weighted[base + 1] = gaussian.pixels[base + 1] * weight;
+        weighted[base + 2] = gaussian.pixels[base + 2] * weight;
+    }
+    var name_buf: [64]u8 = undefined;
+    const name = try std.fmt.bufPrint(&name_buf, "weighted_{d:0>2}.tif", .{last_index});
+    try writeRgbMapU16SignedAuto(allocator, frame_dir, name, gaussian.width, gaussian.height, weighted);
+}
+
 pub fn dumpAccumulatorLevels(
     allocator: std.mem.Allocator,
     output_dir: []const u8,
