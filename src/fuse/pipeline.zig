@@ -389,39 +389,17 @@ fn runPyramidPass(
                 try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
                 masks.applySupportInto(image, weight_buffer.items);
             }
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try debug.dumpRawMask(
-                    allocator,
-                    dump_dir,
-                    image.info.width,
-                    image.info.height,
-                    index,
-                    weight_buffer.items,
-                    grayscale.sampleScaleForType(image.info.sample_type),
-                );
-            }
-            if (cfg.method == .hybrid_pyramid_contrast) {
-                pyramid.normalizeWeightsPoweredInto(
-                    weight_buffer.items,
-                    norm_weight_sums.items,
-                    powered_weight_sums.items,
-                    input_count,
-                    pyramid.hybrid_mask_power,
-                    gray_buffer.items,
-                );
-            } else {
-                pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-            }
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try debug.dumpNormalizedMask(
-                    allocator,
-                    dump_dir,
-                    image.info.width,
-                    image.info.height,
-                    index,
-                    gray_buffer.items,
-                );
-            }
+            try dumpAndNormalizeCurrentWeights(
+                allocator,
+                cfg,
+                image.info,
+                index,
+                input_count,
+                weight_buffer.items,
+                norm_weight_sums.items,
+                powered_weight_sums.items,
+                gray_buffer.items,
+            );
             try pyramid.accumulateImageWithWorkspace(allocator, image, gray_buffer.items, union_support.items, &accumulator.*.?, &workspace.?, jobs);
             if (cfg.dump_masks_dir) |dump_dir| {
                 if (index == debug_level_index) {
@@ -438,39 +416,17 @@ fn runPyramidPass(
             defer image.deinit(allocator);
             try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
             masks.applySupportInto(&image, weight_buffer.items);
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try debug.dumpRawMask(
-                    allocator,
-                    dump_dir,
-                    image.info.width,
-                    image.info.height,
-                    index,
-                    weight_buffer.items,
-                    grayscale.sampleScaleForType(image.info.sample_type),
-                );
-            }
-            if (cfg.method == .hybrid_pyramid_contrast) {
-                pyramid.normalizeWeightsPoweredInto(
-                    weight_buffer.items,
-                    norm_weight_sums.items,
-                    powered_weight_sums.items,
-                    input_count,
-                    pyramid.hybrid_mask_power,
-                    gray_buffer.items,
-                );
-            } else {
-                pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
-            }
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try debug.dumpNormalizedMask(
-                    allocator,
-                    dump_dir,
-                    image.info.width,
-                    image.info.height,
-                    index,
-                    gray_buffer.items,
-                );
-            }
+            try dumpAndNormalizeCurrentWeights(
+                allocator,
+                cfg,
+                image.info,
+                index,
+                input_count,
+                weight_buffer.items,
+                norm_weight_sums.items,
+                powered_weight_sums.items,
+                gray_buffer.items,
+            );
             try pyramid.accumulateImageWithWorkspace(allocator, &image, gray_buffer.items, union_support.items, &accumulator.*.?, &workspace.?, jobs);
             if (cfg.dump_masks_dir) |dump_dir| {
                 if (index == debug_level_index) {
@@ -496,6 +452,52 @@ fn estimatedCacheBytes(info: image_io.ImageInfo, image_count: usize) usize {
 
 fn estimatedWeightCacheBytes(width: u32, height: u32, image_count: usize) usize {
     return @as(usize, width) * @as(usize, height) * @sizeOf(f32) * image_count;
+}
+
+fn dumpAndNormalizeCurrentWeights(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    info: image_io.ImageInfo,
+    index: usize,
+    input_count: usize,
+    weight_pixels: []const f32,
+    norm_weight_sums: []const f32,
+    powered_weight_sums: []const f32,
+    normalized_out: []f32,
+) RunError!void {
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try debug.dumpRawMask(
+            allocator,
+            dump_dir,
+            info.width,
+            info.height,
+            index,
+            weight_pixels,
+            grayscale.sampleScaleForType(info.sample_type),
+        );
+    }
+    if (cfg.method == .hybrid_pyramid_contrast) {
+        pyramid.normalizeWeightsPoweredInto(
+            weight_pixels,
+            norm_weight_sums,
+            powered_weight_sums,
+            input_count,
+            pyramid.hybrid_mask_power,
+            normalized_out,
+        );
+    } else {
+        pyramid.normalizeWeightsInto(weight_pixels, norm_weight_sums, input_count, normalized_out);
+    }
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try debug.dumpNormalizedMask(
+            allocator,
+            dump_dir,
+            info.width,
+            info.height,
+            index,
+            normalized_out,
+        );
+    }
 }
 
 fn computeWeightMapForImage(

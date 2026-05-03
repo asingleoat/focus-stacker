@@ -532,39 +532,17 @@ fn runPyramidStackFusion(
                 try computeWeightMapForRemapped(cfg, jobs, remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
                 fuse.masks.applySupportInto(remapped, weight_buffer.items);
             }
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try fuse.debug.dumpRawMask(
-                    allocator,
-                    dump_dir,
-                    remapped.info.width,
-                    remapped.info.height,
-                    active_i,
-                    weight_buffer.items,
-                    fuse.grayscale.sampleScaleForType(remapped.info.sample_type),
-                );
-            }
-            if (cfg.fuse_method == .hybrid_pyramid_contrast) {
-                fuse.pyramid.normalizeWeightsPoweredInto(
-                    weight_buffer.items,
-                    norm_weight_sums.items,
-                    powered_weight_sums.items,
-                    active_indices.items.len,
-                    fuse.pyramid.hybrid_mask_power,
-                    gray_buffer.items,
-                );
-            } else {
-                fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            }
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try fuse.debug.dumpNormalizedMask(
-                    allocator,
-                    dump_dir,
-                    remapped.info.width,
-                    remapped.info.height,
-                    active_i,
-                    gray_buffer.items,
-                );
-            }
+            try dumpAndNormalizeCurrentRemapWeights(
+                allocator,
+                cfg,
+                remapped.info,
+                active_i,
+                active_indices.items.len,
+                weight_buffer.items,
+                norm_weight_sums.items,
+                powered_weight_sums.items,
+                gray_buffer.items,
+            );
             try fuse.pyramid.accumulateImageWithWorkspace(allocator, remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
             if (debug_mask_sum_levels) |levels| {
                 for (levels, workspace.?.mask_levels) |*dst_level, src_level| {
@@ -590,39 +568,17 @@ fn runPyramidStackFusion(
 
             try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
             fuse.masks.applySupportInto(&remapped, weight_buffer.items);
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try fuse.debug.dumpRawMask(
-                    allocator,
-                    dump_dir,
-                    remapped.info.width,
-                    remapped.info.height,
-                    active_i,
-                    weight_buffer.items,
-                    fuse.grayscale.sampleScaleForType(remapped.info.sample_type),
-                );
-            }
-            if (cfg.fuse_method == .hybrid_pyramid_contrast) {
-                fuse.pyramid.normalizeWeightsPoweredInto(
-                    weight_buffer.items,
-                    norm_weight_sums.items,
-                    powered_weight_sums.items,
-                    active_indices.items.len,
-                    fuse.pyramid.hybrid_mask_power,
-                    gray_buffer.items,
-                );
-            } else {
-                fuse.pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, active_indices.items.len, gray_buffer.items);
-            }
-            if (cfg.dump_masks_dir) |dump_dir| {
-                try fuse.debug.dumpNormalizedMask(
-                    allocator,
-                    dump_dir,
-                    remapped.info.width,
-                    remapped.info.height,
-                    active_i,
-                    gray_buffer.items,
-                );
-            }
+            try dumpAndNormalizeCurrentRemapWeights(
+                allocator,
+                cfg,
+                remapped.info,
+                active_i,
+                active_indices.items.len,
+                weight_buffer.items,
+                norm_weight_sums.items,
+                powered_weight_sums.items,
+                gray_buffer.items,
+            );
             try fuse.pyramid.accumulateImageWithWorkspace(allocator, &remapped, gray_buffer.items, union_support.items, &pyramid_accumulator.*.?, &workspace.?, jobs);
             if (debug_mask_sum_levels) |levels| {
                 for (levels, workspace.?.mask_levels) |*dst_level, src_level| {
@@ -643,6 +599,52 @@ fn runPyramidStackFusion(
         if (debug_mask_sum_levels) |levels| {
             try fuse.debug.dumpScalarLevels(allocator, dump_dir, "mask_sum_levels", "mask_sum", levels);
         }
+    }
+}
+
+fn dumpAndNormalizeCurrentRemapWeights(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    info: align_core.image_io.ImageInfo,
+    index: usize,
+    input_count: usize,
+    weight_pixels: []const f32,
+    norm_weight_sums: []const f32,
+    powered_weight_sums: []const f32,
+    normalized_out: []f32,
+) RunError!void {
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try fuse.debug.dumpRawMask(
+            allocator,
+            dump_dir,
+            info.width,
+            info.height,
+            index,
+            weight_pixels,
+            fuse.grayscale.sampleScaleForType(info.sample_type),
+        );
+    }
+    if (cfg.fuse_method == .hybrid_pyramid_contrast) {
+        fuse.pyramid.normalizeWeightsPoweredInto(
+            weight_pixels,
+            norm_weight_sums,
+            powered_weight_sums,
+            input_count,
+            fuse.pyramid.hybrid_mask_power,
+            normalized_out,
+        );
+    } else {
+        fuse.pyramid.normalizeWeightsInto(weight_pixels, norm_weight_sums, input_count, normalized_out);
+    }
+    if (cfg.dump_masks_dir) |dump_dir| {
+        try fuse.debug.dumpNormalizedMask(
+            allocator,
+            dump_dir,
+            info.width,
+            info.height,
+            index,
+            normalized_out,
+        );
     }
 }
 
