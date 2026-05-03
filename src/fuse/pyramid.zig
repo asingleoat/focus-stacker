@@ -5,6 +5,7 @@ const profiler = core.profiler;
 const masks = @import("masks.zig");
 const debug = @import("debug.zig");
 const Vec3 = @Vector(3, f32);
+const exact_expand_max_dim: u32 = 512;
 
 pub const ScalarLevel = struct {
     width: u32,
@@ -789,8 +790,56 @@ fn expandRgb(
     dst: []f32,
     jobs: usize,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
-    _ = jobs;
-    return expandRgbExactNoWrap(allocator, dst_w, dst_h, src_w, src_h, src, dst);
+    if (@max(dst_w, dst_h) <= exact_expand_max_dim) {
+        return expandRgbExactNoWrap(allocator, dst_w, dst_h, src_w, src_h, src, dst);
+    }
+
+    const worker_count = effectiveWorkerCount(jobs, dst_h);
+    if (worker_count == 1) {
+        const storage = try allocator.alloc(f32, 4 * @as(usize, dst_w) * 3);
+        defer allocator.free(storage);
+        expandRgbRowsSequential(dst_w, dst_h, src_w, src_h, src, dst, 0, dst_h, storage);
+        return;
+    }
+    const row_storage_len = 4 * @as(usize, dst_w) * 3;
+    const storage = try allocator.alloc(f32, row_storage_len * worker_count);
+    defer allocator.free(storage);
+    const threads = try allocator.alloc(std.Thread, worker_count - 1);
+    defer allocator.free(threads);
+    var tasks = try allocator.alloc(ExpandRgbTask, worker_count - 1);
+    defer allocator.free(tasks);
+    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
+    var started_threads: usize = 0;
+    errdefer for (threads[0..started_threads]) |thread| thread.join();
+    for (threads, 0..) |*thread, i| {
+        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
+        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
+        tasks[i] = .{
+            .dst_w = dst_w,
+            .dst_h = dst_h,
+            .src_w = src_w,
+            .src_h = src_h,
+            .src = src,
+            .dst = dst,
+            .start_row = @as(u32, @intCast(start_row)),
+            .end_row = @as(u32, @intCast(end_row)),
+            .storage = storage[(i + 1) * row_storage_len .. (i + 2) * row_storage_len],
+        };
+        thread.* = try std.Thread.spawn(.{}, expandRgbThread, .{&tasks[i]});
+        started_threads += 1;
+    }
+    expandRgbRowsSequential(
+        dst_w,
+        dst_h,
+        src_w,
+        src_h,
+        src,
+        dst,
+        0,
+        @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))),
+        storage[0..row_storage_len],
+    );
+    for (threads) |thread| thread.join();
 }
 
 fn reduceScalarRowsSequential(
