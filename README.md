@@ -14,6 +14,14 @@ This repository now includes:
   - `hardmask-contrast`: fast contrast-weight winner selection
   - `softmask-contrast`: soft-mask blend using a 5-tap Burt-Adelson-style blur on contrast masks
   - `pyramid-contrast`: first-pass multiresolution blend with Gaussian mask pyramids and Laplacian image pyramids
+  - `hybrid-pyramid-contrast`: opt-in sharpened pyramid variant with tunable extra sharpness
+
+Current practical defaults:
+
+- `focus_stack_zig` / `focus_fuse_zig` keep a conservative internal default of `hardmask-contrast`
+- `scripts/stack_zig.sh` defaults to external `enfuse`
+- the best current in-tree quality baseline is `pyramid-contrast`
+- `hybrid-pyramid-contrast` is experimental and intentionally opt-in
 
 Useful commands:
 
@@ -25,6 +33,12 @@ ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build run-stack -- --help
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-zig -- lm-params /tmp/example.pto
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-upstream -- fvec /tmp/example.pto 1
 ```
+
+Useful docs:
+
+- [docs/fusion-modes.md](docs/fusion-modes.md): current fusion modes, tradeoffs, and recommended usage
+- [docs/probes.md](docs/probes.md): current probe/oracle/debug tooling and when to use each tool
+- [docs/enfuse-port-map.md](docs/enfuse-port-map.md): upstream `enfuse` implementation map used during the Zig fusion port
 
 Committed fixtures:
 
@@ -42,5 +56,6 @@ Current status: CLI validation and pre-alignment planning are implemented. Real 
 For practical focus-stack workflows:
 - `focus_fuse_zig` fuses an already aligned TIFF stack
 - `focus_stack_zig` aligns, remaps, and fuses in-process without aligned-TIFF round-tripping
+- `scripts/stack_zig.sh` is the easiest end-to-end driver for real stacks and lets you switch between external `enfuse` and in-tree Zig fusion modes
 
 If Zig's shared global cache becomes noisy in your environment, use `ZIG_GLOBAL_CACHE_DIR=.zig-global-cache` for reproducible local builds.

@@ -32,6 +32,7 @@ core
 core.*
 
 # Local agent/runtime state
+.codex
 .codex/
 
 # Generated alignment outputs
@@ -45,3 +46,18 @@ alignedtest_*.tif
 croppedtest_*.tif
 verifyalign*.tif
 tmp_e2e/
+
+# Local review / benchmark outputs
+.zig-cache-flake/
+bench_outputs/
+bench_outputs_fusebench/
+bench_outputs_probe/
+bench_outputs_timed/
+bench_outputs_timed2/
+bench_outputs_validity/
+review_outputs/
+tmp_mask_probe_out/
+S003/
+*_stacked.tif
+*_stacked.jpg
+portm_pair_out_*.tif
