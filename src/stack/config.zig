@@ -24,6 +24,7 @@ pub const Config = struct {
     align_grid_size: u32 = 7,
     align_error_threshold: f64 = 5.0,
     contrast_window_size: u32 = 5,
+    hybrid_sharpness: f32 = fuse_core.pyramid.default_hybrid_sharpness,
     hard_mask: bool = true,
     fuse_method: fuse_core.config.Method = .hardmask_contrast,
     output_path: ?[]const u8 = null,
@@ -151,6 +152,16 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) (ParseE
             cfg.contrast_window_size = try parseWindowSize(args[i]);
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--hybrid-sharpness=")) {
+            cfg.hybrid_sharpness = try parseSharpness(arg["--hybrid-sharpness=".len..]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--hybrid-sharpness")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.hybrid_sharpness = try parseSharpness(args[i]);
+            continue;
+        }
         if (std.mem.eql(u8, arg, "-c")) {
             i += 1;
             if (i >= args.len) return error.MissingOptionValue;
@@ -210,6 +221,9 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
         \\                               pyramid-contrast
+        \\                               hybrid-pyramid-contrast
+        \\  --hybrid-sharpness x       Hybrid sharpening amount in [0,1]
+        \\                               (default: {d:.2})
         \\  --dump-masks-dir dir       Dump raw/normalized masks for debugging
         \\  --hard-mask                Keep hard-mask winner selection
         \\  -h, --help                 Display this help text
@@ -220,7 +234,7 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\  immediately without writing aligned intermediate TIFFs.
         \\
     ,
-        .{ exe_name, exe_name },
+        .{ exe_name, exe_name, fuse_core.pyramid.default_hybrid_sharpness },
     );
 }
 
@@ -242,6 +256,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
         \\  grid size: {d}
         \\  prune threshold: {d:.3}
         \\  contrast window size: {d}
+        \\  hybrid sharpness: {d:.3}
         \\  hard mask: {}
         \\  fuse method: {s}
         \\  output: {s}
@@ -257,12 +272,19 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
             cfg.align_grid_size,
             cfg.align_error_threshold,
             cfg.contrast_window_size,
+            cfg.hybrid_sharpness,
             cfg.hard_mask,
             cfg.fuse_method.cliName(),
             cfg.output_path.?,
             cfg.dump_masks_dir orelse "(disabled)",
         },
     );
+}
+
+fn parseSharpness(value: []const u8) ParseError!f32 {
+    const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
+    if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return error.InvalidValue;
+    return parsed;
 }
 
 fn parsePositiveU32(value: []const u8) ParseError!u32 {

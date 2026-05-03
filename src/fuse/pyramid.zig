@@ -6,6 +6,10 @@ const masks = @import("masks.zig");
 const debug = @import("debug.zig");
 const Vec3 = @Vector(3, f32);
 const exact_expand_max_dim: u32 = 512;
+pub const hybrid_hard_level_start: usize = 2;
+pub const hybrid_hard_level_count: usize = 4;
+pub const default_hybrid_sharpness: f32 = 0.35;
+pub const hybrid_mask_power: f32 = 2.0;
 
 pub const ScalarLevel = struct {
     width: u32,
@@ -264,6 +268,38 @@ pub fn collapseToImageWithJobsAndDebug(
     return output;
 }
 
+pub fn mergeHybridImages(
+    allocator: std.mem.Allocator,
+    soft_image: *const image_io.Image,
+    hard_image: *const image_io.Image,
+    hard_level_start: usize,
+    hard_level_count: usize,
+    hard_mix: f32,
+    jobs: usize,
+) (std.mem.Allocator.Error || std.Thread.SpawnError)!image_io.Image {
+    const soft_levels = try buildImageLaplacianPyramid(allocator, soft_image, computeLevelCount(soft_image.info.width, soft_image.info.height));
+    defer deinitRgbLevels(allocator, soft_levels);
+    const hard_levels = try buildImageLaplacianPyramid(allocator, hard_image, computeLevelCount(hard_image.info.width, hard_image.info.height));
+    defer deinitRgbLevels(allocator, hard_levels);
+
+    var merged = try Accumulator.init(allocator, soft_image.info.width, soft_image.info.height);
+    errdefer merged.deinit(allocator);
+
+    const hard_start = @min(hard_level_start, merged.levels.len);
+    const hard_end = @min(hard_start + hard_level_count, merged.levels.len);
+    for (merged.levels, 0..) |*level, level_index| {
+        if (level_index >= hard_start and level_index < hard_end) {
+            for (level.pixels, soft_levels[level_index].pixels, hard_levels[level_index].pixels) |*dst, soft_value, hard_value| {
+                dst.* = soft_value + (hard_value - soft_value) * hard_mix;
+            }
+        } else {
+            @memcpy(level.pixels, soft_levels[level_index].pixels);
+        }
+    }
+
+    return collapseToImageWithJobs(allocator, soft_image.info, &merged, jobs);
+}
+
 pub fn normalizeWeightsInto(
     input_weights: []const f32,
     norm_weights: []const f32,
@@ -276,6 +312,36 @@ pub fn normalizeWeightsInto(
     const default_weight = 1.0 / @as(f32, @floatFromInt(total_images));
     for (input_weights, norm_weights, output) |weight, norm, *dst| {
         dst.* = if (norm > 1e-12) weight / norm else default_weight;
+    }
+}
+
+pub fn accumulateNormalizedWeightPowers(
+    input_weights: []const f32,
+    norm_weights: []const f32,
+    total_images: usize,
+    power: f32,
+    output_sums: []f32,
+) void {
+    const default_weight = 1.0 / @as(f32, @floatFromInt(total_images));
+    for (input_weights, norm_weights, output_sums) |weight, norm, *dst| {
+        const normalized = if (norm > 1e-12) weight / norm else default_weight;
+        dst.* += std.math.pow(f32, normalized, power);
+    }
+}
+
+pub fn normalizeWeightsPoweredInto(
+    input_weights: []const f32,
+    norm_weights: []const f32,
+    power_sums: []const f32,
+    total_images: usize,
+    power: f32,
+    output: []f32,
+) void {
+    const default_weight = 1.0 / @as(f32, @floatFromInt(total_images));
+    for (input_weights, norm_weights, power_sums, output) |weight, norm, power_sum, *dst| {
+        const normalized = if (norm > 1e-12) weight / norm else default_weight;
+        const numerator = std.math.pow(f32, normalized, power);
+        dst.* = if (power_sum > 1e-12) numerator / power_sum else default_weight;
     }
 }
 

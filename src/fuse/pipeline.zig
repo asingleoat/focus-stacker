@@ -37,6 +37,8 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
     defer if (contrast_workspace) |*value| value.deinit(allocator);
     var norm_weight_sums = std.ArrayListUnmanaged(f32){};
     defer norm_weight_sums.deinit(allocator);
+    var powered_weight_sums = std.ArrayListUnmanaged(f32){};
+    defer powered_weight_sums.deinit(allocator);
     var union_support = std.ArrayListUnmanaged(f32){};
     defer union_support.deinit(allocator);
     var pyramid_accumulator: ?pyramid.Accumulator = null;
@@ -63,7 +65,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
             switch (cfg.method) {
                 .hardmask_contrast => {},
                 .softmask_contrast => blend.finalizeSoft(&soft_blend.?, &output.?),
-                .pyramid_contrast => unreachable,
+                .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
             }
         },
         .pyramid_contrast => {
@@ -76,6 +78,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 &weight_buffer,
                 &contrast_workspace,
                 &norm_weight_sums,
+                &powered_weight_sums,
                 &union_support,
                 &output,
                 &pyramid_accumulator,
@@ -89,6 +92,69 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 jobs,
                 cfg.dump_masks_dir,
             );
+        },
+        .hybrid_pyramid_contrast => {
+            var pyramid_cfg = cfg.*;
+            pyramid_cfg.method = .pyramid_contrast;
+            try runPyramidPass(
+                allocator,
+                &pyramid_cfg,
+                jobs,
+                &gray_buffer,
+                &support_buffer,
+                &weight_buffer,
+                &contrast_workspace,
+                &norm_weight_sums,
+                &powered_weight_sums,
+                &union_support,
+                &output,
+                &pyramid_accumulator,
+            );
+            const collapsed_info = fusedOutputInfo(output.?.info);
+            output.?.deinit(allocator);
+            output = try pyramid.collapseToImageWithJobsAndDebug(
+                allocator,
+                collapsed_info,
+                &pyramid_accumulator.?,
+                jobs,
+                cfg.dump_masks_dir,
+            );
+
+            var soft_output = output.?;
+            defer soft_output.deinit(allocator);
+            output = null;
+            if (contrast_workspace) |*value| {
+                value.deinit(allocator);
+                contrast_workspace = null;
+            }
+
+            var hardmask_cfg = cfg.*;
+            hardmask_cfg.method = .hardmask_contrast;
+            try runSinglePass(
+                allocator,
+                &hardmask_cfg,
+                jobs,
+                &best_weights,
+                &gray_buffer,
+                &support_buffer,
+                &weight_buffer,
+                &smoothed_weight_buffer,
+                &soft_blend,
+                &contrast_workspace,
+                &output,
+            );
+
+            const merged = try pyramid.mergeHybridImages(
+                allocator,
+                &soft_output,
+                &output.?,
+                pyramid.hybrid_hard_level_start,
+                pyramid.hybrid_hard_level_count,
+                cfg.hybrid_sharpness,
+                jobs,
+            );
+            output.?.deinit(allocator);
+            output = merged;
         },
     }
 
@@ -136,7 +202,7 @@ fn runSinglePass(
                     try smoothed_weight_buffer.resize(allocator, count);
                     soft_blend.* = try blend.SoftBlendState.init(allocator, output.*.?.info);
                 },
-                .pyramid_contrast => unreachable,
+                .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
             }
             contrast_workspace.* = try contrast.Workspace.init(allocator, image.info.width, jobs);
         }
@@ -158,7 +224,7 @@ fn runSinglePass(
                 try masks.blurFiveTapInto(allocator, image.info.width, image.info.height, jobs, weight_buffer.items, smoothed_weight_buffer.items, weight_buffer.items);
                 try blend.accumulateSoft(allocator, &image, weight_buffer.items, &soft_blend.*.?, jobs);
             },
-            .pyramid_contrast => unreachable,
+            .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
         }
     }
 }
@@ -172,6 +238,7 @@ fn runPyramidPass(
     weight_buffer: *std.ArrayListUnmanaged(f32),
     contrast_workspace: *?contrast.Workspace,
     norm_weight_sums: *std.ArrayListUnmanaged(f32),
+    powered_weight_sums: *std.ArrayListUnmanaged(f32),
     union_support: *std.ArrayListUnmanaged(f32),
     output: *?image_io.Image,
     accumulator: *?pyramid.Accumulator,
@@ -212,6 +279,10 @@ fn runPyramidPass(
             try support_buffer.resize(allocator, count);
             try weight_buffer.resize(allocator, count);
             try norm_weight_sums.resize(allocator, count);
+            if (cfg.method == .hybrid_pyramid_contrast) {
+                try powered_weight_sums.resize(allocator, count);
+                @memset(powered_weight_sums.items, 0);
+            }
             try union_support.resize(allocator, count);
             @memset(norm_weight_sums.items, 0);
             @memset(union_support.items, 0);
@@ -252,6 +323,39 @@ fn runPyramidPass(
     }
 
     try gray_buffer.resize(allocator, norm_weight_sums.items.len);
+    if (cfg.method == .hybrid_pyramid_contrast) {
+        if (cache_images) {
+            for (cached_images.items, 0..) |*image, index| {
+                if (cache_weights) {
+                    @memcpy(weight_buffer.items, cached_weights.items[index]);
+                } else {
+                    try computeWeightMapForImage(cfg, jobs, image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
+                    masks.applySupportInto(image, weight_buffer.items);
+                }
+                pyramid.accumulateNormalizedWeightPowers(
+                    weight_buffer.items,
+                    norm_weight_sums.items,
+                    input_count,
+                    pyramid.hybrid_mask_power,
+                    powered_weight_sums.items,
+                );
+            }
+        } else {
+            for (cfg.input_files.items) |path| {
+                var image = try io.loadAndValidateImage(allocator, path, expected);
+                defer image.deinit(allocator);
+                try computeWeightMapForImage(cfg, jobs, &image, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
+                masks.applySupportInto(&image, weight_buffer.items);
+                pyramid.accumulateNormalizedWeightPowers(
+                    weight_buffer.items,
+                    norm_weight_sums.items,
+                    input_count,
+                    pyramid.hybrid_mask_power,
+                    powered_weight_sums.items,
+                );
+            }
+        }
+    }
 
     if (cache_images) {
         for (cached_images.items, 0..) |*image, index| {
@@ -275,7 +379,18 @@ fn runPyramidPass(
                     grayscale.sampleScaleForType(image.info.sample_type),
                 );
             }
-            pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            if (cfg.method == .hybrid_pyramid_contrast) {
+                pyramid.normalizeWeightsPoweredInto(
+                    weight_buffer.items,
+                    norm_weight_sums.items,
+                    powered_weight_sums.items,
+                    input_count,
+                    pyramid.hybrid_mask_power,
+                    gray_buffer.items,
+                );
+            } else {
+                pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            }
             if (cfg.dump_masks_dir) |dump_dir| {
                 try debug.dumpNormalizedMask(
                     allocator,
@@ -313,7 +428,18 @@ fn runPyramidPass(
                     grayscale.sampleScaleForType(image.info.sample_type),
                 );
             }
-            pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            if (cfg.method == .hybrid_pyramid_contrast) {
+                pyramid.normalizeWeightsPoweredInto(
+                    weight_buffer.items,
+                    norm_weight_sums.items,
+                    powered_weight_sums.items,
+                    input_count,
+                    pyramid.hybrid_mask_power,
+                    gray_buffer.items,
+                );
+            } else {
+                pyramid.normalizeWeightsInto(weight_buffer.items, norm_weight_sums.items, input_count, gray_buffer.items);
+            }
             if (cfg.dump_masks_dir) |dump_dir| {
                 try debug.dumpNormalizedMask(
                     allocator,

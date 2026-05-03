@@ -6,9 +6,9 @@
 # all-in-focus composite using align_image_stack_zig and a switchable fusion stage.
 #
 # Usage:
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] image1.jpg image2.jpg ...
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] S001_manifest.json
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] S001_manifest.json S002_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] image1.jpg image2.jpg ...
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] S001_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] S001_manifest.json S002_manifest.json
 #
 # Accepts any mix of image files and manifest JSON files.
 #
@@ -25,6 +25,7 @@ ALIGN_ERROR_THRESHOLD="${ALIGN_ERROR_THRESHOLD:-5}"
 ALIGN_THREADS="${ALIGN_THREADS:-}"
 ALIGN_PAIR_ALIGN_METHOD="${ALIGN_PAIR_ALIGN_METHOD:-hugin-ncc}"
 ALIGN_FUSE_METHOD="${ALIGN_FUSE_METHOD:-enfuse}"
+ALIGN_HYBRID_SHARPNESS="${ALIGN_HYBRID_SHARPNESS:-0.35}"
 ALIGN_DUMP_MASKS_DIR="${ALIGN_DUMP_MASKS_DIR:-}"
 
 CONTRAST_WINDOW_SIZE="${CONTRAST_WINDOW_SIZE:-5}"
@@ -100,6 +101,7 @@ main() {
     local threads="$ALIGN_THREADS"
     local pair_align_method="$ALIGN_PAIR_ALIGN_METHOD"
     local fuse_method="$ALIGN_FUSE_METHOD"
+    local hybrid_sharpness="$ALIGN_HYBRID_SHARPNESS"
     local dump_masks_dir="$ALIGN_DUMP_MASKS_DIR"
     local -a positional=()
     while [[ $# -gt 0 ]]; do
@@ -131,6 +133,15 @@ main() {
                 fuse_method="${1#--fuse-method=}"
                 shift
                 ;;
+            --hybrid-sharpness)
+                [[ $# -ge 2 ]] || die "missing value for --hybrid-sharpness"
+                hybrid_sharpness="$2"
+                shift 2
+                ;;
+            --hybrid-sharpness=*)
+                hybrid_sharpness="${1#--hybrid-sharpness=}"
+                shift
+                ;;
             --dump-masks-dir)
                 [[ $# -ge 2 ]] || die "missing value for --dump-masks-dir"
                 dump_masks_dir="$2"
@@ -142,18 +153,20 @@ main() {
                 ;;
             --help|-h)
                 cat <<EOF
-usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] <images or manifests...>
+usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] <images or manifests...>
 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
   --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
-  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast
+  --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast, zig-hybrid-pyramid-contrast
+  --hybrid-sharpness X Hybrid sharpened-pyramid strength in [0,1] (default: 0.35)
   --dump-masks-dir DIR Dump raw/normalized pyramid masks for debugging
 
 Environment overrides:
   ALIGN_THREADS
   ALIGN_PAIR_ALIGN_METHOD
   ALIGN_FUSE_METHOD
+  ALIGN_HYBRID_SHARPNESS
   ALIGN_DUMP_MASKS_DIR
   ALIGN_CONTROL_POINTS
   ALIGN_GRID_SIZE
@@ -187,10 +200,12 @@ EOF
     fi
     [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded|phasecorr-locked)$ ]] || \
         die "--pair-align must be one of: hugin-ncc, phasecorr-seeded, phasecorr-locked"
-    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast|zig-pyramid-contrast)$ ]] || \
-        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast"
+    [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast|zig-pyramid-contrast|zig-hybrid-pyramid-contrast)$ ]] || \
+        die "--fuse-method must be one of: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast, zig-hybrid-pyramid-contrast"
+    [[ "$hybrid_sharpness" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "--hybrid-sharpness must be a number in [0,1]"
+    awk 'BEGIN{v='"$hybrid_sharpness"'; exit !(v >= 0.0 && v <= 1.0)}' || die "--hybrid-sharpness must be in [0,1]"
 
-    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--dump-masks-dir DIR] <images or manifests...>"
+    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] <images or manifests...>"
 
     local name
     name="$(derive_name "${positional[0]}")"
@@ -237,6 +252,9 @@ EOF
     fi
     echo "  Pair align: $pair_align_method"
     echo "  Fuse method: $fuse_method"
+    if [[ "$fuse_method" == "zig-hybrid-pyramid-contrast" ]]; then
+        echo "  Hybrid sharpness: $hybrid_sharpness"
+    fi
     if [[ -n "$dump_masks_dir" ]]; then
         echo "  Dump masks dir: $dump_masks_dir"
     fi
@@ -305,6 +323,7 @@ EOF
         local -a stacker_opts=(
             --pair-align "$pair_align_method"
             --fuse-method "${fuse_method#zig-}"
+            --hybrid-sharpness "$hybrid_sharpness"
             -c "$ALIGN_CONTROL_POINTS"
             -g "$ALIGN_GRID_SIZE"
             -t "$ALIGN_ERROR_THRESHOLD"

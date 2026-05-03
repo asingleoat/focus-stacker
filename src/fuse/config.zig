@@ -1,4 +1,5 @@
 const std = @import("std");
+const pyramid = @import("pyramid.zig");
 
 pub const Action = enum {
     run,
@@ -9,12 +10,14 @@ pub const Method = enum {
     hardmask_contrast,
     softmask_contrast,
     pyramid_contrast,
+    hybrid_pyramid_contrast,
 
     pub fn cliName(self: Method) []const u8 {
         return switch (self) {
             .hardmask_contrast => "hardmask-contrast",
             .softmask_contrast => "softmask-contrast",
             .pyramid_contrast => "pyramid-contrast",
+            .hybrid_pyramid_contrast => "hybrid-pyramid-contrast",
         };
     }
 };
@@ -32,6 +35,7 @@ pub const Config = struct {
     verbose: u8 = 0,
     jobs: ?u32 = null,
     method: Method = .hardmask_contrast,
+    hybrid_sharpness: f32 = pyramid.default_hybrid_sharpness,
     hard_mask: bool = true,
     contrast_window_size: u32 = 5,
     output_path: ?[]const u8 = null,
@@ -148,6 +152,18 @@ pub fn parseArgs(
             continue;
         }
 
+        if (std.mem.startsWith(u8, arg, "--hybrid-sharpness=")) {
+            cfg.hybrid_sharpness = try parseSharpness(arg["--hybrid-sharpness=".len..]);
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--hybrid-sharpness")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.hybrid_sharpness = try parseSharpness(args[i]);
+            continue;
+        }
+
         return error.InvalidOption;
     }
 
@@ -174,17 +190,20 @@ pub fn renderUsage(
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
         \\                               pyramid-contrast
+        \\                               hybrid-pyramid-contrast
+        \\  --hybrid-sharpness x       Hybrid sharpening amount in [0,1]
+        \\                               (default: {d:.2})
         \\  --dump-masks-dir dir       Dump raw/normalized masks for debugging
         \\  --contrast-window-size n   Local contrast window size (default: 5)
         \\  --hard-mask                Keep upstream-style hard-mask winner selection
         \\  -h, --help                 Display this help text
         \\
         \\Status: pure-Zig focus-stack fusion path based on enfuse local-contrast weighting,
-        \\with hard-mask, soft-mask, and first-pass multiresolution pyramid variants.
+        \\with hard-mask, soft-mask, pyramid, and hybrid sharpened-pyramid variants.
         \\The full enfuse pyramid stack is not ported yet.
         \\
     ,
-        .{ exe_name, exe_name },
+        .{ exe_name, exe_name, pyramid.default_hybrid_sharpness },
     );
 }
 
@@ -205,6 +224,7 @@ pub fn renderSummary(
         \\  verbose: {d}
         \\  jobs: {s}
         \\  method: {s}
+        \\  hybrid sharpness: {d:.3}
         \\  hard mask: {}
         \\  contrast window size: {d}
         \\  output: {s}
@@ -216,6 +236,7 @@ pub fn renderSummary(
             cfg.verbose,
             jobs,
             cfg.method.cliName(),
+            cfg.hybrid_sharpness,
             cfg.hard_mask,
             cfg.contrast_window_size,
             cfg.output_path.?,
@@ -224,10 +245,17 @@ pub fn renderSummary(
     );
 }
 
+fn parseSharpness(value: []const u8) ParseError!f32 {
+    const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
+    if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return error.InvalidValue;
+    return parsed;
+}
+
 pub fn parseMethod(value: []const u8) ParseError!Method {
     if (std.mem.eql(u8, value, "hardmask-contrast")) return .hardmask_contrast;
     if (std.mem.eql(u8, value, "softmask-contrast")) return .softmask_contrast;
     if (std.mem.eql(u8, value, "pyramid-contrast")) return .pyramid_contrast;
+    if (std.mem.eql(u8, value, "hybrid-pyramid-contrast")) return .hybrid_pyramid_contrast;
     return error.InvalidValue;
 }
 
