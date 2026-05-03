@@ -26,6 +26,9 @@
           pkgs.libgpiod
           pkgs.panotools
           pkgs.libexif
+          pkgs.vigra
+          pkgs.gsl
+          pkgs.lcms2
           pkgs.pffft
           pkgs.libjpeg_turbo
           pkgs.libpng

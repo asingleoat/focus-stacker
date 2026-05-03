@@ -4,6 +4,7 @@ const image_io = core.image_io;
 const profiler = core.profiler;
 const masks = @import("masks.zig");
 const debug = @import("debug.zig");
+const Vec3 = @Vector(3, f32);
 
 pub const ScalarLevel = struct {
     width: u32,
@@ -788,52 +789,8 @@ fn expandRgb(
     dst: []f32,
     jobs: usize,
 ) (std.mem.Allocator.Error || std.Thread.SpawnError)!void {
-    const worker_count = effectiveWorkerCount(jobs, dst_h);
-    if (worker_count == 1) {
-        const storage = try allocator.alloc(f32, 4 * @as(usize, dst_w) * 3);
-        defer allocator.free(storage);
-        expandRgbRowsSequential(dst_w, dst_h, src_w, src_h, src, dst, 0, dst_h, storage);
-        return;
-    }
-    const row_storage_len = 4 * @as(usize, dst_w) * 3;
-    const storage = try allocator.alloc(f32, row_storage_len * worker_count);
-    defer allocator.free(storage);
-    const threads = try allocator.alloc(std.Thread, worker_count - 1);
-    defer allocator.free(threads);
-    var tasks = try allocator.alloc(ExpandRgbTask, worker_count - 1);
-    defer allocator.free(tasks);
-    const rows_per_worker = std.math.divCeil(usize, @as(usize, dst_h), worker_count) catch unreachable;
-    var started_threads: usize = 0;
-    errdefer for (threads[0..started_threads]) |thread| thread.join();
-    for (threads, 0..) |*thread, i| {
-        const start_row = @min((i + 1) * rows_per_worker, @as(usize, dst_h));
-        const end_row = @min((i + 2) * rows_per_worker, @as(usize, dst_h));
-        tasks[i] = .{
-            .dst_w = dst_w,
-            .dst_h = dst_h,
-            .src_w = src_w,
-            .src_h = src_h,
-            .src = src,
-            .dst = dst,
-            .start_row = @as(u32, @intCast(start_row)),
-            .end_row = @as(u32, @intCast(end_row)),
-            .storage = storage[(i + 1) * row_storage_len .. (i + 2) * row_storage_len],
-        };
-        thread.* = try std.Thread.spawn(.{}, expandRgbThread, .{&tasks[i]});
-        started_threads += 1;
-    }
-    expandRgbRowsSequential(
-        dst_w,
-        dst_h,
-        src_w,
-        src_h,
-        src,
-        dst,
-        0,
-        @as(u32, @intCast(@min(rows_per_worker, @as(usize, dst_h)))),
-        storage[0..row_storage_len],
-    );
-    for (threads) |thread| thread.join();
+    _ = jobs;
+    return expandRgbExactNoWrap(allocator, dst_w, dst_h, src_w, src_h, src, dst);
 }
 
 fn reduceScalarRowsSequential(
@@ -1074,6 +1031,215 @@ fn expandRgbRowsSequential(
             }
         }
     }
+}
+
+fn loadVec3(pixels: []const f32, pixel_index: usize) Vec3 {
+    const base = pixel_index * 3;
+    return .{ pixels[base + 0], pixels[base + 1], pixels[base + 2] };
+}
+
+fn storeVec3(pixels: []f32, pixel_index: usize, value: Vec3) void {
+    const base = pixel_index * 3;
+    pixels[base + 0] = value[0];
+    pixels[base + 1] = value[1];
+    pixels[base + 2] = value[2];
+}
+
+fn writeExpandNoWrapPixel(dst: []f32, dst_w: u32, x: u32, y: u32, value: Vec3) void {
+    storeVec3(dst, @as(usize, y) * @as(usize, dst_w) + @as(usize, x), value);
+}
+
+fn expandRgbExactNoWrap(
+    allocator: std.mem.Allocator,
+    dst_w: u32,
+    dst_h: u32,
+    src_w: u32,
+    src_h: u32,
+    src: []const f32,
+    dst: []f32,
+) std.mem.Allocator.Error!void {
+    @memset(dst, 0);
+    if (src_w == 0 or src_h == 0) return;
+
+    const src_w_usize = @as(usize, src_w);
+    var sc0a = try allocator.alloc(Vec3, src_w_usize + 1);
+    defer allocator.free(sc0a);
+    var sc0b = try allocator.alloc(Vec3, src_w_usize + 1);
+    defer allocator.free(sc0b);
+    var sc1a = try allocator.alloc(Vec3, src_w_usize + 1);
+    defer allocator.free(sc1a);
+    var sc1b = try allocator.alloc(Vec3, src_w_usize + 1);
+    defer allocator.free(sc1b);
+    @memset(sc0a, @splat(0.0));
+    @memset(sc0b, @splat(0.0));
+    @memset(sc1a, @splat(0.0));
+    @memset(sc1b, @splat(0.0));
+
+    const dst_w_even = (dst_w & 1) == 0;
+    const dst_h_even = (dst_h & 1) == 0;
+    const zero: Vec3 = @splat(0.0);
+
+    {
+        var sr0 = loadVec3(src, 0);
+        var sr1 = zero;
+        var srcx: usize = 1;
+        while (srcx < src_w_usize) : (srcx += 1) {
+            const current = loadVec3(src, srcx);
+            sc0a[srcx] = sr1 + @as(Vec3, @splat(6.0)) * sr0 + current;
+            sc0b[srcx] = @as(Vec3, @splat(4.0)) * (sr0 + current);
+            sc1a[srcx] = zero;
+            sc1b[srcx] = zero;
+            sr1 = sr0;
+            sr0 = current;
+        }
+        sc0a[src_w_usize] = sr1 + @as(Vec3, @splat(6.0)) * sr0;
+        sc0b[src_w_usize] = @as(Vec3, @splat(4.0)) * sr0;
+        sc1a[src_w_usize] = zero;
+        sc1b[src_w_usize] = zero;
+    }
+
+    if (src_h == 1) {
+        if (src_w == 1) {
+            const out00 = sc1a[1] + @as(Vec3, @splat(6.0)) * sc0a[1];
+            writeExpandNoWrapPixel(dst, dst_w, 0, 0, out00 / @as(Vec3, @splat(36.0)));
+            if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, 1, 0, (sc1b[1] + @as(Vec3, @splat(6.0)) * sc0b[1]) / @as(Vec3, @splat(24.0)));
+            if (dst_h_even) {
+                writeExpandNoWrapPixel(dst, dst_w, 0, 1, sc0a[1] / @as(Vec3, @splat(6.0)));
+                if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, 1, 1, sc0b[1] / @as(Vec3, @splat(4.0)));
+            }
+            return;
+        }
+
+        var srcx: usize = 1;
+        var dx: u32 = 0;
+        while (srcx < src_w_usize) : (srcx += 1) {
+            const out00 = (sc1a[srcx] + @as(Vec3, @splat(6.0)) * sc0a[srcx]) / @as(Vec3, @splat(if (srcx == 1) 42.0 else 48.0));
+            const out10 = (sc1b[srcx] + @as(Vec3, @splat(6.0)) * sc0b[srcx]) / @as(Vec3, @splat(48.0));
+            writeExpandNoWrapPixel(dst, dst_w, dx, 0, out00);
+            dx += 1;
+            writeExpandNoWrapPixel(dst, dst_w, dx, 0, out10);
+            dx += 1;
+            if (dst_h_even) {
+                const out01 = sc0a[srcx] / @as(Vec3, @splat(if (srcx == 1) 7.0 else 8.0));
+                const out11 = sc0b[srcx] / @as(Vec3, @splat(8.0));
+                writeExpandNoWrapPixel(dst, dst_w, dx - 2, 1, out01);
+                writeExpandNoWrapPixel(dst, dst_w, dx - 1, 1, out11);
+            }
+        }
+
+        const srcx_end = src_w_usize;
+        writeExpandNoWrapPixel(dst, dst_w, dx, 0, (sc1a[srcx_end] + @as(Vec3, @splat(6.0)) * sc0a[srcx_end]) / @as(Vec3, @splat(49.0)));
+        if (dst_w_even) {
+            writeExpandNoWrapPixel(dst, dst_w, dx + 1, 0, (sc1b[srcx_end] + @as(Vec3, @splat(6.0)) * sc0b[srcx_end]) / @as(Vec3, @splat(28.0)));
+        }
+        if (dst_h_even) {
+            writeExpandNoWrapPixel(dst, dst_w, dx, 1, sc0a[srcx_end] / @as(Vec3, @splat(7.0)));
+            if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, dx + 1, 1, sc0b[srcx_end] / @as(Vec3, @splat(4.0)));
+        }
+        return;
+    }
+
+    var srcy: usize = 1;
+    while (srcy < src_h_usize(src_h)) : (srcy += 1) {
+        var sr0 = loadVec3(src, srcy * src_w_usize);
+        var sr1 = zero;
+        var dx: u32 = 0;
+        const top_row = @as(u32, @intCast((srcy - 1) * 2));
+        const bottom_row = top_row + 1;
+
+        var srcx: usize = 1;
+        while (srcx < src_w_usize) : (srcx += 1) {
+            const current = loadVec3(src, srcy * src_w_usize + srcx);
+            var out00 = sc1a[srcx] + @as(Vec3, @splat(6.0)) * sc0a[srcx];
+            var out10 = sc1b[srcx] + @as(Vec3, @splat(6.0)) * sc0b[srcx];
+            var out01 = sc0a[srcx];
+            var out11 = sc0b[srcx];
+            sc1a[srcx] = sc0a[srcx];
+            sc1b[srcx] = sc0b[srcx];
+            sc0a[srcx] = sr1 + @as(Vec3, @splat(6.0)) * sr0 + current;
+            sc0b[srcx] = @as(Vec3, @splat(4.0)) * (sr0 + current);
+            sr1 = sr0;
+            sr0 = current;
+            out00 += sc0a[srcx];
+            out10 += sc0b[srcx];
+            out01 += sc0a[srcx];
+            out11 += sc0b[srcx];
+
+            const left_edge = srcx == 1;
+            const scale00: f32 = if (srcy == 1) (if (left_edge) 49.0 else 56.0) else (if (left_edge) 56.0 else 64.0);
+            const scale10: f32 = if (srcy == 1) 56.0 else 64.0;
+            const scale01: f32 = if (left_edge) 14.0 else 16.0;
+            const scale11: f32 = 16.0;
+
+            writeExpandNoWrapPixel(dst, dst_w, dx, top_row, out00 / @as(Vec3, @splat(scale00)));
+            dx += 1;
+            writeExpandNoWrapPixel(dst, dst_w, dx, top_row, out10 / @as(Vec3, @splat(scale10)));
+            dx += 1;
+            writeExpandNoWrapPixel(dst, dst_w, dx - 2, bottom_row, out01 / @as(Vec3, @splat(scale01)));
+            writeExpandNoWrapPixel(dst, dst_w, dx - 1, bottom_row, out11 / @as(Vec3, @splat(scale11)));
+        }
+
+        const srcx_end = src_w_usize;
+        var out00 = sc1a[srcx_end] + @as(Vec3, @splat(6.0)) * sc0a[srcx_end];
+        var out01 = sc0a[srcx_end];
+        var out10 = sc1b[srcx_end] + @as(Vec3, @splat(6.0)) * sc0b[srcx_end];
+        var out11 = sc0b[srcx_end];
+        sc1a[srcx_end] = sc0a[srcx_end];
+        sc1b[srcx_end] = sc0b[srcx_end];
+        sc0a[srcx_end] = sr1 + @as(Vec3, @splat(6.0)) * sr0;
+        sc0b[srcx_end] = @as(Vec3, @splat(4.0)) * sr0;
+        out00 += sc0a[srcx_end];
+        out01 += sc0a[srcx_end];
+        writeExpandNoWrapPixel(dst, dst_w, dx, top_row, out00 / @as(Vec3, @splat(if (srcy == 1) 49.0 else 56.0)));
+        writeExpandNoWrapPixel(dst, dst_w, dx, bottom_row, out01 / @as(Vec3, @splat(14.0)));
+        if (dst_w_even) {
+            out10 += sc0b[srcx_end];
+            out11 += sc0b[srcx_end];
+            writeExpandNoWrapPixel(dst, dst_w, dx + 1, top_row, out10 / @as(Vec3, @splat(if (srcy == 1) 28.0 else 32.0)));
+            writeExpandNoWrapPixel(dst, dst_w, dx + 1, bottom_row, out11 / @as(Vec3, @splat(8.0)));
+        }
+    }
+
+    const top_row = @as(u32, @intCast((src_h - 1) * 2));
+    const bottom_row = top_row + 1;
+    if (src_w == 1) {
+        const srcx = src_w_usize;
+        writeExpandNoWrapPixel(dst, dst_w, 0, top_row, (sc1a[srcx] + @as(Vec3, @splat(6.0)) * sc0a[srcx]) / @as(Vec3, @splat(42.0)));
+        if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, 1, top_row, (sc1b[srcx] + @as(Vec3, @splat(6.0)) * sc0b[srcx]) / @as(Vec3, @splat(28.0)));
+        if (dst_h_even) {
+            writeExpandNoWrapPixel(dst, dst_w, 0, bottom_row, sc0a[srcx] / @as(Vec3, @splat(6.0)));
+            if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, 1, bottom_row, sc0b[srcx] / @as(Vec3, @splat(4.0)));
+        }
+        return;
+    }
+
+    var dx: u32 = 0;
+    var srcx: usize = 1;
+    while (srcx < src_w_usize) : (srcx += 1) {
+        const scale00: f32 = if (srcx == 1) 49.0 else 56.0;
+        const scale10: f32 = 56.0;
+        const scale01: f32 = if (srcx == 1) 7.0 else 8.0;
+        const scale11: f32 = 8.0;
+        writeExpandNoWrapPixel(dst, dst_w, dx, top_row, (sc1a[srcx] + @as(Vec3, @splat(6.0)) * sc0a[srcx]) / @as(Vec3, @splat(scale00)));
+        dx += 1;
+        writeExpandNoWrapPixel(dst, dst_w, dx, top_row, (sc1b[srcx] + @as(Vec3, @splat(6.0)) * sc0b[srcx]) / @as(Vec3, @splat(scale10)));
+        dx += 1;
+        if (dst_h_even) {
+            writeExpandNoWrapPixel(dst, dst_w, dx - 2, bottom_row, sc0a[srcx] / @as(Vec3, @splat(scale01)));
+            writeExpandNoWrapPixel(dst, dst_w, dx - 1, bottom_row, sc0b[srcx] / @as(Vec3, @splat(scale11)));
+        }
+    }
+    const srcx_end = src_w_usize;
+    writeExpandNoWrapPixel(dst, dst_w, dx, top_row, (sc1a[srcx_end] + @as(Vec3, @splat(6.0)) * sc0a[srcx_end]) / @as(Vec3, @splat(49.0)));
+    if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, dx + 1, top_row, (sc1b[srcx_end] + @as(Vec3, @splat(6.0)) * sc0b[srcx_end]) / @as(Vec3, @splat(28.0)));
+    if (dst_h_even) {
+        writeExpandNoWrapPixel(dst, dst_w, dx, bottom_row, sc0a[srcx_end] / @as(Vec3, @splat(7.0)));
+        if (dst_w_even) writeExpandNoWrapPixel(dst, dst_w, dx + 1, bottom_row, sc0b[srcx_end] / @as(Vec3, @splat(4.0)));
+    }
+}
+
+fn src_h_usize(src_h: u32) usize {
+    return @as(usize, src_h);
 }
 
 const ReduceScalarTask = struct {
