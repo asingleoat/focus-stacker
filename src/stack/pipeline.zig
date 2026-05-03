@@ -133,56 +133,23 @@ fn fuseRemappedImages(
 
     switch (cfg.fuse_method) {
         .hardmask_contrast, .softmask_contrast => {
-            var active_count: usize = 0;
-            for (plan.ordered_indices.items) |image_index| {
-                if (!plan.remap_active.items[image_index]) continue;
-                active_count += 1;
-                if (cfg.verbose > 0) {
-                    std.debug.print("stack fuse: [{d}] remapping {s}\n", .{ active_count, images[image_index].path });
-                }
-
-                var src = try align_core.image_io.loadImage(allocator, images[image_index].path);
-                defer src.deinit(allocator);
-
-                var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
-                defer remapped.deinit(allocator);
-
-                if (output == null) {
-                    output = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
-                    const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
-                    try gray_buffer.resize(allocator, count);
-                    try support_buffer.resize(allocator, count);
-                    try weight_buffer.resize(allocator, count);
-                    switch (cfg.fuse_method) {
-                        .hardmask_contrast => {
-                            try best_weights.resize(allocator, count);
-                            @memset(best_weights.items, -std.math.inf(f32));
-                        },
-                        .softmask_contrast => {
-                            try smoothed_weight_buffer.resize(allocator, count);
-                            soft_blend = try fuse.blend.SoftBlendState.init(allocator, output.?.info);
-                        },
-                        .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
-                    }
-                    contrast_workspace = try fuse.contrast.Workspace.init(allocator, remapped.info.width, jobs);
-                }
-
-                try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
-                var weights = fuse.contrast.WeightMap{
-                    .width = remapped.info.width,
-                    .height = remapped.info.height,
-                    .pixels = weight_buffer.items,
-                };
-                switch (cfg.fuse_method) {
-                    .hardmask_contrast => try fuse.blend.updateWinners(allocator, &remapped, &weights, best_weights.items, &output.?, jobs),
-                    .softmask_contrast => {
-                        fuse.masks.applySupportInto(&remapped, weight_buffer.items);
-                        try fuse.masks.blurFiveTapInto(allocator, remapped.info.width, remapped.info.height, jobs, weight_buffer.items, smoothed_weight_buffer.items, weight_buffer.items);
-                        try fuse.blend.accumulateSoft(allocator, &remapped, weight_buffer.items, &soft_blend.?, jobs);
-                    },
-                    .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
-                }
-            }
+            try runRemappedSinglePass(
+                allocator,
+                cfg,
+                images,
+                plan,
+                poses,
+                roi,
+                jobs,
+                &best_weights,
+                &gray_buffer,
+                &support_buffer,
+                &weight_buffer,
+                &smoothed_weight_buffer,
+                &soft_blend,
+                &contrast_workspace,
+                &output,
+            );
             switch (cfg.fuse_method) {
                 .hardmask_contrast => {},
                 .softmask_contrast => fuse.blend.finalizeSoft(&soft_blend.?, &output.?),
@@ -190,29 +157,41 @@ fn fuseRemappedImages(
             }
         },
         .pyramid_contrast => {
-            try runPyramidStackFusion(allocator, cfg, images, plan, poses, roi, jobs, &gray_buffer, &support_buffer, &weight_buffer, &norm_weight_sums, &powered_weight_sums, &union_support, &output, &pyramid_accumulator);
-            const collapsed_info = fusedOutputInfo(output.?.info);
-            output.?.deinit(allocator);
-            output = try fuse.pyramid.collapseToImageWithJobsAndDebug(
+            output = try runCollapsedPyramidStackPass(
                 allocator,
-                collapsed_info,
-                &pyramid_accumulator.?,
+                cfg,
+                images,
+                plan,
+                poses,
+                roi,
                 jobs,
-                cfg.dump_masks_dir,
+                &gray_buffer,
+                &support_buffer,
+                &weight_buffer,
+                &norm_weight_sums,
+                &powered_weight_sums,
+                &union_support,
+                &pyramid_accumulator,
             );
         },
         .hybrid_pyramid_contrast => {
             var pyramid_cfg = cfg.*;
             pyramid_cfg.fuse_method = .pyramid_contrast;
-            try runPyramidStackFusion(allocator, &pyramid_cfg, images, plan, poses, roi, jobs, &gray_buffer, &support_buffer, &weight_buffer, &norm_weight_sums, &powered_weight_sums, &union_support, &output, &pyramid_accumulator);
-            const collapsed_info = fusedOutputInfo(output.?.info);
-            output.?.deinit(allocator);
-            output = try fuse.pyramid.collapseToImageWithJobsAndDebug(
+            output = try runCollapsedPyramidStackPass(
                 allocator,
-                collapsed_info,
-                &pyramid_accumulator.?,
+                &pyramid_cfg,
+                images,
+                plan,
+                poses,
+                roi,
                 jobs,
-                cfg.dump_masks_dir,
+                &gray_buffer,
+                &support_buffer,
+                &weight_buffer,
+                &norm_weight_sums,
+                &powered_weight_sums,
+                &union_support,
+                &pyramid_accumulator,
             );
 
             var soft_output = output.?;
@@ -225,39 +204,23 @@ fn fuseRemappedImages(
 
             var hardmask_cfg = cfg.*;
             hardmask_cfg.fuse_method = .hardmask_contrast;
-            var active_count: usize = 0;
-            for (plan.ordered_indices.items) |image_index| {
-                if (!plan.remap_active.items[image_index]) continue;
-                active_count += 1;
-                if (cfg.verbose > 0) {
-                    std.debug.print("stack fuse: [{d}] remapping {s}\n", .{ active_count, images[image_index].path });
-                }
-
-                var src = try align_core.image_io.loadImage(allocator, images[image_index].path);
-                defer src.deinit(allocator);
-
-                var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
-                defer remapped.deinit(allocator);
-
-                if (output == null) {
-                    output = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
-                    const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
-                    try gray_buffer.resize(allocator, count);
-                    try support_buffer.resize(allocator, count);
-                    try weight_buffer.resize(allocator, count);
-                    try best_weights.resize(allocator, count);
-                    @memset(best_weights.items, -std.math.inf(f32));
-                    contrast_workspace = try fuse.contrast.Workspace.init(allocator, remapped.info.width, jobs);
-                }
-
-                try computeWeightMapForRemapped(&hardmask_cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.?));
-                var weights = fuse.contrast.WeightMap{
-                    .width = remapped.info.width,
-                    .height = remapped.info.height,
-                    .pixels = weight_buffer.items,
-                };
-                try fuse.blend.updateWinners(allocator, &remapped, &weights, best_weights.items, &output.?, jobs);
-            }
+            try runRemappedSinglePass(
+                allocator,
+                &hardmask_cfg,
+                images,
+                plan,
+                poses,
+                roi,
+                jobs,
+                &best_weights,
+                &gray_buffer,
+                &support_buffer,
+                &weight_buffer,
+                &smoothed_weight_buffer,
+                &soft_blend,
+                &contrast_workspace,
+                &output,
+            );
 
             const merged = try fuse.pyramid.mergeHybridImages(
                 allocator,
@@ -277,6 +240,122 @@ fn fuseRemappedImages(
         std.debug.print("stack fuse: writing {s}\n", .{output_path});
     }
     try align_core.image_io.writeTiff(output_path, &output.?);
+}
+
+fn runRemappedSinglePass(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    images: []const align_core.sequence.InputImage,
+    plan: *const align_core.sequence.Plan,
+    poses: []const align_core.optimize.ImagePose,
+    roi: ?align_core.remap.Rect,
+    jobs: usize,
+    best_weights: *std.ArrayListUnmanaged(f32),
+    gray_buffer: *std.ArrayListUnmanaged(f32),
+    support_buffer: *std.ArrayListUnmanaged(f32),
+    weight_buffer: *std.ArrayListUnmanaged(f32),
+    smoothed_weight_buffer: *std.ArrayListUnmanaged(f32),
+    soft_blend: *?fuse.blend.SoftBlendState,
+    contrast_workspace: *?fuse.contrast.Workspace,
+    output: *?align_core.image_io.Image,
+) RunError!void {
+    var active_count: usize = 0;
+    for (plan.ordered_indices.items) |image_index| {
+        if (!plan.remap_active.items[image_index]) continue;
+        active_count += 1;
+        if (cfg.verbose > 0) {
+            std.debug.print("stack fuse: [{d}] remapping {s}\n", .{ active_count, images[image_index].path });
+        }
+
+        var src = try align_core.image_io.loadImage(allocator, images[image_index].path);
+        defer src.deinit(allocator);
+
+        var remapped = try align_core.remap.remapRigidImage(allocator, &src, poses[image_index], roi, jobs);
+        defer remapped.deinit(allocator);
+
+        if (output.* == null) {
+            output.* = try fuse.blend.allocateOutput(allocator, fusedOutputInfo(remapped.info));
+            const count = @as(usize, remapped.info.width) * @as(usize, remapped.info.height);
+            try gray_buffer.resize(allocator, count);
+            try support_buffer.resize(allocator, count);
+            try weight_buffer.resize(allocator, count);
+            switch (cfg.fuse_method) {
+                .hardmask_contrast => {
+                    try best_weights.resize(allocator, count);
+                    @memset(best_weights.items, -std.math.inf(f32));
+                },
+                .softmask_contrast => {
+                    try smoothed_weight_buffer.resize(allocator, count);
+                    soft_blend.* = try fuse.blend.SoftBlendState.init(allocator, output.*.?.info);
+                },
+                .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
+            }
+            contrast_workspace.* = try fuse.contrast.Workspace.init(allocator, remapped.info.width, jobs);
+        }
+
+        try computeWeightMapForRemapped(cfg, jobs, &remapped, gray_buffer.items, support_buffer.items, weight_buffer.items, &(contrast_workspace.*.?));
+        var weights = fuse.contrast.WeightMap{
+            .width = remapped.info.width,
+            .height = remapped.info.height,
+            .pixels = weight_buffer.items,
+        };
+        switch (cfg.fuse_method) {
+            .hardmask_contrast => try fuse.blend.updateWinners(allocator, &remapped, &weights, best_weights.items, &output.*.?, jobs),
+            .softmask_contrast => {
+                fuse.masks.applySupportInto(&remapped, weight_buffer.items);
+                try fuse.masks.blurFiveTapInto(allocator, remapped.info.width, remapped.info.height, jobs, weight_buffer.items, smoothed_weight_buffer.items, weight_buffer.items);
+                try fuse.blend.accumulateSoft(allocator, &remapped, weight_buffer.items, &soft_blend.*.?, jobs);
+            },
+            .pyramid_contrast, .hybrid_pyramid_contrast => unreachable,
+        }
+    }
+}
+
+fn runCollapsedPyramidStackPass(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    images: []const align_core.sequence.InputImage,
+    plan: *const align_core.sequence.Plan,
+    poses: []const align_core.optimize.ImagePose,
+    roi: ?align_core.remap.Rect,
+    jobs: usize,
+    gray_buffer: *std.ArrayListUnmanaged(f32),
+    support_buffer: *std.ArrayListUnmanaged(f32),
+    weight_buffer: *std.ArrayListUnmanaged(f32),
+    norm_weight_sums: *std.ArrayListUnmanaged(f32),
+    powered_weight_sums: *std.ArrayListUnmanaged(f32),
+    union_support: *std.ArrayListUnmanaged(f32),
+    pyramid_accumulator: *?fuse.pyramid.Accumulator,
+) RunError!align_core.image_io.Image {
+    var output: ?align_core.image_io.Image = null;
+    errdefer if (output) |*image| image.deinit(allocator);
+
+    try runPyramidStackFusion(
+        allocator,
+        cfg,
+        images,
+        plan,
+        poses,
+        roi,
+        jobs,
+        gray_buffer,
+        support_buffer,
+        weight_buffer,
+        norm_weight_sums,
+        powered_weight_sums,
+        union_support,
+        &output,
+        pyramid_accumulator,
+    );
+    const collapsed_info = fusedOutputInfo(output.?.info);
+    output.?.deinit(allocator);
+    return try fuse.pyramid.collapseToImageWithJobsAndDebug(
+        allocator,
+        collapsed_info,
+        &pyramid_accumulator.*.?,
+        jobs,
+        cfg.dump_masks_dir,
+    );
 }
 
 fn runPyramidStackFusion(
@@ -406,7 +485,7 @@ fn runPyramidStackFusion(
         );
     }
 
-        if (cfg.fuse_method == .hybrid_pyramid_contrast) {
+    if (cfg.fuse_method == .hybrid_pyramid_contrast) {
         if (cache_images) {
             for (cached_remapped.items, 0..) |*remapped, active_i| {
                 if (cache_weights) {
@@ -445,7 +524,7 @@ fn runPyramidStackFusion(
     if (cache_images) {
         for (cached_remapped.items, 0..) |*remapped, active_i| {
             if (cfg.verbose > 0) {
-                std.debug.print("stack fuse: [{d}] pyramid blend from cached remap\n", .{ active_i + 1 });
+                std.debug.print("stack fuse: [{d}] pyramid blend from cached remap\n", .{active_i + 1});
             }
             if (cache_weights) {
                 @memcpy(weight_buffer.items, cached_weights.items[active_i]);

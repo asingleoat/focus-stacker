@@ -69,7 +69,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
             }
         },
         .pyramid_contrast => {
-            try runPyramidPass(
+            output = try runCollapsedPyramidPass(
                 allocator,
                 cfg,
                 jobs,
@@ -80,23 +80,13 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 &norm_weight_sums,
                 &powered_weight_sums,
                 &union_support,
-                &output,
                 &pyramid_accumulator,
-            );
-            const collapsed_info = fusedOutputInfo(output.?.info);
-            output.?.deinit(allocator);
-            output = try pyramid.collapseToImageWithJobsAndDebug(
-                allocator,
-                collapsed_info,
-                &pyramid_accumulator.?,
-                jobs,
-                cfg.dump_masks_dir,
             );
         },
         .hybrid_pyramid_contrast => {
             var pyramid_cfg = cfg.*;
             pyramid_cfg.method = .pyramid_contrast;
-            try runPyramidPass(
+            output = try runCollapsedPyramidPass(
                 allocator,
                 &pyramid_cfg,
                 jobs,
@@ -107,17 +97,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
                 &norm_weight_sums,
                 &powered_weight_sums,
                 &union_support,
-                &output,
                 &pyramid_accumulator,
-            );
-            const collapsed_info = fusedOutputInfo(output.?.info);
-            output.?.deinit(allocator);
-            output = try pyramid.collapseToImageWithJobsAndDebug(
-                allocator,
-                collapsed_info,
-                &pyramid_accumulator.?,
-                jobs,
-                cfg.dump_masks_dir,
             );
 
             var soft_output = output.?;
@@ -162,6 +142,47 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!voi
         std.debug.print("focus fuse: writing {s}\n", .{cfg.output_path.?});
     }
     try image_io.writeTiff(cfg.output_path.?, &output.?);
+}
+
+fn runCollapsedPyramidPass(
+    allocator: std.mem.Allocator,
+    cfg: *const config.Config,
+    jobs: usize,
+    gray_buffer: *std.ArrayListUnmanaged(f32),
+    support_buffer: *std.ArrayListUnmanaged(f32),
+    weight_buffer: *std.ArrayListUnmanaged(f32),
+    contrast_workspace: *?contrast.Workspace,
+    norm_weight_sums: *std.ArrayListUnmanaged(f32),
+    powered_weight_sums: *std.ArrayListUnmanaged(f32),
+    union_support: *std.ArrayListUnmanaged(f32),
+    pyramid_accumulator: *?pyramid.Accumulator,
+) RunError!image_io.Image {
+    var output: ?image_io.Image = null;
+    errdefer if (output) |*image| image.deinit(allocator);
+
+    try runPyramidPass(
+        allocator,
+        cfg,
+        jobs,
+        gray_buffer,
+        support_buffer,
+        weight_buffer,
+        contrast_workspace,
+        norm_weight_sums,
+        powered_weight_sums,
+        union_support,
+        &output,
+        pyramid_accumulator,
+    );
+    const collapsed_info = fusedOutputInfo(output.?.info);
+    output.?.deinit(allocator);
+    return try pyramid.collapseToImageWithJobsAndDebug(
+        allocator,
+        collapsed_info,
+        &pyramid_accumulator.*.?,
+        jobs,
+        cfg.dump_masks_dir,
+    );
 }
 
 fn runSinglePass(
