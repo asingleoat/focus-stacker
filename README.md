@@ -159,13 +159,13 @@ Recommended starting points:
 
 ## Performance Snapshot
 
-Representative recent results on the `S004` dataset:
+Representative recent results on a real full-resolution focus-stack corpus:
 
-- full 143-image `S004`, full Zig path:
+- full 143-image stack of `7952x5304` JPEGs, full Zig path:
   - about `162s`
-- full 143-image `S004`, upstream align + `enfuse`:
+- same full 143-image `7952x5304` stack, upstream align + `enfuse`:
   - upstream aligner did not finish within `16+` minutes on the same configuration
-- 30-image `S004_0020..0049` slice:
+- 30-image slice from the same `7952x5304` corpus:
   - full Zig path: about `29.6s`
   - full upstream path: about `121.7s`
 
