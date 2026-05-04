@@ -17,9 +17,9 @@ These paths are licensed under GPL-3.0-only in this repository:
 The full GPL-3.0-only text is in `COPYING`.
 
 This bucket is the main project-authored implementation and support code. It is
-kept separate from the reference/oracle and bundled-upstream buckets below so
-that any future additional license grant for the original implementation can be
-made explicitly and narrowly.
+kept separate from the reference/oracle and optional upstream-reference
+buckets below so that any future additional license grant for the original
+implementation can be made explicitly and narrowly.
 
 2. Reference / oracle tooling
 

@@ -1,9 +1,15 @@
 # Third-Party And Upstream Licensing
 
-This repository can optionally recreate local upstream reference snapshots under
-`upstream/` via `scripts/fetch_upstream_refs.sh`. Those fetched trees do not
-inherit the main project-authored license grant just because they are used as
-local developer reference material in the same checkout.
+This repository does not currently redistribute upstream source snapshots in
+git. Instead, it can optionally recreate local upstream reference trees under
+`upstream/` via `scripts/fetch_upstream_refs.sh`.
+
+Those fetched trees:
+
+- remain under their own upstream licenses and notices
+- do not inherit the main project-authored license grant
+- are local developer reference material, not part of the normal product-path
+  build/test/run surface
 
 ## Upstream Hugin reference snapshot
 
