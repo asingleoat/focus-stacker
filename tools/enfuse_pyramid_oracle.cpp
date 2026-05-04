@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Upstream-facing oracle / reference helper for comparing the Zig fusion path
+// against vendored enfuse behavior. This file is intentionally kept in the
+// separate oracle/reference tooling bucket described in ../tools/README.md.
+
 #include <exception>
 #include <cstdio>
 #include <iostream>

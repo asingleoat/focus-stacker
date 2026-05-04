@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: GPL-3.0-only
+//
+// Upstream-facing oracle / reference helper for comparing the Zig matcher path
+// against vendored VIGRA/Hugin behavior. This file is intentionally kept in the
+// separate oracle/reference tooling bucket described in ../tools/README.md.
+
 #include <cctype>
 #include <fstream>
 #include <iomanip>

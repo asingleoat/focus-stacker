@@ -40,6 +40,12 @@ Useful docs:
 - [docs/probes.md](docs/probes.md): current probe/oracle/debug tooling and when to use each tool
 - [docs/enfuse-port-map.md](docs/enfuse-port-map.md): upstream `enfuse` implementation map used during the Zig fusion port
 
+Licensing:
+
+- [LICENSE](LICENSE): repository license map for original code, oracle tooling, and bundled upstream material
+- [COPYING](COPYING): GPL-3.0-only text for the main project-authored code bucket
+- [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md): bundled upstream and third-party license inventory
+
 Committed fixtures:
 
 - `tests/golden/s003_small/`: fast 2-frame/3-frame regression fixtures used by `zig build test`

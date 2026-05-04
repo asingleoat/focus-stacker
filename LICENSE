@@ -1,0 +1,53 @@
+focus_stack uses a mixed-license layout.
+
+1. Original project-authored code
+
+These paths are licensed under GPL-3.0-only in this repository:
+
+- `src/**/*.zig`
+- `scripts/*.sh`
+- `build.zig`
+- `flake.nix`
+- `flake.lock`
+- `README.md`
+- `docs/**`
+- `tests/**`
+- `vendor/smooth-numbers/**`
+
+The full GPL-3.0-only text is in `COPYING`.
+
+This bucket is the main project-authored implementation and support code. It is
+kept separate from the reference/oracle and bundled-upstream buckets below so
+that any future additional license grant for the original implementation can be
+made explicitly and narrowly.
+
+2. Reference / oracle tooling
+
+These files are developer tooling used to compare behavior against upstream
+implementations and are intentionally kept out of the "original
+project-authored" bucket above:
+
+- `tools/enfuse_pyramid_oracle.cpp`
+- `tools/vigra_oracle.cpp`
+- `tools/hugin_config.h`
+
+These files are licensed under GPL-3.0-only as separate reference/oracle
+tooling. See `tools/README.md`.
+
+3. Bundled third-party and upstream reference material
+
+These paths retain their own upstream licenses, notices, and provenance:
+
+- `upstream/**`
+
+See `THIRD_PARTY_LICENSES.md` and the license files bundled inside those trees.
+
+4. Notes on scope
+
+- A future permissive or dual-license grant for the original project-authored
+  implementation would not automatically apply to `tools/**` or `upstream/**`
+  unless stated explicitly.
+- `vendor/smooth-numbers/**` is treated as project-authored code in this
+  repository and included in the GPL-3.0-only bucket above. If that submodule is
+  distributed independently, it should carry an explicit license notice in its
+  own repository as well.
