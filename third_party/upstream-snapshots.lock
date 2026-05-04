@@ -1,0 +1,15 @@
+# Optional upstream reference snapshots.
+# Format:
+#   name|kind|target_dir|source|selector|tree_sha256
+#
+# kinds:
+#   archive        extract archive into upstream/
+#   archive-into   create target_dir, then extract archive inside it
+#   hg             clone Mercurial repo, update to selector, remove .hg, place at target_dir
+#
+# tree_sha256 is computed over the extracted tree contents with relative paths,
+# excluding VCS metadata and archive files.
+
+hugin|archive|upstream/hugin-2025.0.1|https://sourceforge.net/projects/hugin/files/hugin/hugin-2025.0/hugin-2025.0.1.tar.bz2/download|hugin-2025.0.1|7360ebe5b0c1cf2233f96051fe448dc82148437129665f48f0c8aaa11691be58
+enblend-enfuse|hg|upstream/enblend-enfuse-4.3-8243911d8684|https://hg.code.sf.net/p/enblend/code|8243911d8684|8c95c12c6b9dad13f72a81c0bfd653ceb8e354dbe9234f67a1c8869df1909362
+libpano13|archive-into|upstream/libpano13-2.9.23|https://sourceforge.net/projects/panotools/files/libpano13/libpano13-2.9.23/libpano13-2.9.23.tar.gz/download|libpano13-2.9.23|28a4c5dc215054cc444e3d8bd3582bd1f1bc77d56dc28ee9703e1c7629c4cf3b

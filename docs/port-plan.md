@@ -2,15 +2,21 @@
 
 ## Scope
 
-The target is a clean Zig port of Hugin's `align_image_stack`, using `hugin-2025.0.1` as the pinned behavioral reference.
+The target is a clean Zig port of Hugin's `align_image_stack`, using `hugin-2025.0.1` as the pinned behavioral reference when the optional local upstream snapshot is fetched.
 
-## Why a vendored release snapshot
+## Why a fetched release snapshot
 
 The official source distribution that `nixpkgs` consumes is a SourceForge release tarball, not a Git repository. Vendoring the same upstream snapshot gives us a deterministic reference without inventing a fake Git submodule workflow around Hugin's upstream release process.
 
+In the current repo layout, that reference tree is fetched on demand with:
+
+```sh
+./scripts/fetch_upstream_refs.sh
+```
+
 ## Reference decomposition
 
-The upstream implementation in `upstream/hugin-2025.0.1/src/tools/align_image_stack.cpp` naturally breaks into these stages:
+When the optional local upstream tree is present, the implementation in `upstream/hugin-2025.0.1/src/tools/align_image_stack.cpp` naturally breaks into these stages:
 
 1. CLI parsing and configuration validation.
 2. Input metadata loading and optional EV-based ordering.

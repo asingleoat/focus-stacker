@@ -7,7 +7,7 @@ This repo now has a fairly rich probe/debug surface. This document is the short 
 There are three classes of diagnostic tools here:
 
 - Zig probes: inspect or benchmark the port directly
-- upstream probes/oracles: compare against vendored upstream behavior
+- upstream probes/oracles: compare against fetched upstream behavior
 - local debug dumps: inspect masks, pyramid levels, or remap output visually
 
 Use the smallest tool that answers the question you actually have.
@@ -23,6 +23,13 @@ ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-match -- <args...>
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-live -- <args...>
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-remap -- <args...>
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-fuse-masks -- <args...>
+```
+
+Some upstream-facing probes and oracle tools assume the optional local
+`upstream/` reference tree has been populated first:
+
+```sh
+./scripts/fetch_upstream_refs.sh
 ```
 
 ## Active Zig Probes
@@ -50,12 +57,16 @@ Primary file:
 
 Purpose:
 
-- evaluate the vendored upstream optimizer path from the same PTO data
+- evaluate the fetched upstream optimizer path from the same PTO data
 
 Use it for:
 
 - parity checks against pano13 semantics
 - confirming whether a mismatch is in the Zig port or already in the chosen upstream reference path
+
+Requirement:
+
+- local upstream references fetched via `scripts/fetch_upstream_refs.sh`
 
 Primary file:
 

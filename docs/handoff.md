@@ -2,7 +2,7 @@
 
 ## Project Intent
 
-This repository is intended to become a faithful Zig port of Hugin's `align_image_stack`, using the vendored `hugin-2025.0.1` release as the behavioral reference.
+This repository is intended to become a faithful Zig port of Hugin's `align_image_stack`, using the optional local `hugin-2025.0.1` snapshot as the behavioral reference when upstream archaeology is needed.
 
 The goal is not just feature overlap. The goal is semantic parity:
 
@@ -18,13 +18,19 @@ Two constraints define the implementation direction:
 
 ## Reference Material
 
-Primary upstream references in this repo:
+Primary upstream references in a fetched local `upstream/` tree:
 
 - `upstream/hugin-2025.0.1/src/tools/align_image_stack.cpp`
 - `upstream/hugin-2025.0.1/doc/align_image_stack.pod`
 - `upstream/hugin-2025.0.1/src/hugin_base/panotools/PanoToolsInterface.cpp`
 - `upstream/hugin-2025.0.1/src/hugin_base/nona/SpaceTransform.cpp`
 - `upstream/hugin-2025.0.1/src/hugin_base/panodata/SrcPanoImage.cpp`
+
+Populate those references with:
+
+```sh
+./scripts/fetch_upstream_refs.sh
+```
 
 These matter for different reasons:
 

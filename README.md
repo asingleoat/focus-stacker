@@ -6,7 +6,7 @@
 - remap and aligned output in Zig
 - multiple in-tree fusion modes in Zig
 - optional fallback to external `enfuse`
-- vendored upstream reference/oracle code for parity and debugging work
+- optional fetched upstream reference/oracle code for parity and debugging work
 
 The practical end-to-end entrypoint is [scripts/stack_zig.sh](scripts/stack_zig.sh). The fastest full in-tree path is `focus_stack_zig`.
 
@@ -71,6 +71,27 @@ It can:
 - run the full Zig stacker
 - or run Zig alignment plus external `enfuse`
 - emit TIFF and JPEG outputs
+
+## Optional Upstream References
+
+Normal Zig build, test, and run workflows do not require a local `upstream/`
+tree.
+
+Populate the optional upstream reference snapshots only when you need:
+
+- `probe-upstream`
+- the upstream oracle tools in `tools/`
+- source archaeology against the pinned Hugin / Enblend / libpano13 snapshots
+
+Fetch them with:
+
+```sh
+./scripts/fetch_upstream_refs.sh
+```
+
+The pinned source definitions live in:
+
+- `third_party/upstream-snapshots.lock`
 
 ## Quick Start
 
@@ -208,7 +229,7 @@ Local review artifacts are typically written under `review_outputs/`, which is i
 - `tools/`
   - oracle/reference tooling, not product-path code
 - `upstream/`
-  - bundled upstream reference source snapshots
+  - optional fetched upstream reference snapshots, not committed product code
 - `vendor/smooth-numbers/`
   - separately versioned helper submodule, now pinned to its public GitHub remote
 - `tests/golden/`
@@ -230,7 +251,7 @@ Current structure:
 
 - project-authored Zig/product/support code: GPL-3.0-only
 - oracle/reference tooling under `tools/`: separate GPL-3.0-only bucket
-- bundled third-party code under `upstream/`: retains upstream licensing
+- fetched third-party code under `upstream/`: retains upstream licensing
 
 ## Notes
 

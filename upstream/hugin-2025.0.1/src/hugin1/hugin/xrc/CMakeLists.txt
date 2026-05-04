@@ -1,5 +1,0 @@
-FILE(GLOB XRCFILES *.xrc)
-
-INSTALL(FILES ${XRCFILES} DESTINATION ${HUGINDATADIR}/xrc)
-
-add_subdirectory(data)

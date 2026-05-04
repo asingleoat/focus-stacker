@@ -34,19 +34,20 @@ project-authored" bucket above:
 These files are licensed under GPL-3.0-only as separate reference/oracle
 tooling. See `tools/README.md`.
 
-3. Bundled third-party and upstream reference material
+3. Optional fetched third-party and upstream reference material
 
-These paths retain their own upstream licenses, notices, and provenance:
+When fetched locally with `scripts/fetch_upstream_refs.sh`, these paths retain
+their own upstream licenses, notices, and provenance:
 
 - `upstream/**`
 
-See `THIRD_PARTY_LICENSES.md` and the license files bundled inside those trees.
+See `THIRD_PARTY_LICENSES.md` and the license files inside those fetched trees.
 
 4. Notes on scope
 
 - A future permissive or dual-license grant for the original project-authored
-  implementation would not automatically apply to `tools/**` or `upstream/**`
-  unless stated explicitly.
+  implementation would not automatically apply to `tools/**` or to any fetched
+  `upstream/**` material unless stated explicitly.
 - `vendor/smooth-numbers/**` is treated as project-authored code in this
   repository and included in the GPL-3.0-only bucket above. If that submodule is
   distributed independently, it should carry an explicit license notice in its

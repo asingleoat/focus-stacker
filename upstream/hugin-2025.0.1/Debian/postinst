@@ -1,3 +1,0 @@
-#! /usr/bin/env sh
-ldconfig
-exit 0

@@ -1,33 +1,27 @@
 # Third-Party And Upstream Licensing
 
-This repository includes bundled reference material and upstream source
-snapshots. Those files do not inherit the main project-authored license grant
-just because they live in the same repository.
+This repository can optionally recreate local upstream reference snapshots under
+`upstream/` via `scripts/fetch_upstream_refs.sh`. Those fetched trees do not
+inherit the main project-authored license grant just because they are used as
+local developer reference material in the same checkout.
 
-## Upstream Hugin snapshot
+## Upstream Hugin reference snapshot
 
 - Path: `upstream/hugin-2025.0.1/`
 - Role: reference implementation and documentation for the Zig aligner port
 - License file in tree: `upstream/hugin-2025.0.1/COPYING.txt`
 
-## Upstream Enblend/Enfuse snapshot
+## Upstream Enblend/Enfuse reference snapshot
 
 - Path: `upstream/enblend-enfuse-4.3-8243911d8684/`
 - Role: reference implementation for the Zig fusion port
 - License file in tree: `upstream/enblend-enfuse-4.3-8243911d8684/COPYING`
 
-## Upstream libpano13 snapshot
+## Upstream libpano13 reference snapshot
 
 - Path: `upstream/libpano13-2.9.23/libpano13-2.9.23/`
 - Role: transform and optimizer reference material
 - License file in tree: `upstream/libpano13-2.9.23/libpano13-2.9.23/COPYING`
-
-## Partial VIGRA header snapshot
-
-- Path: `upstream/vigra-1.12.3/include/`
-- Role: small set of vendored upstream headers used by oracle/debug tooling
-- License notice location: in-file header notices inside the vendored VIGRA
-  headers, for example `upstream/vigra-1.12.3/include/vigra/convolution.hxx`
 
 ## Oracle / reference helper tools
 

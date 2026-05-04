@@ -49,6 +49,7 @@ tmp_e2e/
 
 # Local review / benchmark outputs
 .zig-cache-flake/
+upstream/
 bench_outputs/
 bench_outputs_fusebench/
 bench_outputs_probe/

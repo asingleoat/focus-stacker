@@ -6,6 +6,13 @@ bucket used by the main application.
 They exist to compare behavior against upstream implementations, dump upstream
 pyramid levels, and validate parity during porting work.
 
+Some of these tools assume the optional local `upstream/` reference tree has
+been populated with:
+
+```sh
+./scripts/fetch_upstream_refs.sh
+```
+
 In this repository they are licensed under GPL-3.0-only as a separate
 reference/oracle tooling bucket. That separation is intentional:
 

@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<svg width="22" height="22" version="1.0" xmlns="http://www.w3.org/2000/svg">
-  <rect y="2" width="22" height="17.501" fill="#80b3ff" fill-opacity=".99608" fill-rule="evenodd"/>
-  <g>
-    <path d="m-1.045e-7 13.5c3.3 2.7625 18.7-2.8437 22-0.040627l-2e-6 6.5406h-22v-6.5z" fill="#165016" fill-rule="evenodd"/>
-    <rect x="10.5" y="2" width="1" height="18" fill="#fff" opacity=".6"/>
-    <rect y="10.5" width="22" height="1" fill="#fff" opacity=".6"/>
-  </g>
-</svg>

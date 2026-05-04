@@ -4,6 +4,13 @@ Port `enfuse` into this repository as a cleanly separated Zig fusion subsystem t
 - stays modular enough to become a small standalone `enfuse`-like tool later
 - follows upstream `enfuse` semantics closely before we diverge for performance
 
+This document assumes the optional local `upstream/` reference tree has been
+populated with:
+
+```sh
+./scripts/fetch_upstream_refs.sh
+```
+
 **Current Why**
 On the practical 10-frame full-resolution `S004_0020..0029` workflow:
 - align/remap: about `9290 ms`
@@ -52,17 +59,17 @@ On the same clean aligned 10-frame full-resolution `S004_0020..0029` stack:
 
 **Upstream Snapshot**
 Vendored reference source:
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/enfuse.cc](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/enfuse.cc)
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/enfuse.h](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/enfuse.h)
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/blend.h](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/blend.h)
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/pyramid.h](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/pyramid.h)
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/assemble.h](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/assemble.h)
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/exposure_weight.h](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/exposure_weight.h)
-- [upstream/enblend-enfuse-4.3-8243911d8684/src/exposure_weight.cc](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/src/exposure_weight.cc)
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/enfuse.cc`
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/enfuse.h`
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/blend.h`
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/pyramid.h`
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/assemble.h`
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/exposure_weight.h`
+- `upstream/enblend-enfuse-4.3-8243911d8684/src/exposure_weight.cc`
 
 Reference docs:
-- [upstream/enblend-enfuse-4.3-8243911d8684/doc/enfuse-overview.tex](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/doc/enfuse-overview.tex)
-- [upstream/enblend-enfuse-4.3-8243911d8684/doc/focus-stack-decision-tree.dot](/home/tim/code/focus_stack/upstream/enblend-enfuse-4.3-8243911d8684/doc/focus-stack-decision-tree.dot)
+- `upstream/enblend-enfuse-4.3-8243911d8684/doc/enfuse-overview.tex`
+- `upstream/enblend-enfuse-4.3-8243911d8684/doc/focus-stack-decision-tree.dot`
 
 Observed binary in this environment:
 - `enfuse 4.3-8243911d8684`

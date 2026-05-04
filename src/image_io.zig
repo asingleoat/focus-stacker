@@ -736,27 +736,27 @@ fn findExifEntry(exif_data: ?*c.ExifData, tag: c.ExifTag) ?*c.ExifEntry {
     return null;
 }
 
-test "png metadata and decode use vendored upstream icon" {
+test "png metadata and decode use local fixture" {
     const allocator = std.testing.allocator;
-    const info = try loadInfo(allocator, "upstream/hugin-2025.0.1/platforms/linux/icons/hugin_16.png");
+    const info = try loadInfo(allocator, "tests/fixtures/rgba_1x1.png");
     try std.testing.expectEqual(Format.png, info.format);
-    try std.testing.expectEqual(@as(u32, 16), info.width);
-    try std.testing.expectEqual(@as(u32, 16), info.height);
+    try std.testing.expectEqual(@as(u32, 1), info.width);
+    try std.testing.expectEqual(@as(u32, 1), info.height);
     try std.testing.expectEqual(ColorModel.rgb, info.color_model);
     try std.testing.expectEqual(@as(u8, 1), info.extra_channels);
 
-    var image = try loadImage(allocator, "upstream/hugin-2025.0.1/platforms/linux/icons/hugin_16.png");
+    var image = try loadImage(allocator, "tests/fixtures/rgba_1x1.png");
     defer image.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u32, 16), image.info.width);
+    try std.testing.expectEqual(@as(u32, 1), image.info.width);
     try std.testing.expectEqual(@as(u8, 1), image.info.extra_channels);
     switch (image.pixels) {
-        .u8 => |pixels| try std.testing.expectEqual(@as(usize, 16 * 16 * 4), pixels.len),
+        .u8 => |pixels| try std.testing.expectEqual(@as(usize, 4), pixels.len),
         .u16 => |_| return error.UnsupportedPixelFormat,
     }
 }
 
-test "jpeg metadata and decode use vendored upstream fixture" {
+test "jpeg metadata and decode use local golden fixture" {
     const allocator = std.testing.allocator;
     const info = try loadInfo(allocator, "tests/golden/s003_small/0001.jpg");
     try std.testing.expectEqual(Format.jpeg, info.format);
