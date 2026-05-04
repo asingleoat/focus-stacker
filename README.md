@@ -1,67 +1,243 @@
 # focus_stack
 
-This repository now includes:
+`focus_stack` is a Zig-based focus stacking pipeline with:
 
-- A vendored upstream reference snapshot of Hugin `align_image_stack` at `upstream/hugin-2025.0.1/`
-- A Zig scaffold for the port in `src/`
-- A short porting plan in `docs/port-plan.md`
-- Ported planning stages for sequence ordering, pair generation, remap-reference handling, and optimizer-variable selection
-- Pure-Zig coarse feature detection and coarse control-point matching over reduced grayscale image pairs
-- A second-pass pure-Zig full-resolution refinement stage for coarse matches
-- A pure-Zig iterative camera-model pose solve with residual-threshold pruning
-- Pure-Zig remap/PTO output for rigid and first-pass lens-term warps, including a basic overlap crop path for `-C`
-- A switchable in-tree Zig fusion subsystem for focus stacking:
-  - `hardmask-contrast`: fast contrast-weight winner selection
-  - `softmask-contrast`: soft-mask blend using a 5-tap Burt-Adelson-style blur on contrast masks
-  - `pyramid-contrast`: first-pass multiresolution blend with Gaussian mask pyramids and Laplacian image pyramids
-  - `hybrid-pyramid-contrast`: opt-in sharpened pyramid variant with tunable extra sharpness
+- pair alignment and global solve in Zig
+- remap and aligned output in Zig
+- multiple in-tree fusion modes in Zig
+- optional fallback to external `enfuse`
+- vendored upstream reference/oracle code for parity and debugging work
 
-Current practical defaults:
+The practical end-to-end entrypoint is [scripts/stack_zig.sh](scripts/stack_zig.sh). The fastest full in-tree path is `focus_stack_zig`.
 
-- `focus_stack_zig` / `focus_fuse_zig` keep a conservative internal default of `hardmask-contrast`
-- `scripts/stack_zig.sh` defaults to external `enfuse`
-- the best current in-tree quality baseline is `pyramid-contrast`
-- `hybrid-pyramid-contrast` is experimental and intentionally opt-in
+## Current State
 
-Useful commands:
+This is no longer just a scaffold or partial port. The current codebase supports real-world focus-stack runs with:
+
+- reduced-image feature detection and pair matching
+- alternative pair-alignment strategies:
+  - `hugin-ncc`
+  - `phasecorr-seeded`
+  - `phasecorr-locked`
+- global pose optimization with a chain-structured large-stack path
+- aligned remap output with support alpha
+- in-tree focus fusion modes:
+  - `hardmask-contrast`
+  - `softmask-contrast`
+  - `pyramid-contrast`
+  - `hybrid-pyramid-contrast`
+- memory-aware worker and cache limiting via `--memory-fraction`
+
+The current in-tree quality baseline is `pyramid-contrast`. The hybrid mode is intentionally opt-in and exists for subject-specific sharpness experiments.
+
+## Practical Entry Points
+
+### `focus_stack_zig`
+
+Align, remap, and fuse in-process without aligned-TIFF round-tripping.
+
+Useful for:
+
+- fastest full Zig workflow
+- real benchmark runs
+- in-tree fusion experiments
+
+### `focus_fuse_zig`
+
+Fuse an already aligned stack.
+
+Useful for:
+
+- fusion-only iteration
+- comparing Zig fusion modes on the same aligned inputs
+
+### `align_image_stack_zig`
+
+Alignment/remap-oriented CLI analogous to the upstream aligner workflow.
+
+Useful for:
+
+- parity work
+- PTO/remap investigation
+- external `enfuse` workflows
+
+### `scripts/stack_zig.sh`
+
+The easiest real-world driver.
+
+It can:
+
+- accept image lists or manifest JSON files
+- run the full Zig stacker
+- or run Zig alignment plus external `enfuse`
+- emit TIFF and JPEG outputs
+
+## Quick Start
+
+Build and test:
 
 ```sh
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build test
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build -Doptimize=ReleaseFast
+```
+
+Show CLI help:
+
+```sh
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build run -- -h
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build run-fuse -- --help
 ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build run-stack -- --help
-ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-zig -- lm-params /tmp/example.pto
-ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-upstream -- fvec /tmp/example.pto 1
 ```
 
-Useful docs:
+Run the practical wrapper:
 
-- [docs/fusion-modes.md](docs/fusion-modes.md): current fusion modes, tradeoffs, and recommended usage
-- [docs/probes.md](docs/probes.md): current probe/oracle/debug tooling and when to use each tool
-- [docs/enfuse-port-map.md](docs/enfuse-port-map.md): upstream `enfuse` implementation map used during the Zig fusion port
+```sh
+./scripts/stack_zig.sh --threads 32 --memory-fraction 0.5 path/to/images/*.jpg
+```
 
-Licensing:
+Run the full in-tree stacker directly:
 
-- [LICENSE](LICENSE): repository license map for original code, oracle tooling, and bundled upstream material
-- [COPYING](COPYING): GPL-3.0-only text for the main project-authored code bucket
-- [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md): bundled upstream and third-party license inventory
+```sh
+./zig-out/bin/focus_stack_zig \
+  --threads 32 \
+  --memory-fraction 0.5 \
+  --pair-align phasecorr-locked \
+  --fuse-method pyramid-contrast \
+  -c 24 -g 4 -t 5 \
+  -o out.tif \
+  path/to/images/*.jpg
+```
 
-Committed fixtures:
+Use the sharpened hybrid fusion mode explicitly:
 
-- `tests/golden/s003_small/`: fast 2-frame/3-frame regression fixtures used by `zig build test`
-- `tests/perf/s003_stack10_768/`: a 10-frame downsampled stack reserved for profiling, optimizer throughput work, and future parallelism experiments
+```sh
+./scripts/stack_zig.sh \
+  --fuse-method zig-hybrid-pyramid-contrast \
+  --hybrid-sharpness 0.35 \
+  path/to/images/*.jpg
+```
 
-Focused parity tools:
+## Defaults And Recommendations
 
-- `probe-zig`: evaluates the port's optimizer state and residual functions from a PTO file.
-- `probe-upstream`: evaluates pano13's `SetLMParams`, `SetAlignParams`, `EvaluateControlPointErrorAndComponents`, and `fcnPano` from the same PTO file.
-- Use them to compare `lm-params`, `image-vars`, `cp-error`, and `fvec` directly instead of diffing only final aligned outputs.
+Current defaults are intentionally conservative or compatibility-oriented:
 
-Current status: CLI validation and pre-alignment planning are implemented. Real image metadata loading is in place, JPEG/PNG/TIFF decode is available through `libjpeg-turbo`, `libpng`, `libtiff`, and `libexif`, and the current pure-Zig pipeline now covers grayscale conversion, pyramid reduction, Harris-style interest point detection, coarse normalized-correlation matching, a full-resolution refinement pass, an iterative camera-model solve with residual pruning, EXIF-derived initial HFOV inference, first-pass HFOV/radial/center-shift optimization terms with regularization, PTO writing, aligned TIFF remap output, and in-tree focus-stack fusion. This is still narrower than upstream's full Panotools-based optimizer and full `enfuse` pyramid stack, and HDR output is still pending.
+- `scripts/stack_zig.sh` defaults to external `enfuse`
+- direct Zig binaries still default to `hardmask-contrast`
+- the best current in-tree quality recommendation is `pyramid-contrast`
+- `hybrid-pyramid-contrast` is experimental and should be selected explicitly
 
-For practical focus-stack workflows:
-- `focus_fuse_zig` fuses an already aligned TIFF stack
-- `focus_stack_zig` aligns, remaps, and fuses in-process without aligned-TIFF round-tripping
-- `scripts/stack_zig.sh` is the easiest end-to-end driver for real stacks and lets you switch between external `enfuse` and in-tree Zig fusion modes
+Recommended starting points:
 
-If Zig's shared global cache becomes noisy in your environment, use `ZIG_GLOBAL_CACHE_DIR=.zig-global-cache` for reproducible local builds.
+- full Zig quality run:
+  - `--pair-align phasecorr-locked --fuse-method pyramid-contrast`
+- external reference-quality comparison:
+  - `scripts/stack_zig.sh --fuse-method enfuse`
+- hybrid sharpness exploration:
+  - `--fuse-method hybrid-pyramid-contrast --hybrid-sharpness 0.20`
+  - `--fuse-method hybrid-pyramid-contrast --hybrid-sharpness 0.35`
+
+## Performance Snapshot
+
+Representative recent results on the `S004` dataset:
+
+- full 143-image `S004`, full Zig path:
+  - about `162s`
+- full 143-image `S004`, upstream align + `enfuse`:
+  - upstream aligner did not finish within `16+` minutes on the same configuration
+- 30-image `S004_0020..0049` slice:
+  - full Zig path: about `29.6s`
+  - full upstream path: about `121.7s`
+
+These numbers are not a formal benchmark suite, but they reflect the current practical state of the codebase well: the Zig path is already competitive on medium stacks and dramatically faster on large stacks because of the chain-structured optimizer path.
+
+## Fusion Modes
+
+See [docs/fusion-modes.md](docs/fusion-modes.md) for the full current fusion-mode map.
+
+Short version:
+
+- `hardmask-contrast`
+  - fastest
+  - sharp
+  - more seam/winner artifacts
+- `softmask-contrast`
+  - mostly a comparison/debug mode now
+- `pyramid-contrast`
+  - best current in-tree quality baseline
+  - visually reviewed against `enfuse`
+- `hybrid-pyramid-contrast`
+  - opt-in tuning mode
+  - tries to trade some pyramid softness for added sharpness
+
+## Probes And Oracles
+
+This repo has an intentionally rich parity/debug surface.
+
+Useful build targets:
+
+```sh
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-zig -- <args...>
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-upstream -- <args...>
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-match -- <args...>
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-live -- <args...>
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-remap -- <args...>
+ZIG_GLOBAL_CACHE_DIR=.zig-global-cache zig build probe-fuse-masks -- <args...>
+```
+
+Use [docs/probes.md](docs/probes.md) for the short “which tool is for what” map.
+
+## Reference Checkpoints
+
+Two tags are especially useful when checking regressions:
+
+- `reference-checkpoint`
+  - visually reviewed checkpoint after the upstream-style no-wrap pyramid expand fix
+- `visually-inspected-checkpoint`
+  - earlier full-stack visual checkpoint
+
+Local review artifacts are typically written under `review_outputs/`, which is intentionally ignored by Git.
+
+## Repository Layout
+
+- `src/`
+  - main Zig implementation
+- `scripts/`
+  - practical workflow wrappers
+- `docs/`
+  - fusion, probe, and port/reference notes
+- `tools/`
+  - oracle/reference tooling, not product-path code
+- `upstream/`
+  - bundled upstream reference source snapshots
+- `vendor/smooth-numbers/`
+  - separately versioned helper submodule, now pinned to its public GitHub remote
+- `tests/golden/`
+  - small correctness fixtures
+- `tests/perf/`
+  - profiling fixtures
+
+## Licensing
+
+This is a mixed-license repo.
+
+See:
+
+- [LICENSE](LICENSE)
+- [COPYING](COPYING)
+- [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
+
+Current structure:
+
+- project-authored Zig/product/support code: GPL-3.0-only
+- oracle/reference tooling under `tools/`: separate GPL-3.0-only bucket
+- bundled third-party code under `upstream/`: retains upstream licensing
+
+## Notes
+
+- If Zig’s shared cache is noisy in your environment, use `ZIG_GLOBAL_CACHE_DIR=.zig-global-cache`.
+- Probe and review outputs are treated as local scratch data and are ignored by Git.
+- `smooth-numbers` is a real submodule, so fresh clones should use:
+
+```sh
+git clone --recurse-submodules <repo-url>
+```
