@@ -119,11 +119,11 @@ Use the sharpened hybrid fusion mode explicitly:
 
 ## Defaults And Recommendations
 
-Current defaults are intentionally conservative or compatibility-oriented:
+Current defaults:
 
-- `scripts/stack_zig.sh` defaults to external `enfuse`
-- direct Zig binaries still default to `hardmask-contrast`
-- the best current in-tree quality recommendation is `pyramid-contrast`
+- `scripts/stack_zig.sh` defaults to `zig-pyramid-contrast`
+- direct Zig binaries default to `pyramid-contrast`
+- `enfuse` remains available as the external reference path
 - `hybrid-pyramid-contrast` is experimental and should be selected explicitly
 
 Recommended starting points:

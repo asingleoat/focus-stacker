@@ -36,7 +36,7 @@ pub const Config = struct {
     verbose: u8 = 0,
     jobs: ?u32 = null,
     memory_fraction: f32 = memory_budget.default_memory_fraction,
-    method: Method = .hardmask_contrast,
+    method: Method = .pyramid_contrast,
     hybrid_sharpness: f32 = pyramid.default_hybrid_sharpness,
     hard_mask: bool = true,
     contrast_window_size: u32 = 5,
@@ -204,9 +204,9 @@ pub fn renderUsage(
         \\                               coarse-grained parallel working sets and caches
         \\                               (default: {d:.2}, 0 disables)
         \\  --method method            Fusion implementation:
-        \\                               hardmask-contrast (default)
+        \\                               hardmask-contrast
         \\                               softmask-contrast
-        \\                               pyramid-contrast
+        \\                               pyramid-contrast (default)
         \\                               hybrid-pyramid-contrast
         \\  --hybrid-sharpness x       Hybrid sharpening amount in [0,1]
         \\                               (default: {d:.2})

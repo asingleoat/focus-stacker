@@ -27,7 +27,7 @@ pub const Config = struct {
     contrast_window_size: u32 = 5,
     hybrid_sharpness: f32 = fuse_core.pyramid.default_hybrid_sharpness,
     hard_mask: bool = true,
-    fuse_method: fuse_core.config.Method = .hardmask_contrast,
+    fuse_method: fuse_core.config.Method = .pyramid_contrast,
     output_path: ?[]const u8 = null,
     dump_masks_dir: ?[]const u8 = null,
     input_files: std.ArrayListUnmanaged([]const u8) = .{},
@@ -233,9 +233,9 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\  -t num                     Control-point prune threshold in pixels (default: 5)
         \\  --contrast-window-size n   Local contrast window size (default: 5)
         \\  --fuse-method method       Fusion method:
-        \\                               hardmask-contrast (default)
+        \\                               hardmask-contrast
         \\                               softmask-contrast
-        \\                               pyramid-contrast
+        \\                               pyramid-contrast (default)
         \\                               hybrid-pyramid-contrast
         \\  --hybrid-sharpness x       Hybrid sharpening amount in [0,1]
         \\                               (default: {d:.2})

@@ -7,26 +7,27 @@ This repository currently has two end-to-end focus-stack fusion families:
 
 The current recommendation is:
 
-- use `enfuse` when you want the most established baseline
-- use `pyramid-contrast` when you want the best current in-tree quality baseline
+- use `pyramid-contrast` when you want the best current default path
+- use `enfuse` when you want the external upstream baseline
 - use `hybrid-pyramid-contrast` only when you are explicitly exploring a sharper variant
 
 ## CLI Surface
 
 Direct Zig binaries:
 
-- `focus_fuse_zig --method hardmask-contrast`
+- `focus_fuse_zig --method pyramid-contrast`
 - `focus_fuse_zig --method softmask-contrast`
 - `focus_fuse_zig --method pyramid-contrast`
 - `focus_fuse_zig --method hybrid-pyramid-contrast --hybrid-sharpness 0.35`
 
-- `focus_stack_zig --fuse-method hardmask-contrast`
+- `focus_stack_zig --fuse-method pyramid-contrast`
 - `focus_stack_zig --fuse-method softmask-contrast`
 - `focus_stack_zig --fuse-method pyramid-contrast`
 - `focus_stack_zig --fuse-method hybrid-pyramid-contrast --hybrid-sharpness 0.35`
 
 Script wrapper:
 
+- `./scripts/stack_zig.sh`
 - `./scripts/stack_zig.sh --fuse-method enfuse`
 - `./scripts/stack_zig.sh --fuse-method zig-hardmask-contrast`
 - `./scripts/stack_zig.sh --fuse-method zig-softmask-contrast`
@@ -146,13 +147,13 @@ Recommended starting points:
 
 ## Current Default Story
 
-There are intentionally different defaults in different entrypoints:
+Current defaults:
 
-- `scripts/stack_zig.sh` defaults to `enfuse`
-- direct Zig binaries still default to `hardmask-contrast`
-- `pyramid-contrast` is the best current in-tree quality recommendation
+- `scripts/stack_zig.sh` defaults to `zig-pyramid-contrast`
+- direct Zig binaries default to `pyramid-contrast`
+- `enfuse` remains available as the external reference path
 
-This is deliberate but easy to forget. If you care about quality comparisons inside Zig, pass the fusion mode explicitly.
+If you want a different tradeoff, pass the fusion mode explicitly.
 
 ## Quality Checkpoints
 
