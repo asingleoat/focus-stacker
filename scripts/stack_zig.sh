@@ -6,9 +6,9 @@
 # all-in-focus composite using align_image_stack_zig and a switchable fusion stage.
 #
 # Usage:
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] image1.jpg image2.jpg ...
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] S001_manifest.json
-#   ./scripts/stack_zig.sh [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] S001_manifest.json S002_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--memory-fraction X] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] image1.jpg image2.jpg ...
+#   ./scripts/stack_zig.sh [--threads N] [--memory-fraction X] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] S001_manifest.json
+#   ./scripts/stack_zig.sh [--threads N] [--memory-fraction X] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] S001_manifest.json S002_manifest.json
 #
 # Accepts any mix of image files and manifest JSON files.
 #
@@ -23,6 +23,7 @@ ALIGN_CONTROL_POINTS="${ALIGN_CONTROL_POINTS:-200}"
 ALIGN_GRID_SIZE="${ALIGN_GRID_SIZE:-7}"
 ALIGN_ERROR_THRESHOLD="${ALIGN_ERROR_THRESHOLD:-5}"
 ALIGN_THREADS="${ALIGN_THREADS:-}"
+ALIGN_MEMORY_FRACTION="${ALIGN_MEMORY_FRACTION:-0.5}"
 ALIGN_PAIR_ALIGN_METHOD="${ALIGN_PAIR_ALIGN_METHOD:-hugin-ncc}"
 ALIGN_FUSE_METHOD="${ALIGN_FUSE_METHOD:-enfuse}"
 ALIGN_HYBRID_SHARPNESS="${ALIGN_HYBRID_SHARPNESS:-0.35}"
@@ -99,6 +100,7 @@ main() {
     check_deps
 
     local threads="$ALIGN_THREADS"
+    local memory_fraction="$ALIGN_MEMORY_FRACTION"
     local pair_align_method="$ALIGN_PAIR_ALIGN_METHOD"
     local fuse_method="$ALIGN_FUSE_METHOD"
     local hybrid_sharpness="$ALIGN_HYBRID_SHARPNESS"
@@ -113,6 +115,15 @@ main() {
                 ;;
             --threads=*)
                 threads="${1#--threads=}"
+                shift
+                ;;
+            --memory-fraction)
+                [[ $# -ge 2 ]] || die "missing value for --memory-fraction"
+                memory_fraction="$2"
+                shift 2
+                ;;
+            --memory-fraction=*)
+                memory_fraction="${1#--memory-fraction=}"
                 shift
                 ;;
             --pair-align)
@@ -153,10 +164,11 @@ main() {
                 ;;
             --help|-h)
                 cat <<EOF
-usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] <images or manifests...>
+usage: $0 [--threads N] [--memory-fraction X] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] <images or manifests...>
 
 Options:
   --threads N          Limit align_image_stack_zig worker threads
+  --memory-fraction X  Use at most X of currently available RAM for coarse-grained parallel working sets and caches
   --pair-align METHOD  Pair alignment method: hugin-ncc, phasecorr-seeded, phasecorr-locked
   --fuse-method METHOD Fusion method: enfuse, zig-hardmask-contrast, zig-softmask-contrast, zig-pyramid-contrast, zig-hybrid-pyramid-contrast
   --hybrid-sharpness X Hybrid sharpened-pyramid strength in [0,1] (default: 0.35)
@@ -164,6 +176,7 @@ Options:
 
 Environment overrides:
   ALIGN_THREADS
+  ALIGN_MEMORY_FRACTION
   ALIGN_PAIR_ALIGN_METHOD
   ALIGN_FUSE_METHOD
   ALIGN_HYBRID_SHARPNESS
@@ -198,6 +211,8 @@ EOF
     if [[ -n "$threads" ]]; then
         [[ "$threads" =~ ^[1-9][0-9]*$ ]] || die "--threads must be a positive integer"
     fi
+    [[ "$memory_fraction" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "--memory-fraction must be a number in [0,1]"
+    awk 'BEGIN{v='"$memory_fraction"'; exit !(v >= 0.0 && v <= 1.0)}' || die "--memory-fraction must be in [0,1]"
     [[ "$pair_align_method" =~ ^(hugin-ncc|phasecorr-seeded|phasecorr-locked)$ ]] || \
         die "--pair-align must be one of: hugin-ncc, phasecorr-seeded, phasecorr-locked"
     [[ "$fuse_method" =~ ^(enfuse|zig-hardmask-contrast|zig-softmask-contrast|zig-pyramid-contrast|zig-hybrid-pyramid-contrast)$ ]] || \
@@ -205,7 +220,7 @@ EOF
     [[ "$hybrid_sharpness" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] || die "--hybrid-sharpness must be a number in [0,1]"
     awk 'BEGIN{v='"$hybrid_sharpness"'; exit !(v >= 0.0 && v <= 1.0)}' || die "--hybrid-sharpness must be in [0,1]"
 
-    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] <images or manifests...>"
+    [[ ${#positional[@]} -gt 0 ]] || die "usage: $0 [--threads N] [--memory-fraction X] [--pair-align METHOD] [--fuse-method METHOD] [--hybrid-sharpness X] [--dump-masks-dir DIR] <images or manifests...>"
 
     local name
     name="$(derive_name "${positional[0]}")"
@@ -250,6 +265,7 @@ EOF
     else
         echo "  Threads: auto"
     fi
+    echo "  Memory fraction: $memory_fraction"
     echo "  Pair align: $pair_align_method"
     echo "  Fuse method: $fuse_method"
     if [[ "$fuse_method" == "zig-hybrid-pyramid-contrast" ]]; then
@@ -279,6 +295,7 @@ EOF
         if [[ -n "$threads" ]]; then
             aligner_opts+=(--threads "$threads")
         fi
+        aligner_opts+=(--memory-fraction "$memory_fraction")
         aligner_opts+=(--pair-align "$pair_align_method")
 
         "$aligner_bin" \
@@ -322,6 +339,7 @@ EOF
         echo "--- Aligning and merging in-process with focus_stack_zig ---"
         local -a stacker_opts=(
             --pair-align "$pair_align_method"
+            --memory-fraction "$memory_fraction"
             --fuse-method "${fuse_method#zig-}"
             --hybrid-sharpness "$hybrid_sharpness"
             -c "$ALIGN_CONTROL_POINTS"

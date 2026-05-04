@@ -4,6 +4,7 @@ const features = @import("features.zig");
 const gray = @import("gray.zig");
 const image_io = @import("image_io.zig");
 const match = @import("match.zig");
+const memory_budget = @import("memory_budget.zig");
 const optimize = @import("optimize.zig");
 const pair_align = @import("pair_align.zig");
 const profiler = @import("profiler.zig");
@@ -136,7 +137,7 @@ pub fn run(allocator: std.mem.Allocator, cfg: *const config_mod.Config) RunError
             images,
             final_solve.poses,
             roi,
-            effectiveWorkJobs(cfg, countActiveRemapImages(plan.remap_active.items)),
+            effectiveRemapOutputJobs(cfg, countActiveRemapImages(plan.remap_active.items), images, roi),
         );
         if (cfg.verbose > 0) {
             const message = try std.fmt.allocPrint(allocator, "written aligned TIFF output with prefix {s}\n", .{aligned_prefix});
@@ -246,7 +247,7 @@ fn analyzePairsHuginNcc(
         .verbose = cfg.verbose,
     };
 
-    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len);
+    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len, images);
     if (pair_jobs == 1) {
         var workspace = match.Workspace.init(allocator);
         defer workspace.deinit();
@@ -345,7 +346,7 @@ fn analyzePairsPhaseCorrSeeded(
         .verbose = cfg.verbose,
     };
 
-    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len);
+    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len, images);
     if (pair_jobs == 1) {
         var workspace = match.Workspace.init(allocator);
         defer workspace.deinit();
@@ -409,7 +410,7 @@ fn analyzePairsPhaseCorrLocked(
         .verbose = cfg.verbose,
     };
 
-    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len);
+    const pair_jobs = effectivePairJobs(cfg, plan.pairs.items.len, images);
     if (pair_jobs == 1) {
         var workspace = match.Workspace.init(allocator);
         defer workspace.deinit();
@@ -644,8 +645,27 @@ fn cleanupWorkerResults(allocator: std.mem.Allocator, worker_results: []PairWork
     }
 }
 
-fn effectivePairJobs(cfg: *const config_mod.Config, pair_count: usize) usize {
-    return effectiveWorkJobs(cfg, pair_count);
+fn effectivePairJobs(cfg: *const config_mod.Config, pair_count: usize, images: []const sequence.InputImage) usize {
+    const requested = effectiveWorkJobs(cfg, pair_count);
+    if (images.len == 0) return requested;
+    const per_worker_bytes = estimatePairWorkerBytes(images[0].width, images[0].height, cfg.pyr_level);
+    const capped = memory_budget.capConcurrentUnits(requested, 0, per_worker_bytes, cfg.memory_fraction);
+    reportMemoryCap("pair analysis", cfg.verbose, requested, capped, per_worker_bytes, cfg.memory_fraction);
+    return capped;
+}
+
+fn effectiveRemapOutputJobs(
+    cfg: *const config_mod.Config,
+    active_count: usize,
+    images: []const sequence.InputImage,
+    roi: ?remap.Rect,
+) usize {
+    const requested = effectiveWorkJobs(cfg, active_count);
+    if (images.len == 0) return requested;
+    const per_worker_bytes = estimateRemapOutputTaskBytes(images[0], roi);
+    const capped = memory_budget.capConcurrentUnits(requested, 0, per_worker_bytes, cfg.memory_fraction);
+    reportMemoryCap("aligned remap output", cfg.verbose, requested, capped, per_worker_bytes, cfg.memory_fraction);
+    return capped;
 }
 
 fn effectiveWorkJobs(cfg: *const config_mod.Config, work_count: usize) usize {
@@ -668,6 +688,82 @@ fn countActiveRemapImages(remap_active: []const bool) usize {
         if (is_active) count += 1;
     }
     return count;
+}
+
+fn estimatePairWorkerBytes(width: u32, height: u32, pyr_level: u8) u64 {
+    const full_pixels = @as(u64, width) * @as(u64, height);
+    const reduced_width = reducedDimension(width, pyr_level);
+    const reduced_height = reducedDimension(height, pyr_level);
+    const reduced_pixels = @as(u64, reduced_width) * @as(u64, reduced_height);
+    const seed_extra_levels = match.phaseSeedExtraLevels(reduced_width, reduced_height);
+    const seed_width = reducedDimension(reduced_width, seed_extra_levels);
+    const seed_height = reducedDimension(reduced_height, seed_extra_levels);
+    const seed_pixels = if (seed_extra_levels > 0)
+        @as(u64, seed_width) * @as(u64, seed_height)
+    else
+        0;
+    const gray_pair_bytes = (full_pixels + reduced_pixels + seed_pixels) * @sizeOf(f32);
+    const workspace_overhead_bytes: u64 = 32 * 1024 * 1024;
+    return gray_pair_bytes * 2 + workspace_overhead_bytes;
+}
+
+fn estimateRemapOutputTaskBytes(image: sequence.InputImage, roi: ?remap.Rect) u64 {
+    const src_channels: u64 = switch (image.color_model) {
+        .grayscale => 1,
+        .rgb => 3,
+    };
+    const sample_bytes: u64 = switch (image.sample_type) {
+        .u8 => 1,
+        .u16 => 2,
+    };
+    const src_pixels = @as(u64, image.width) * @as(u64, image.height);
+    const src_bytes = src_pixels * src_channels * sample_bytes;
+
+    const out_width: u32 = if (roi) |rect|
+        @intCast(rect.right - rect.left)
+    else
+        image.width;
+    const out_height: u32 = if (roi) |rect|
+        @intCast(rect.bottom - rect.top)
+    else
+        image.height;
+    const dst_channels = src_channels + 1;
+    const dst_pixels = @as(u64, out_width) * @as(u64, out_height);
+    const dst_bytes = dst_pixels * dst_channels * sample_bytes;
+    return src_bytes + dst_bytes;
+}
+
+fn reducedDimension(value: u32, levels: u8) u32 {
+    var current = value;
+    var level: u8 = 0;
+    while (level < levels) : (level += 1) {
+        current = (current + 1) / 2;
+    }
+    return current;
+}
+
+fn reportMemoryCap(
+    stage_name: []const u8,
+    verbose: u8,
+    requested: usize,
+    capped: usize,
+    per_unit_bytes: u64,
+    fraction: f32,
+) void {
+    if (verbose == 0 or capped >= requested or !(fraction > 0)) return;
+    const available = memory_budget.availableMemoryBytes() orelse return;
+    const allowed = memory_budget.allowedBytes(fraction) orelse return;
+    std.debug.print(
+        "{s}: memory-aware cap reduced workers from {d} to {d} (per unit ~{d:.1} MiB, allowed {d:.1}/{d:.1} MiB of available RAM)\n",
+        .{
+            stage_name,
+            requested,
+            capped,
+            @as(f64, @floatFromInt(per_unit_bytes)) / (1024.0 * 1024.0),
+            @as(f64, @floatFromInt(allowed)) / (1024.0 * 1024.0),
+            @as(f64, @floatFromInt(available)) / (1024.0 * 1024.0),
+        },
+    );
 }
 
 fn nextPairIndex(state: *PairWorkerState) ?usize {

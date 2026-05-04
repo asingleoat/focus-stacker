@@ -19,6 +19,7 @@ pub const Config = struct {
     action: Action = .run,
     verbose: u8 = 0,
     jobs: ?u32 = null,
+    memory_fraction: f32 = align_core.memory_budget.default_memory_fraction,
     pair_align_method: align_core.pair_align.Method = .phasecorr_locked,
     align_control_points: u32 = 200,
     align_grid_size: u32 = 7,
@@ -39,6 +40,7 @@ pub const Config = struct {
         var cfg = align_core.config.Config{
             .verbose = self.verbose,
             .pair_jobs = self.jobs,
+            .memory_fraction = self.memory_fraction,
             .cp_error_threshold = self.align_error_threshold,
             .points_per_grid = self.align_control_points,
             .grid_size = self.align_grid_size,
@@ -132,6 +134,16 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) (ParseE
             cfg.jobs = try parsePositiveU32(args[i]);
             continue;
         }
+        if (std.mem.startsWith(u8, arg, "--memory-fraction=")) {
+            cfg.memory_fraction = try parseMemoryFraction(arg["--memory-fraction=".len..]);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--memory-fraction")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.memory_fraction = try parseMemoryFraction(args[i]);
+            continue;
+        }
         if (std.mem.startsWith(u8, arg, "--pair-align=")) {
             cfg.pair_align_method = align_core.pair_align.parseMethod(arg["--pair-align=".len..]) orelse return error.InvalidValue;
             continue;
@@ -211,6 +223,9 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\  -o, --output file          Output fused TIFF path
         \\  -v                         Verbose progress. Repeat for more detail
         \\  --threads num              Use up to num worker threads
+        \\  --memory-fraction x        Use at most x of currently available RAM for
+        \\                               coarse-grained parallel working sets and caches
+        \\                               (default: {d:.2}, 0 disables)
         \\  --pair-align method        Pair alignment method:
         \\                               hugin-ncc, phasecorr-seeded, phasecorr-locked (default)
         \\  -c num                     Control points per grid cell (default: 200)
@@ -234,7 +249,7 @@ pub fn renderUsage(allocator: std.mem.Allocator, exe_name: []const u8) std.mem.A
         \\  immediately without writing aligned intermediate TIFFs.
         \\
     ,
-        .{ exe_name, exe_name, fuse_core.pyramid.default_hybrid_sharpness },
+        .{ exe_name, exe_name, align_core.memory_budget.default_memory_fraction, fuse_core.pyramid.default_hybrid_sharpness },
     );
 }
 
@@ -244,6 +259,8 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
         std.fmt.bufPrint(&jobs_buf, "{d}", .{value}) catch unreachable
     else
         "auto";
+    var memory_fraction_buf: [32]u8 = undefined;
+    const memory_fraction = std.fmt.bufPrint(&memory_fraction_buf, "{d:.2}", .{cfg.memory_fraction}) catch unreachable;
 
     return std.fmt.allocPrint(
         allocator,
@@ -251,6 +268,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
         \\  inputs: {d}
         \\  verbose: {d}
         \\  jobs: {s}
+        \\  memory fraction: {s}
         \\  pair align: {s}
         \\  control points per cell: {d}
         \\  grid size: {d}
@@ -267,6 +285,7 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
             cfg.input_files.items.len,
             cfg.verbose,
             jobs,
+            memory_fraction,
             cfg.pair_align_method.cliName(),
             cfg.align_control_points,
             cfg.align_grid_size,
@@ -282,6 +301,12 @@ pub fn renderSummary(allocator: std.mem.Allocator, cfg: *const Config) std.mem.A
 }
 
 fn parseSharpness(value: []const u8) ParseError!f32 {
+    const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
+    if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return error.InvalidValue;
+    return parsed;
+}
+
+fn parseMemoryFraction(value: []const u8) ParseError!f32 {
     const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
     if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return error.InvalidValue;
     return parsed;

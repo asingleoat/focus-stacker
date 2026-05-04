@@ -1,4 +1,5 @@
 const std = @import("std");
+const memory_budget = @import("memory_budget.zig");
 const pair_align = @import("pair_align.zig");
 
 pub const latest_upstream_version = "hugin-2025.0.1";
@@ -21,6 +22,7 @@ pub const Config = struct {
     action: Action = .run,
     verbose: u8 = 0,
     pair_jobs: ?u32 = null,
+    memory_fraction: f32 = memory_budget.default_memory_fraction,
     cp_error_threshold: f64 = 3.0,
     corr_thresh: f64 = 0.9,
     points_per_grid: u32 = 8,
@@ -160,12 +162,15 @@ pub fn renderUsage(
         \\  --dont-remap-ref  Don't output the remapped reference image
         \\  --gpu             Use GPU for remapping
         \\  --threads num     Use up to num worker threads for pair analysis and remap
+        \\  --memory-fraction x
+        \\                    Use at most x of currently available RAM for coarse-grained
+        \\                    parallel working sets and caches (default: {d:.2}, 0 disables)
         \\  -h, --help        Display this help text
         \\
         \\Status: sequence planning, matching, full-resolution refinement, an optimize-vector-aware iterative camera/lens solve, PTO output, and aligned TIFF remap are ported; HDR output is not yet implemented.
         \\
     ,
-        .{ exe_name, latest_upstream_version, exe_name },
+        .{ exe_name, latest_upstream_version, exe_name, memory_budget.default_memory_fraction },
     );
 }
 
@@ -178,6 +183,8 @@ pub fn renderSummary(
         std.fmt.bufPrint(&pair_jobs_buf, "{d}", .{jobs}) catch unreachable
     else
         "auto";
+    var memory_fraction_buf: [32]u8 = undefined;
+    const memory_fraction = std.fmt.bufPrint(&memory_fraction_buf, "{d:.2}", .{cfg.memory_fraction}) catch unreachable;
 
     return std.fmt.allocPrint(
         allocator,
@@ -185,6 +192,7 @@ pub fn renderSummary(
         \\  inputs: {d}
         \\  verbose: {d}
         \\  pair jobs: {s}
+        \\  memory fraction: {s}
         \\  pyramid level: {d}
         \\  pair alignment: {s}
         \\  grid: {d}x{d}
@@ -199,6 +207,7 @@ pub fn renderSummary(
             cfg.input_files.items.len,
             cfg.verbose,
             pair_jobs,
+            memory_fraction,
             cfg.pyr_level,
             cfg.pair_alignment_method.cliName(),
             cfg.grid_size,
@@ -307,6 +316,10 @@ fn parseLongOption(
         cfg.pair_jobs = try parseBoundedInt(u32, try takeValue(args, index, attached_value), 1, null);
         return;
     }
+    if (std.mem.eql(u8, name, "memory-fraction")) {
+        cfg.memory_fraction = try parseMemoryFraction(try takeValue(args, index, attached_value));
+        return;
+    }
     if (std.mem.eql(u8, name, "pair-align")) {
         const value = try takeValue(args, index, attached_value);
         cfg.pair_alignment_method = pair_align.parseMethod(value) orelse return error.InvalidValue;
@@ -367,6 +380,12 @@ fn parseUnitFloat(value: []const u8) ParseError!f64 {
     return parsed;
 }
 
+fn parseMemoryFraction(value: []const u8) ParseError!f32 {
+    const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
+    if (parsed < 0 or parsed > 1.0) return error.InvalidValue;
+    return parsed;
+}
+
 fn parseBoundedInt(
     comptime T: type,
     value: []const u8,
@@ -387,7 +406,7 @@ fn parseBoundedInt(
 
 test "parse help action" {
     const allocator = std.testing.allocator;
-    const args = [_][]const u8{ "--help" };
+    const args = [_][]const u8{"--help"};
     var cfg = try parseArgs(allocator, &args);
     defer cfg.deinit(allocator);
 
@@ -423,6 +442,15 @@ test "parse threads option" {
     defer cfg.deinit(allocator);
 
     try std.testing.expectEqual(@as(?u32, 6), cfg.pair_jobs);
+}
+
+test "parse memory-fraction option" {
+    const allocator = std.testing.allocator;
+    const args = [_][]const u8{ "--memory-fraction=0.25", "-p", "out.pto", "a.tif", "b.tif" };
+    var cfg = try parseArgs(allocator, &args);
+    defer cfg.deinit(allocator);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), cfg.memory_fraction, 0.0001);
 }
 
 test "parse pair-align option" {

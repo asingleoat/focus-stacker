@@ -5,6 +5,7 @@ pub const features = @import("features.zig");
 pub const gray = @import("gray.zig");
 pub const image_io = @import("image_io.zig");
 pub const match = @import("match.zig");
+pub const memory_budget = @import("memory_budget.zig");
 pub const minpack = @import("minpack.zig");
 pub const optimize = @import("optimize.zig");
 pub const parity_pto = @import("parity_pto.zig");

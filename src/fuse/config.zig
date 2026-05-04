@@ -1,4 +1,5 @@
 const std = @import("std");
+const memory_budget = @import("align_stack_core").memory_budget;
 const pyramid = @import("pyramid.zig");
 
 pub const Action = enum {
@@ -34,6 +35,7 @@ pub const Config = struct {
     action: Action = .run,
     verbose: u8 = 0,
     jobs: ?u32 = null,
+    memory_fraction: f32 = memory_budget.default_memory_fraction,
     method: Method = .hardmask_contrast,
     hybrid_sharpness: f32 = pyramid.default_hybrid_sharpness,
     hard_mask: bool = true,
@@ -128,6 +130,18 @@ pub fn parseArgs(
             continue;
         }
 
+        if (std.mem.startsWith(u8, arg, "--memory-fraction=")) {
+            cfg.memory_fraction = try parseMemoryFraction(arg["--memory-fraction=".len..]);
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--memory-fraction")) {
+            i += 1;
+            if (i >= args.len) return error.MissingOptionValue;
+            cfg.memory_fraction = try parseMemoryFraction(args[i]);
+            continue;
+        }
+
         if (std.mem.startsWith(u8, arg, "--contrast-window-size=")) {
             cfg.contrast_window_size = try parseWindowSize(arg["--contrast-window-size=".len..]);
             continue;
@@ -186,6 +200,9 @@ pub fn renderUsage(
         \\  -o, --output file          Output fused TIFF path
         \\  -v                         Verbose progress. Repeat for more detail
         \\  --threads num              Use up to num worker threads
+        \\  --memory-fraction x        Use at most x of currently available RAM for
+        \\                               coarse-grained parallel working sets and caches
+        \\                               (default: {d:.2}, 0 disables)
         \\  --method method            Fusion implementation:
         \\                               hardmask-contrast (default)
         \\                               softmask-contrast
@@ -203,7 +220,7 @@ pub fn renderUsage(
         \\The full enfuse pyramid stack is not ported yet.
         \\
     ,
-        .{ exe_name, exe_name, pyramid.default_hybrid_sharpness },
+        .{ exe_name, exe_name, memory_budget.default_memory_fraction, pyramid.default_hybrid_sharpness },
     );
 }
 
@@ -216,6 +233,8 @@ pub fn renderSummary(
         std.fmt.bufPrint(&jobs_buf, "{d}", .{value}) catch unreachable
     else
         "auto";
+    var memory_fraction_buf: [32]u8 = undefined;
+    const memory_fraction = std.fmt.bufPrint(&memory_fraction_buf, "{d:.2}", .{cfg.memory_fraction}) catch unreachable;
 
     return std.fmt.allocPrint(
         allocator,
@@ -223,6 +242,7 @@ pub fn renderSummary(
         \\  inputs: {d}
         \\  verbose: {d}
         \\  jobs: {s}
+        \\  memory fraction: {s}
         \\  method: {s}
         \\  hybrid sharpness: {d:.3}
         \\  hard mask: {}
@@ -235,6 +255,7 @@ pub fn renderSummary(
             cfg.input_files.items.len,
             cfg.verbose,
             jobs,
+            memory_fraction,
             cfg.method.cliName(),
             cfg.hybrid_sharpness,
             cfg.hard_mask,
@@ -246,6 +267,12 @@ pub fn renderSummary(
 }
 
 fn parseSharpness(value: []const u8) ParseError!f32 {
+    const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
+    if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return error.InvalidValue;
+    return parsed;
+}
+
+fn parseMemoryFraction(value: []const u8) ParseError!f32 {
     const parsed = std.fmt.parseFloat(f32, value) catch return error.InvalidValue;
     if (!std.math.isFinite(parsed) or parsed < 0.0 or parsed > 1.0) return error.InvalidValue;
     return parsed;

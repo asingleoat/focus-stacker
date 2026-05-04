@@ -10,11 +10,12 @@ const debug = @import("debug.zig");
 const grayscale = @import("grayscale.zig");
 const io = @import("io.zig");
 const masks = @import("masks.zig");
+const memory_budget = core.memory_budget;
 const pyramid = @import("pyramid.zig");
 
 pub const RunError = anyerror;
-const max_cached_pyramid_bytes: usize = 2 * 1024 * 1024 * 1024;
-const max_cached_pyramid_total_bytes: usize = 4 * 1024 * 1024 * 1024;
+const max_cached_pyramid_bytes: u64 = 2 * 1024 * 1024 * 1024;
+const max_cached_pyramid_total_bytes: u64 = 4 * 1024 * 1024 * 1024;
 
 pub fn run(allocator: std.mem.Allocator, cfg: *const config.Config) RunError!void {
     const prof = profiler.scope("fuse.pipeline.run");
@@ -310,8 +311,10 @@ fn runPyramidPass(
             accumulator.* = try pyramid.Accumulator.init(allocator, image.info.width, image.info.height);
             workspace = try pyramid.Workspace.init(allocator, image.info.width, image.info.height);
             contrast_workspace.* = try contrast.Workspace.init(allocator, image.info.width, jobs);
-            cache_images = estimatedCacheBytes(image.info, input_count) <= max_cached_pyramid_bytes;
-            cache_weights = cache_images and estimatedCacheBytes(image.info, input_count) + estimatedWeightCacheBytes(image.info.width, image.info.height, input_count) <= max_cached_pyramid_total_bytes;
+            const image_cache_budget = memory_budget.cacheAllowanceBytes(cfg.memory_fraction, max_cached_pyramid_bytes);
+            const total_cache_budget = memory_budget.cacheAllowanceBytes(cfg.memory_fraction, max_cached_pyramid_total_bytes);
+            cache_images = estimatedCacheBytes(image.info, input_count) <= image_cache_budget;
+            cache_weights = cache_images and estimatedCacheBytes(image.info, input_count) + estimatedWeightCacheBytes(image.info.width, image.info.height, input_count) <= total_cache_budget;
             if (cfg.verbose > 0 and cache_images) {
                 std.debug.print("focus fuse: caching aligned inputs in memory for pyramid blend\n", .{});
                 if (cache_weights) {
@@ -441,17 +444,17 @@ fn runPyramidPass(
     }
 }
 
-fn estimatedCacheBytes(info: image_io.ImageInfo, image_count: usize) usize {
-    const sample_bytes: usize = switch (info.sample_type) {
+fn estimatedCacheBytes(info: image_io.ImageInfo, image_count: usize) u64 {
+    const sample_bytes: u64 = switch (info.sample_type) {
         .u8 => 1,
         .u16 => 2,
     };
-    const pixel_bytes = @as(usize, info.width) * @as(usize, info.height) * @as(usize, info.color_channels + info.extra_channels) * sample_bytes;
-    return pixel_bytes * image_count;
+    const pixel_bytes = @as(u64, info.width) * @as(u64, info.height) * @as(u64, info.color_channels + info.extra_channels) * sample_bytes;
+    return pixel_bytes * @as(u64, @intCast(image_count));
 }
 
-fn estimatedWeightCacheBytes(width: u32, height: u32, image_count: usize) usize {
-    return @as(usize, width) * @as(usize, height) * @sizeOf(f32) * image_count;
+fn estimatedWeightCacheBytes(width: u32, height: u32, image_count: usize) u64 {
+    return @as(u64, width) * @as(u64, height) * @sizeOf(f32) * @as(u64, @intCast(image_count));
 }
 
 fn dumpAndNormalizeCurrentWeights(
